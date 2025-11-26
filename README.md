@@ -143,11 +143,13 @@ The Agent treats external documentation as a **Level 2 Resource**.
 
 The `tgp` binary acts as a hypervisor. The Agent runs in **Untrusted User Space**. The Kernel enforces strict resource bounds and isolation boundaries to prevent "runaway intelligence" or accidental destruction.
 
-## 4.1 Execution Sandbox (Child Process)
-The Agent never spawns a shell directly. The Kernel invokes tools using `node:child_process` with strict options:
-*   **No Shell**: `shell: false` prevents command injection (`script.js; rm -rf /`).
-*   **CWD Lock**: The Current Working Directory is pinned to the SaaS Project Root.
-*   **STDIO**: Piped explicitly. No TTY access.
+## 4.1 Execution Sandbox (V8 Isolates)
+We do not use `child_process`. Node.js is not a sandbox.
+TGP uses **`isolated-vm`** to run tools in distinct V8 Contexts.
+
+*   **True Isolation**: Tools cannot access the host `process` object, `require`, or the filesystem.
+*   **The Syscall Bridge**: Tools interact with the world ONLY through the injected `tgp` global object (the stable ABI).
+*   **Snapshots**: Common libraries (Lodash, Zod) are compiled into a V8 Heap Snapshot once. Tool startup time is **< 5ms**.
 
 ## 4.2 Resource Quotas (The Kill Switch)
 To prevent infinite loops (`while(true)`) or memory leaks from crashing the tenant pod, the Kernel applies V8 and OS-level limits per execution.
@@ -225,19 +227,40 @@ How a local hack becomes a global feature:
 4.  **Review**: A Human Dev (or Senior Agent) merges it.
 5.  **Distribute**: Tenant B's agent pulls the latest `main` and now has the capability to analyze regional sales instantly.
 
-## 5.4 The "No-Hardcoding" Standard
+## 5.4 The "Pure Function" Law (AST Enforced)
 
-To support this ecosystem, the Linter enforces the **Generic Input Rule**:
-*   **Violation**: `const limit = 100;` (Hardcoded policy).
-*   **Compliant**: `const limit = parseInt(process.argv[2]) || 100;` (Configurable at runtime).
+To guarantee Data Sovereignty without a human auditor, the AST Linter enforces **Logic Purity**.
 
-Agents are rewarded for building "Universal Tools" rather than "One-off Scripts."
+1.  **No String Literals > 16 chars**: Prevents hardcoding CSVs, API keys, or specific customer emails.
+    *   *Violation*: `const user = "admin@tesla.com"`
+    *   *Allowed*: `const user = args.email`
+2.  **No Side Effects**: The Isolation Layer blocks all Network/FS calls not routed through the `tgp` syscall bridge.
 
-# 6. Integration Spec
+**The result:** A tool forged by Tenant A is mathematically incapable of leaking Tenant A's data, because the code cannot contain state, only logic.
+
+# 6. Governance Modes
+
+TGP operates in two distinct modes controlled by `TGP_MODE`.
+
+## 6.1 God Mode (Development)
+*   **Behavior**: `Forge -> Compile -> Execute`.
+*   **Latency**: Real-time.
+*   **Use Case**: Hackathons, rapid prototyping, dev environments.
+
+## 6.2 Gatekeeper Mode (Production)
+*   **Behavior**: `Forge -> Compile -> Pull Request`.
+*   **The "Human Break"**: The Agent cannot execute a *new* tool until a human (or CI pipeline) approves the signature.
+*   **Workflow**:
+    1.  User asks: "Analyze cohorts."
+    2.  Agent: "Tool missing. I have drafted `cohort-analysis.ts`. Requesting approval."
+    3.  Admin clicks "Approve" (GitHub API merge).
+    4.  Agent: "Tool merged. Executing now."
+
+# 7. Integration Spec
 
 TGP is designed to drop into any Node.js/TypeScript stack (Next.js, Express, NestJS) via a single CLI command. It bootstraps the "OS" and teaches your existing AI tools how to use it.
 
-## 6.1 The Bootstrap (`npx`)
+## 7.1 The Bootstrap (`npx`)
 
 Run this in your project root. It transforms a standard repository into a TGP-enabled environment.
 
@@ -252,7 +275,7 @@ npx tgp@latest init
 4.  **Config**: Generates a strongly-typed `tgp.config.ts`.
 5.  **Instruction**: Generates `.cursorrules` (or `.windsurfrules`) to align your IDE AI.
 
-## 6.2 Configuration (`tgp.config.ts`)
+## 7.2 Configuration (`tgp.config.ts`)
 
 The wizard generates this file. You review it to define the Sandbox boundaries.
 
@@ -280,11 +303,31 @@ export default defineTGPConfig({
   // 3. RUNTIME: Whitelisted libraries (No npm install allowed)
   allowedImports: [
     'drizzle-orm', 'date-fns', 'zod', 'csv-stringify'
-  ]
+  ],
+
+  // 4. SYNCHRONIZATION (The Hive Mind)
+  upstream: {
+    // The central "App Store" repo URL
+    remote: process.env.TGP_REMOTE_URL || 'https://github.com/my-org/tgp-global.git',
+
+    // Auth: System-level PAT (Personal Access Token)
+    auth: {
+      token: process.env.TGP_GIT_TOKEN,
+      username: 'tgp-bot' // Commits appear as this user
+    },
+
+    // Behavior: defined by the Governance Mode
+    // 'direct': Agent pushes to main (God Mode)
+    // 'pull-request': Agent pushes branch + opens PR (Gatekeeper Mode)
+    pushStrategy: process.env.NODE_ENV === 'production' ? 'pull-request' : 'direct',
+
+    // Frequency: How often to pull new capabilities from the Hive
+    pullIntervalSeconds: 300
+  }
 });
 ```
 
-## 6.3 The "Brain" Injection (Generated Prompts)
+## 7.3 The "Brain" Injection (Generated Prompts)
 
 The installer generates a system prompt file (e.g., `.cursorrules`) that instantly upgrades your IDE's LLM into a TGP-compliant engineer.
 
@@ -318,7 +361,7 @@ TGP is an architecture where you build your own standard library. instead of wri
 - NO hardcoded secrets. Use `process.env`.
 ```
 
-## 6.4 Runtime Usage (The SDK)
+## 7.4 Runtime Usage (The SDK)
 
 Once initialized, your application interacts with the Agent via the SDK.
 
