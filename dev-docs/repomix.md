@@ -1,14 +1,20 @@
+# Directory Structure
+```
+.gitignore
+README.md
+```
+
+# Files
+
+## File: .gitignore
+````
+# relay state
+#/.relay/
+````
+
+## File: README.md
+````markdown
 # 1. Manifesto
-
-# Table of Contents
-
-1. [Manifesto](#1-manifesto)
-2. [Architecture](#2-architecture)
-3. [The Protocol](#3-the-protocol)
-4. [Security Kernel](#4-security-kernel)
-5. [Multi-Tenancy](#5-multi-tenancy)
-6. [Governance Modes](#6-governance-modes)
-7. [Integration Spec](#7-integration-spec)
 
 **Treat the LLM as a CPU, not a Chatbot.**
 
@@ -28,40 +34,61 @@ We are building a self-extending runtime where the software writes itself in res
 
 # 2. Architecture
 
-TGP decouples the **Runtime (Host)** from the **Intelligence (Guest)** using a unified binary interface. The agent interacts exclusively through the `tgp` CLI, which acts as the Kernel.
+TGP decouples the **Runtime (Host)** from the **Intelligence (Guest)**. The agent operates within a strictly defined filesystem topology, guided by an injected configuration map.
 
 ## 2.1 The Filesystem Topology
 
-The agent views `./.tgp` as its root directory (Git Repo).
+The agent views `~/.tgp` as its root directory. This directory is a Git repository, serving as both the toolkit storage and the temporal audit log.
 
 ```bash
-./.tgp/
-├── .git/                  # MEMORY: Temporal audit log
-├── bin/                   # KERNEL: The compiled 'tgp' binary
+~/.tgp/
+├── .git/                  # MEMORY: Temporal audit log & version control
+├── core/                  # KERNEL: Immutable host utilities (Read-Only)
+│   ├── runner.ts          # Sandboxed child_process wrapper
+│   ├── linter.js          # AST validator (The Gatekeeper)
+│   └── .eslintrc.json     # Strict syntax rules
 ├── tools/                 # USER SPACE: Generated capabilities (Read-Write)
 │   ├── analytics/         # e.g., "churn-prediction.ts"
+│   ├── operations/        # e.g., "bulk-update-users.ts"
 │   └── reports/           # e.g., "generate-pdf.ts"
 └── meta.json              # REGISTRY: Fast lookup index
 ```
 
-## 2.2 The `tgp` Binary (Kernel)
+## 2.2 Configuration Injection (`TGP_CONFIG`)
 
-The agent is **never** permitted to spawn `node` or `child_process` directly. It must use the `tgp` binary, which encapsulates the security layer.
+The agent does not guess paths. The Host Application injects a read-only configuration object into the agent's environment variable `TGP_CONFIG`. This acts as the **Hardware Abstraction Layer (HAL)**.
 
-*   **`tgp run <script> [args]`**:
-    1.  **JIT Lint**: Automatically runs syntax/import checks before execution.
-    2.  **Sandbox**: Spawns V8 Isolate with restricted ENV.
-    3.  **Injection**: Loads `TGP_CONFIG` and injects DB connections.
-*   **`tgp check <script>`**:
-    *   Explicit dry-run verification (used during the "Forge" phase) without executing logic.
+**`tgp.config.json` (Injected by Host)**
+```json
+{
+  "app": {
+    "root": "/app",
+    "env": "production"
+  },
+  "db": {
+    "dialect": "postgres",
+    "schemaPath": "/app/src/db/schema.ts", // Agent imports this dynamically
+    "connectionVar": "DATABASE_URL"
+  },
+  "filesystem": {
+    "allowedDirs": ["/app/exports", "/tmp"],
+    "maxWriteSizeMB": 50
+  },
+  "libs": {
+    "whitelist": ["drizzle-orm", "date-fns", "pdfkit", "zod"]
+  }
+}
+```
 
-## 2.3 Configuration Injection (`TGP_CONFIG`)
+## 2.3 The Execution Boundary
 
-The Host Application injects a read-only configuration object acting as the **Hardware Abstraction Layer (HAL)**.
+The agent is **never** permitted to run `node script.js` directly. All execution flows through the **Core Runner**.
 
-Instead of hardcoding paths or connection strings, the Agent reads from this injected state to understand its environment (Database dialect, allowed read/write paths, and whitelisted libraries).
+1.  **Draft**: Agent writes code to `/tmp/draft.ts`.
+2.  **Lint**: Agent runs `node ~/.tgp/core/linter.js /tmp/draft.ts`.
+3.  **Execute**: Agent invokes `tsx ~/.tgp/core/runner.ts /tmp/draft.ts`.
 
-*See [Configuration](#72-configuration-tgpconfigts) for the full schema.*
+The `runner.ts` binary enforces the `TGP_CONFIG` constraints, stripping dangerous environment variables and locking the CWD (Current Working Directory) to the project root.
 
 # 3. The Protocol
 
@@ -82,7 +109,7 @@ tgp list --query "revenue report"
 
 ### Phase 2: Forge (High Token Cost)
 The Agent writes a new tool to fill the gap.
-1.  **Read Config**: Analyze configuration for schema paths and allowed libraries.
+1.  **Read Config**: Analyze `TGP_CONFIG` for schema paths and allowed libraries.
 2.  **Draft**: Write a TypeScript file (e.g., `temp/draft.ts`).
     *   *Constraint*: Must import schema dynamically.
     *   *Constraint*: Must handle I/O via `process.argv` (inputs) and `STDOUT` (JSON outputs).
@@ -90,13 +117,13 @@ The Agent writes a new tool to fill the gap.
     ```bash
     tgp check temp/draft.ts
     ```
-    *   *Success*: Proceed to [Phase 3](#phase-3-persistence-temporal-memory).
+    *   *Success*: Proceed to commit.
     *   *Fail*: Agent analyzes error. If logic error -> Self-Correct. If API error -> Call `mcp_docs_lookup`.
 
 ### Phase 3: Persistence (Temporal Memory)
 Once verified, the tool is committed to the repository. This transforms a "thought" into a "capability."
 ```bash
-mv temp/draft.ts ./.tgp/tools/analytics/revenue-report.ts
+mv temp/draft.ts ~/.tgp/tools/analytics/revenue-report.ts
 git add .
 git commit -m "feat(analytics): add monthly revenue CSV exporter"
 ```
@@ -110,7 +137,7 @@ tgp run tools/analytics/revenue-report.ts --month "2023-10"
 
 ## 3.2 The Feedback Loop (Self-Healing)
 
-If a tool fails during [Phase 4](#phase-4-execution-native-speed):
+If a tool fails during **Phase 4**:
 1.  **Capture**: Agent reads STDERR.
 2.  **Diagnose**: Is it a data error (invalid input) or a logic error (bug)?
 3.  **Refactor**:
@@ -130,7 +157,7 @@ The Agent treats external documentation as a **Level 2 Resource**.
 
 # 4. Security Kernel
 
-The `tgp` binary acts as a hypervisor. The Agent runs in **Untrusted User Space**.
+The `tgp` binary acts as a hypervisor. The Agent runs in **Untrusted User Space**. The Kernel enforces strict resource bounds and isolation boundaries to prevent "runaway intelligence" or accidental destruction.
 
 ## 4.1 Execution Sandbox (V8 Isolates)
 We do not use `child_process`. Node.js is not a sandbox.
@@ -140,7 +167,7 @@ TGP uses **`isolated-vm`** to run tools in distinct V8 Contexts.
 *   **The Syscall Bridge**: Tools interact with the world ONLY through the injected `tgp` global object (the stable ABI).
 *   **Snapshots**: Common libraries (Lodash, Zod) are compiled into a V8 Heap Snapshot once. Tool startup time is **< 5ms**.
 
-## 4.2 Resource Quotas
+## 4.2 Resource Quotas (The Kill Switch)
 To prevent infinite loops (`while(true)`) or memory leaks from crashing the tenant pod, the Kernel applies V8 and OS-level limits per execution.
 
 | Resource | Limit | Mechanism | Violation Result |
@@ -151,15 +178,15 @@ To prevent infinite loops (`while(true)`) or memory leaks from crashing the tena
 | **Processes** | 0 Children | Disallow `fork`/`spawn` inside tools | `EPERM` (via AST Linter) |
 
 ## 4.3 Filesystem Jail
-The Kernel intercepts all I/O operations.
+The Agent sees the entire file tree, but the Kernel intercepts all I/O operations via the Runtime Config.
 *   **Read-Only**: Default state for the entire project.
-*   **Write-Allow**: Only paths explicitly listed in `fs.allowedDirs` (defined in setup).
+*   **Write-Allow**: Only paths explicitly listed in `TGP_CONFIG.filesystem.allowedDirs` (e.g., `/tmp`, `/app/exports`).
 *   **Path Traversal**: Any argument containing `../` that resolves outside the jail triggers an immediate `SECURITY_VIOLATION` before code execution starts.
 
 ## 4.4 Environment Sanitization (Scorched Earth)
-Tools do **not** inherit the Host environment.
+Tools do **not** inherit the Agent's environment.
 1.  **Strip**: The `env` object starts empty.
-2.  **Inject**: The Kernel injects *only* the specific keys defined in the config (e.g., `DATABASE_URL`).
+2.  **Inject**: The Kernel injects *only* the specific keys defined in `TGP_CONFIG` (e.g., `DATABASE_URL`).
 3.  **Block**: Sensitive keys (`AWS_SECRET_ACCESS_KEY`, `SSH_AUTH_SOCK`) are aggressively filtered out unless a specific "Integration Tool" is authorized to use them.
 
 ## 4.5 Network Firewall
@@ -189,7 +216,7 @@ spawn('tgp', ['run', 'retention.ts'], { env: { DATABASE_URL: dbUrl } });
 ## 5.2 Hub & Spoke Topology
 
 *   **Upstream (`tgp-global`)**: The "App Store." A private repo owned by the SaaS Devs. Contains verified, safe, generic tools.
-*   **Downstream (`./.tgp`)**: The Tenant's localized toolkit. It clones `tgp-global` at boot.
+*   **Downstream (`~/.tgp`)**: The Tenant's localized toolkit. It clones `tgp-global` at boot.
 
 ```ascii
 [ Tenant A Pod ]         [ SaaS Central ]          [ Tenant B Pod ]
@@ -223,7 +250,7 @@ To guarantee Data Sovereignty without a human auditor, the AST Linter enforces *
 1.  **No String Literals > 16 chars**: Prevents hardcoding CSVs, API keys, or specific customer emails.
     *   *Violation*: `const user = "admin@tesla.com"`
     *   *Allowed*: `const user = args.email`
-2.  **No Side Effects**: Enforced by [Security Kernel](#4-security-kernel).
+2.  **No Side Effects**: The Isolation Layer blocks all Network/FS calls not routed through the `tgp` syscall bridge.
 
 **The result:** A tool forged by Tenant A is mathematically incapable of leaking Tenant A's data, because the code cannot contain state, only logic.
 
@@ -318,14 +345,14 @@ export default defineTGPConfig({
 
 ## 7.3 The "Brain" Injection (Generated Prompts)
 
-The installer generates a system prompt file (e.g., `.cursorrules`) that enforces the [Protocol](#3-the-protocol).
+The installer generates a system prompt file (e.g., `.cursorrules`) that instantly upgrades your IDE's LLM into a TGP-compliant engineer.
 
 **File**: `.cursorrules` (or `TGP_SYSTEM_PROMPT.md`)
 
 ```markdown
 # YOU ARE THE TGP KERNEL
 
-You are not a generic coding assistant. You are an implementation of the TGP Architecture.
+You are not a generic coding assistant. You are an implementation of the **Tool Generation Protocol (TGP)**.
 
 ## 1. WHAT IS TGP?
 TGP is an architecture where you build your own standard library. instead of writing one-off scripts, you forge reusable CLI tools, verify them, and save them to `.tgp/tools`.
@@ -339,10 +366,10 @@ TGP is an architecture where you build your own standard library. instead of wri
     - MUST import schema from `src/db/schema.ts` (Dynamic Import).
     - MUST accept inputs via flags (`--days 7`) or JSON args.
     - MUST print final result as JSON to STDOUT.
-2.  **Verify**: Run `tgp check temp/draft.ts`.
+2.  **Verify**: Run `node .tgp/core/linter.js temp/draft.ts`.
     - If lint fails, FIX IT. Do not complain.
     - If you need docs, call `mcp_lookup`.
-3.  **Commit**: Move to `.tgp/tools/<category>/<name>.ts` and run `git add . && git commit`.
+3.  **Commit**: Move to `.tgp/tools/<category>/<name>.ts` and commit with a semantic message.
 
 ## 4. CONSTRAINTS
 - NO `npm install`. Use only whitelisted libs defined in `tgp.config.ts`.
@@ -373,3 +400,4 @@ export async function POST(req: Request) {
   return Response.json(response);
 }
 ```
+````
