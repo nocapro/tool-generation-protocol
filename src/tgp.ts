@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
-import { createKernel, Kernel } from './kernel/core.js';
+import * as http from 'isomorphic-git/http/node';
+import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
 import { loadTGPConfig } from './config.js';
 import { createNodeVFS } from './vfs/node.js';
 import { TGPConfigSchema, TGPConfig } from './types.js';
@@ -14,6 +15,27 @@ export interface TGPOptions {
    * @default "./tgp.config.ts"
    */
   configFile?: string;
+
+  /**
+   * Override the Virtual Filesystem Adapter.
+   * Useful for using MemoryVFS in tests or Edge environments.
+   * If omitted, defaults to NodeVFS rooted at config.rootDir.
+   */
+  vfs?: VFSAdapter;
+
+  /**
+   * Override the raw filesystem used by Git.
+   * If omitted, defaults to 'node:fs'.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fs?: any;
+
+  /**
+   * Override the HTTP client used by Git.
+   * If omitted, defaults to 'isomorphic-git/http/node'.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  http?: any;
 }
 
 /**
@@ -36,16 +58,21 @@ export class TGP implements Kernel {
     // even before the async config load completes.
     this.config = TGPConfigSchema.parse({});
     
-    // 2. Setup Default VFS
-    // This allows tgpTools(kernel) to be called immediately.
-    this.vfs = createNodeVFS(this.config.rootDir);
+    // 2. Setup VFS
+    // Use injected VFS or default to Node VFS
+    this.vfs = opts.vfs || createNodeVFS(this.config.rootDir);
 
     // 3. Initialize Kernel Components
-    // We use the underlying factory to wire up Git, DB, and Registry
+    // Construct Environment with defaults if not provided
+    const env: KernelEnvironment = {
+      fs: opts.fs || fs,
+      http: opts.http || http
+    };
+
     const kernel = createKernel({
       config: this.config,
       vfs: this.vfs,
-      fs // Pass raw node:fs for isomorphic-git
+      env
     });
 
     this.git = kernel.git;
@@ -67,15 +94,22 @@ export class TGP implements Kernel {
       const loadedConfig = await loadTGPConfig(configPath);
       this.config = loadedConfig;
 
-      // 2. Re-initialize VFS if RootDir changed
-      // If the user configured a different rootDir, we must update the VFS.
-      this.vfs = createNodeVFS(this.config.rootDir);
+      // 2. Re-initialize VFS if RootDir changed AND user didn't inject a custom VFS
+      // If the user injected a VFS, we assume they configured it correctly.
+      if (!this.opts.vfs) {
+        this.vfs = createNodeVFS(this.config.rootDir);
+      }
 
       // 3. Re-initialize Kernel Components with new Config/VFS
+      const env: KernelEnvironment = {
+        fs: this.opts.fs || fs,
+        http: this.opts.http || http
+      };
+
       const kernel = createKernel({
         config: this.config,
         vfs: this.vfs,
-        fs
+        env
       });
       
       this.git = kernel.git;

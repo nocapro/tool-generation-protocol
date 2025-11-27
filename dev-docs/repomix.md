@@ -39,18 +39,6 @@ tsconfig.json
 
 # Files
 
-## File: export interface Kernel {
-````
-boot(): Promise<void>;
-  shutdown(): Promise<void>;
-  config: TGPConfig;
-  vfs: VFSAdapter;
-  git: GitBackend;
-  db: DBBackend;
-  registry: Registry;
-}
-````
-
 ## File: bin/tgp.js
 ````javascript
 #!/usr/bin/env node
@@ -264,162 +252,6 @@ export * from './tgp.js';
 export * from './adapter.js';
 ````
 
-## File: src/tgp.ts
-````typescript
-import * as fs from 'node:fs';
-import { createKernel, Kernel } from './kernel/core.js';
-import { loadTGPConfig } from './config.js';
-import { createNodeVFS } from './vfs/node.js';
-import { TGPConfigSchema, TGPConfig } from './types.js';
-import { VFSAdapter } from './vfs/types.js';
-import { GitBackend } from './kernel/git.js';
-import { DBBackend } from './kernel/db.js';
-import { Registry } from './kernel/registry.js';
-
-export interface TGPOptions {
-  /**
-   * Path to the configuration file.
-   * @default "./tgp.config.ts"
-   */
-  configFile?: string;
-}
-
-/**
- * The TGP Kernel Class.
- * Manages the lifecycle of the Agent's runtime environment, including
- * configuration, filesystem (VFS), Git persistence, and the Tool Registry.
- */
-export class TGP implements Kernel {
-  public config: TGPConfig;
-  public vfs: VFSAdapter;
-  public git: GitBackend;
-  public db: DBBackend;
-  public registry: Registry;
-  
-  private _isBooted = false;
-
-  constructor(private opts: TGPOptions = {}) {
-    // 1. Initialize with Defaults (Sync)
-    // We use the default schema to ensure the kernel is usable immediately (e.g. for tooling)
-    // even before the async config load completes.
-    this.config = TGPConfigSchema.parse({});
-    
-    // 2. Setup Default VFS
-    // This allows tgpTools(kernel) to be called immediately.
-    this.vfs = createNodeVFS(this.config.rootDir);
-
-    // 3. Initialize Kernel Components
-    // We use the underlying factory to wire up Git, DB, and Registry
-    const kernel = createKernel({
-      config: this.config,
-      vfs: this.vfs,
-      fs // Pass raw node:fs for isomorphic-git
-    });
-
-    this.git = kernel.git;
-    this.db = kernel.db;
-    this.registry = kernel.registry;
-  }
-
-  /**
-   * Hydrates the Kernel from the configuration file and Git.
-   * This must be awaited before executing tools in production.
-   */
-  async boot(): Promise<void> {
-    if (this._isBooted) return;
-
-    const configPath = this.opts.configFile || './tgp.config.ts';
-
-    try {
-      // 1. Load Real Configuration
-      const loadedConfig = await loadTGPConfig(configPath);
-      this.config = loadedConfig;
-
-      // 2. Re-initialize VFS if RootDir changed
-      // If the user configured a different rootDir, we must update the VFS.
-      this.vfs = createNodeVFS(this.config.rootDir);
-
-      // 3. Re-initialize Kernel Components with new Config/VFS
-      const kernel = createKernel({
-        config: this.config,
-        vfs: this.vfs,
-        fs
-      });
-      
-      this.git = kernel.git;
-      this.db = kernel.db;
-      this.registry = kernel.registry;
-
-      // 4. Hydrate State (Git Clone/Pull + Registry Build)
-      await kernel.boot();
-      
-      this._isBooted = true;
-    } catch (error) {
-      // If config loading fails, we might still be in a valid default state,
-      // but we should warn the user.
-      console.warn(`[TGP] Boot warning:`, error);
-      throw error;
-    }
-  }
-
-  async shutdown(): Promise<void> {
-    // Passthrough to internal kernel shutdown if needed
-    this._isBooted = false;
-  }
-
-  /**
-   * Generates the System Prompt enforcing the "8 Standards" and TGP protocol.
-   */
-  getSystemPrompt(): string {
-    return `
-You are an autonomous AI Engineer running on the Tool Generation Protocol (TGP).
-Your goal is to build, validate, and execute tools to solve the user's request.
-
-# THE PROTOCOL
-
-1.  **Reuse or Forge**: Check if a tool exists. If not, write it.
-2.  **No One-Offs**: Do not execute arbitrary scripts. Create a reusable tool in 'tools/'.
-3.  **Strict Typing**: All tools must be written in TypeScript. No 'any', no 'unknown'.
-
-# CODING STANDARDS (The 8 Commandments)
-
-1.  **Abstract**: Logic must be separated from data. (e.g., args.taxRate, not 0.05).
-2.  **Composable**: Functions should return results usable by others.
-3.  **HOFs**: Use map/reduce/filter over imperative loops.
-4.  **Stateless**: No global state. No reliance on previous execution.
-5.  **Reusable**: Generic enough for multiple use cases.
-6.  **General by Params**: Behavior controlled by arguments.
-7.  **No Hardcoded Values**: No magic numbers or IDs.
-8.  **Orchestrator**: Tools can import other tools via 'require'.
-
-# EXECUTION FLOW
-
-1.  List files to see what you have.
-2.  Read file content to understand the tool.
-3.  If missing, write_file to create a new tool.
-4.  Use check_tool to validate syntax.
-5.  Use exec_tool to run it.
-`;
-  }
-}
-
-/**
- * Legacy Factory to create a TGP Kernel (Backward Compatibility).
- */
-export async function createTGP(opts: TGPOptions = {}): Promise<Kernel> {
-  const tgp = new TGP(opts);
-  await tgp.boot();
-  return tgp;
-}
-
-/**
- * Helper to get the system prompt (Backward Compatibility).
- */
-export function getSystemPrompt(): string {
-  return new TGP().getSystemPrompt();
-}
-````
-
 ## File: eslint.config.js
 ````javascript
 import typescriptESLint from '@typescript-eslint/eslint-plugin';
@@ -468,6 +300,18 @@ export default [
     ignores: ['dist/', 'node_modules/', '*.js'],
   },
 ];
+````
+
+## File: export interface Kernel {
+````
+boot(): Promise<void>;
+  shutdown(): Promise<void>;
+  config: TGPConfig;
+  vfs: VFSAdapter;
+  git: GitBackend;
+  db: DBBackend;
+  registry: Registry;
+}
 ````
 
 ## File: tsconfig.json
@@ -545,6 +389,7 @@ export async function initCommand() {
   const gitIgnorePath = path.join(cwd, '.gitignore');
   const tgpDir = path.join(cwd, '.tgp');
   const toolsDir = path.join(tgpDir, 'tools');
+  const binDir = path.join(tgpDir, 'bin');
   const metaPath = path.join(tgpDir, 'meta.json');
 
   // 1. Create tgp.config.ts
@@ -572,7 +417,8 @@ export async function initCommand() {
 
   // 4. Scaffold Tools directory
   await fs.mkdir(toolsDir, { recursive: true });
-  console.log(`[TGP] Created .tgp/tools directory`);
+  await fs.mkdir(binDir, { recursive: true });
+  console.log(`[TGP] Created .tgp/tools and .tgp/bin directories`);
 
   // 5. Initialize Registry (meta.json)
   if (!await exists(metaPath)) {
@@ -597,33 +443,37 @@ import { defineTGPConfig } from '@tgp/core';
 
 export default defineTGPConfig({
   // The Root of the Agent's filesystem
+  // In serverless environments, this is ephemeral.
   rootDir: './.tgp',
 
-  // Database Configuration (Optional)
-  // db: {
-  //   dialect: 'postgres',
-  //   ddlSource: 'drizzle-kit generate --print',
-  // },
+  // 1. DATA: Database Configuration
+  db: {
+    dialect: 'postgres',
+    ddlSource: 'drizzle-kit generate --print',
+  },
 
-  // Git Backend (Required for Persistence)
+  // 2. BACKEND (GitOps)
+  // The Agent pulls state from here and pushes new tools here.
   git: {
     provider: 'github',
     repo: 'my-org/tgp-tools',
     branch: 'main',
     auth: {
-      token: process.env.GITHUB_TOKEN || '',
-      user: 'tgp-bot',
-      email: 'bot@tgp.dev'
+      // Use ENV variables for security
+      token: process.env.TGP_GITHUB_TOKEN || '',
+      user: 'tgp-bot[bot]',
+      email: 'tgp-bot@users.noreply.github.com'
     },
-    writeStrategy: 'direct' // or 'pr'
+    writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
   },
 
-  // Sandbox Security
+  // 3. FILESYSTEM JAIL (Sandbox Security)
   fs: {
-    allowedDirs: ['./tmp'],
+    allowedDirs: ['./public/exports', './tmp'],
     blockUpwardTraversal: true
   },
 
+  // 4. RUNTIME
   allowedImports: ['@tgp/std', 'zod', 'date-fns']
 });
 `;
@@ -632,6 +482,8 @@ export default defineTGPConfig({
 ## File: src/kernel/db.ts
 ````typescript
 /* eslint-disable no-console */
+import { TGPConfig } from '../types.js';
+
 /**
  * The Database Kernel Interface.
  * 
@@ -652,6 +504,22 @@ export interface DBBackend {
    * @param fn The function to execute. It receives a transactional DB instance.
    */
   transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
+}
+
+/**
+ * Factory to create the Database Backend based on configuration.
+ * Loads the appropriate driver or falls back to NoOp.
+ */
+export function createDBBackend(config: TGPConfig): DBBackend {
+  const dbConfig = config.db;
+
+  if (dbConfig) {
+    // In a real implementation, we would perform a dynamic import here based on the dialect.
+    // e.g. if (dbConfig.dialect === 'postgres') return new PostgresBackend(dbConfig);
+    console.log(`[TGP-DB] Configured for dialect: ${dbConfig.dialect}. Using NoOp (Mock) for now.`);
+  }
+
+  return createNoOpDB();
 }
 
 /**
@@ -677,115 +545,6 @@ export function createNoOpDB(): DBBackend {
       } catch (err) {
         console.log(`[TGP-DB] Rollback Transaction`);
         throw err;
-      }
-    }
-  };
-}
-````
-
-## File: src/sandbox/isolate.ts
-````typescript
-import ivm from 'isolated-vm';
-import { transform } from 'esbuild';
-
-/**
- * Configuration for the V8 Sandbox.
- */
-export interface SandboxOptions {
-  memoryLimitMb?: number; // Default 128MB
-  timeoutMs?: number;     // Default 5000ms
-}
-
-export interface Sandbox {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
-  dispose: () => void;
-}
-
-/**
- * Creates a secure V8 Isolate.
- */
-export function createSandbox(opts: SandboxOptions = {}): Sandbox {
-  const memoryLimit = opts.memoryLimitMb ?? 128;
-  const timeout = opts.timeoutMs ?? 5000;
-
-  // Create the heavy V8 Isolate (The Virtual Machine)
-  const isolate = new ivm.Isolate({ memoryLimit });
-
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async compileAndRun(tsCode: string, context: Record<string, any>) {
-      // 1. JIT Compile (TypeScript -> JavaScript)
-      // We use esbuild for speed.
-      const transformed = await transform(tsCode, {
-        loader: 'ts',
-        format: 'cjs', // CommonJS ensures simple execution in V8
-        target: 'es2020',
-      });
-
-      const jsCode = transformed.code;
-
-      // 2. Create a fresh Context for this execution
-      const ivmContext = await isolate.createContext();
-
-      try {
-        // 3. Bridge the Global Scope (Host -> Guest)
-        const jail = ivmContext.global;
-        
-        // Inject the 'tgp' global object which holds our bridge
-        await jail.set('global', jail.derefInto()); // standard polyfill
-
-        // Inject Context
-        for (const [key, value] of Object.entries(context)) {
-            // Special handling for the 'tgp' namespace object
-            if (key === 'tgp' && typeof value === 'object' && value !== null) {
-                // Initialize the namespace in the guest
-                await isolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
-                const tgpHandle = await jail.get('tgp');
-                
-                // Populate the namespace
-                for (const [subKey, subValue] of Object.entries(value)) {
-                    if (typeof subValue === 'function') {
-                       // Functions must be passed by Reference
-                       await tgpHandle.set(subKey, new ivm.Reference(subValue));
-                    } else {
-                       // Values are copied
-                       await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
-                    }
-                }
-            } 
-            // Handle top-level functions (like __tgp_load_module)
-            else if (typeof value === 'function') {
-              await jail.set(key, new ivm.Reference(value));
-            } 
-            // Handle standard values
-            else {
-              await jail.set(key, new ivm.ExternalCopy(value).copyInto());
-            }
-        }
-
-        // 4. Compile the Script inside the Isolate
-        const script = await isolate.compileScript(jsCode);
-
-        // 5. Execute
-        const result = await script.run(ivmContext, { timeout });
-        
-        // 6. Return result (Unwrap from IVM)
-        if (typeof result === 'object' && result !== null && 'copy' in result) {
-            // If it's a reference, try to copy it out, otherwise return as is
-            return result.copy();
-        }
-        return result;
-
-      } finally {
-        // Cleanup the context to free memory immediately
-        ivmContext.release();
-      }
-    },
-
-    dispose() {
-      if (!isolate.isDisposed) {
-        isolate.dispose();
       }
     }
   };
@@ -929,17 +688,39 @@ export function createValidationTools(kernel: Kernel) {
 
           // 1. Strict Typing: No 'any'
           if (/\bany\b/.test(code)) {
-            errors.push("Violation: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+            errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
           }
 
           // 2. Safety: No 'eval' or 'Function' constructor
           if (/\beval\(/.test(code) || /\bnew Function\(/.test(code)) {
-            errors.push("Violation: Dynamic code execution ('eval') is prohibited.");
+            errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
           }
 
           // 3. Stateless: No process global access (except inside standard library wrappers which are hidden)
           if (/\bprocess\./.test(code) && !code.includes('process.env.NODE_ENV')) {
-            errors.push("Violation: Direct access to 'process' is prohibited. Use 'args' for inputs.");
+            errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+          }
+
+          // 4. Abstract / No Magic Numbers (Heuristic)
+          // We look for 'const x = 0.05' type patterns.
+          // This matches: const name = number; (with optional decimals)
+          // We skip common integers like 0, 1, -1, 100 which are often used for loops or percentages base.
+          const magicNumMatch = code.match(/\bconst\s+[a-zA-Z0-9_]+\s*=\s*(\d+(?:\.\d+)?)\s*;/);
+          if (magicNumMatch) {
+            const val = parseFloat(magicNumMatch[1]);
+            if (val !== 0 && val !== 1 && val !== -1 && val !== 100) {
+               errors.push(`Violation [Standard 1]: Found potential magic number '${magicNumMatch[0]}'. Abstract logic from data (e.g., args.taxRate, not 0.05).`);
+            }
+          }
+
+          // 5. No Hardcoded Secrets/IDs
+          // Emails
+          if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(code)) {
+            errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+          }
+          // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+          if (/['"][a-zA-Z0-9-]{24,}['"]/.test(code)) {
+             errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
           }
 
           return { valid: errors.length === 0, errors };
@@ -1094,6 +875,196 @@ export interface VFSAdapter {
 }
 ````
 
+## File: src/tgp.ts
+````typescript
+import * as fs from 'node:fs';
+import * as http from 'isomorphic-git/http/node';
+import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
+import { loadTGPConfig } from './config.js';
+import { createNodeVFS } from './vfs/node.js';
+import { TGPConfigSchema, TGPConfig } from './types.js';
+import { VFSAdapter } from './vfs/types.js';
+import { GitBackend } from './kernel/git.js';
+import { DBBackend } from './kernel/db.js';
+import { Registry } from './kernel/registry.js';
+
+export interface TGPOptions {
+  /**
+   * Path to the configuration file.
+   * @default "./tgp.config.ts"
+   */
+  configFile?: string;
+
+  /**
+   * Override the Virtual Filesystem Adapter.
+   * Useful for using MemoryVFS in tests or Edge environments.
+   * If omitted, defaults to NodeVFS rooted at config.rootDir.
+   */
+  vfs?: VFSAdapter;
+
+  /**
+   * Override the raw filesystem used by Git.
+   * If omitted, defaults to 'node:fs'.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fs?: any;
+
+  /**
+   * Override the HTTP client used by Git.
+   * If omitted, defaults to 'isomorphic-git/http/node'.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  http?: any;
+}
+
+/**
+ * The TGP Kernel Class.
+ * Manages the lifecycle of the Agent's runtime environment, including
+ * configuration, filesystem (VFS), Git persistence, and the Tool Registry.
+ */
+export class TGP implements Kernel {
+  public config: TGPConfig;
+  public vfs: VFSAdapter;
+  public git: GitBackend;
+  public db: DBBackend;
+  public registry: Registry;
+  
+  private _isBooted = false;
+
+  constructor(private opts: TGPOptions = {}) {
+    // 1. Initialize with Defaults (Sync)
+    // We use the default schema to ensure the kernel is usable immediately (e.g. for tooling)
+    // even before the async config load completes.
+    this.config = TGPConfigSchema.parse({});
+    
+    // 2. Setup VFS
+    // Use injected VFS or default to Node VFS
+    this.vfs = opts.vfs || createNodeVFS(this.config.rootDir);
+
+    // 3. Initialize Kernel Components
+    // Construct Environment with defaults if not provided
+    const env: KernelEnvironment = {
+      fs: opts.fs || fs,
+      http: opts.http || http
+    };
+
+    const kernel = createKernel({
+      config: this.config,
+      vfs: this.vfs,
+      env
+    });
+
+    this.git = kernel.git;
+    this.db = kernel.db;
+    this.registry = kernel.registry;
+  }
+
+  /**
+   * Hydrates the Kernel from the configuration file and Git.
+   * This must be awaited before executing tools in production.
+   */
+  async boot(): Promise<void> {
+    if (this._isBooted) return;
+
+    const configPath = this.opts.configFile || './tgp.config.ts';
+
+    try {
+      // 1. Load Real Configuration
+      const loadedConfig = await loadTGPConfig(configPath);
+      this.config = loadedConfig;
+
+      // 2. Re-initialize VFS if RootDir changed AND user didn't inject a custom VFS
+      // If the user injected a VFS, we assume they configured it correctly.
+      if (!this.opts.vfs) {
+        this.vfs = createNodeVFS(this.config.rootDir);
+      }
+
+      // 3. Re-initialize Kernel Components with new Config/VFS
+      const env: KernelEnvironment = {
+        fs: this.opts.fs || fs,
+        http: this.opts.http || http
+      };
+
+      const kernel = createKernel({
+        config: this.config,
+        vfs: this.vfs,
+        env
+      });
+      
+      this.git = kernel.git;
+      this.db = kernel.db;
+      this.registry = kernel.registry;
+
+      // 4. Hydrate State (Git Clone/Pull + Registry Build)
+      await kernel.boot();
+      
+      this._isBooted = true;
+    } catch (error) {
+      // If config loading fails, we might still be in a valid default state,
+      // but we should warn the user.
+      console.warn(`[TGP] Boot warning:`, error);
+      throw error;
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    // Passthrough to internal kernel shutdown if needed
+    this._isBooted = false;
+  }
+
+  /**
+   * Generates the System Prompt enforcing the "8 Standards" and TGP protocol.
+   */
+  getSystemPrompt(): string {
+    return `
+You are an autonomous AI Engineer running on the Tool Generation Protocol (TGP).
+Your goal is to build, validate, and execute tools to solve the user's request.
+
+# THE PROTOCOL
+
+1.  **Reuse or Forge**: Check if a tool exists. If not, write it.
+2.  **No One-Offs**: Do not execute arbitrary scripts. Create a reusable tool in 'tools/'.
+3.  **Strict Typing**: All tools must be written in TypeScript. No 'any', no 'unknown'.
+
+# CODING STANDARDS (The 8 Commandments)
+
+1.  **Abstract**: Logic must be separated from data. (e.g., args.taxRate, not 0.05).
+2.  **Composable**: Functions should return results usable by others.
+3.  **HOFs**: Use map/reduce/filter over imperative loops.
+4.  **Stateless**: No global state. No reliance on previous execution.
+5.  **Reusable**: Generic enough for multiple use cases.
+6.  **General by Params**: Behavior controlled by arguments.
+7.  **No Hardcoded Values**: No magic numbers or IDs.
+8.  **Orchestrator**: Tools can import other tools via 'require'.
+
+# EXECUTION FLOW
+
+1.  List files to see what you have.
+2.  Read file content to understand the tool.
+3.  If missing, write_file to create a new tool.
+4.  Use check_tool to validate syntax.
+5.  Use exec_tool to run it.
+`;
+  }
+}
+
+/**
+ * Legacy Factory to create a TGP Kernel (Backward Compatibility).
+ */
+export async function createTGP(opts: TGPOptions = {}): Promise<Kernel> {
+  const tgp = new TGP(opts);
+  await tgp.boot();
+  return tgp;
+}
+
+/**
+ * Helper to get the system prompt (Backward Compatibility).
+ */
+export function getSystemPrompt(): string {
+  return new TGP().getSystemPrompt();
+}
+````
+
 ## File: src/types.ts
 ````typescript
 import { z } from 'zod';
@@ -1193,7 +1164,7 @@ export interface RegistryState {
   },
   "dependencies": {
     "esbuild": "^0.19.12",
-    "isolated-vm": "^4.7.2",
+    "isolated-vm": "^6.0.2",
     "isomorphic-git": "^1.35.1",
     "memfs": "^4.51.0",
     "zod": "^3.25.76",
@@ -1214,17 +1185,20 @@ export interface RegistryState {
 /* eslint-disable no-console */
 import { TGPConfig } from '../types.js';
 import { VFSAdapter } from '../vfs/types.js';
-import { createGitBackend, GitBackend } from './git.js';
-import { createNoOpDB, DBBackend } from './db.js';
+import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+import { createDBBackend, DBBackend } from './db.js';
 import { createRegistry, Registry } from './registry.js';
 
-// We inject the low-level FS for Git separately from the VFS adapter
-// This is because Git needs raw FS access, while the Agent uses the VFS Jail.
+// We inject the platform-specific environment dependencies here.
+// This allows the Kernel to run in Node, Edge, or Browser environments.
+export interface KernelEnvironment extends GitDependencies {
+  // We can extend this if Kernel needs more platform specific components later
+}
+
 export interface KernelOptions {
   config: TGPConfig;
   vfs: VFSAdapter; 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fs: any; // The raw filesystem object (node:fs or memfs) used by isomorphic-git
+  env: KernelEnvironment;
 }
 
 export interface Kernel {
@@ -1242,10 +1216,10 @@ export interface Kernel {
  * This wires up the configuration, the filesystem, and the git backend.
  */
 export function createKernel(opts: KernelOptions): Kernel {
-  const { config, vfs, fs } = opts;
+  const { config, vfs, env } = opts;
   
-  const git = createGitBackend(fs, config);
-  const db = createNoOpDB(); // TODO: Connect to real DB based on config.db
+  const git = createGitBackend(env, config);
+  const db = createDBBackend(config); 
   const registry = createRegistry(vfs);
 
   let isBooted = false;
@@ -1288,7 +1262,6 @@ export function createKernel(opts: KernelOptions): Kernel {
 ````typescript
 /* eslint-disable no-console */
 import * as git from 'isomorphic-git';
-import * as http from 'isomorphic-git/http/node';
 import { TGPConfig } from '../types.js';
 import * as path from 'path';
 
@@ -1301,10 +1274,21 @@ export interface GitBackend {
   persist(message: string, files: string[]): Promise<void>;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
+export interface GitDependencies {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fs: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  http: any;
+}
+
+interface GitWriteStrategy {
+  persist(message: string, files: string[]): Promise<void>;
+}
+
+export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitBackend {
   const dir = config.rootDir;
   const { repo, auth, branch, writeStrategy } = config.git;
+  const { fs, http } = deps;
 
   // Helper to configure git options
   const gitOpts = {
@@ -1317,6 +1301,48 @@ export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
   const author = {
     name: auth.user,
     email: auth.email,
+  };
+
+  // --- Strategies ---
+
+  const directStrategy: GitWriteStrategy = {
+    async persist(message: string, filesToAdd: string[]) {
+      // 1. Add files
+      for (const filepath of filesToAdd) {
+        try {
+           // check if file exists before adding
+           await git.add({ ...gitOpts, filepath });
+        } catch (e) {
+           console.warn(`[TGP] Git Add failed for ${filepath}`, e);
+        }
+      }
+
+      // 2. Commit
+      const sha = await git.commit({
+        ...gitOpts,
+        message,
+        author,
+      });
+      console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
+
+      // 3. Push
+      console.log(`[TGP] Pushing to ${branch}...`);
+      await git.push({
+        ...gitOpts,
+        remote: 'origin',
+        ref: branch,
+      });
+    }
+  };
+
+  const prStrategy: GitWriteStrategy = {
+    async persist(message: string, files: string[]) {
+      // TODO: Implement PR creation logic for 'pr' strategy using Octokit or similar
+      console.warn(`[TGP] 'pr' Strategy selected but not implemented. Falling back to local commit only.`);
+      // We reuse the commit logic from direct strategy but skip push for now, or just warn.
+      // Ideally, this creates a branch, pushes that branch, and opens a PR.
+      await directStrategy.persist(message, files).catch(e => console.error("PR fallback failed", e));
+    }
   };
 
   return {
@@ -1350,37 +1376,13 @@ export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
     },
 
     async persist(message: string, filesToAdd: string[]) {
-      // 1. Add files
-      for (const filepath of filesToAdd) {
-        try {
-           // check if file exists before adding (might be deleted, though not in this context)
-           await git.add({ ...gitOpts, filepath });
-        } catch (e) {
-           // If file doesn't exist, maybe it was a deletion? 
-           // For TGP v1 we assume add/update.
-           console.warn(`[TGP] Git Add failed for ${filepath}`, e);
-        }
-      }
-
-      // 2. Commit
-      const sha = await git.commit({
-        ...gitOpts,
-        message,
-        author,
-      });
-      console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
-
-      // 3. Push
       if (writeStrategy === 'direct') {
-        console.log(`[TGP] Pushing to ${branch}...`);
-        await git.push({
-          ...gitOpts,
-          remote: 'origin',
-          ref: branch,
-        });
+        return directStrategy.persist(message, filesToAdd);
+      } else if (writeStrategy === 'pr') {
+        return prStrategy.persist(message, filesToAdd);
       } else {
-        // TODO: Implement PR creation logic for 'pr' strategy
-        console.warn(`[TGP] PR Strategy not yet implemented. Changes committed locally.`);
+        console.warn(`[TGP] Unknown write strategy: ${writeStrategy}. Defaulting to direct.`);
+        return directStrategy.persist(message, filesToAdd);
       }
     }
   };
@@ -1577,6 +1579,115 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
   } finally {
     sandbox.dispose();
   }
+}
+````
+
+## File: src/sandbox/isolate.ts
+````typescript
+import ivm from 'isolated-vm';
+import { transform } from 'esbuild';
+
+/**
+ * Configuration for the V8 Sandbox.
+ */
+export interface SandboxOptions {
+  memoryLimitMb?: number; // Default 128MB
+  timeoutMs?: number;     // Default 5000ms
+}
+
+export interface Sandbox {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+  dispose: () => void;
+}
+
+/**
+ * Creates a secure V8 Isolate.
+ */
+export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+  const memoryLimit = opts.memoryLimitMb ?? 128;
+  const timeout = opts.timeoutMs ?? 5000;
+
+  // Create the heavy V8 Isolate (The Virtual Machine)
+  const isolate = new ivm.Isolate({ memoryLimit });
+
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async compileAndRun(tsCode: string, context: Record<string, any>) {
+      // 1. JIT Compile (TypeScript -> JavaScript)
+      // We use esbuild for speed.
+      const transformed = await transform(tsCode, {
+        loader: 'ts',
+        format: 'cjs', // CommonJS ensures simple execution in V8
+        target: 'es2020',
+      });
+
+      const jsCode = transformed.code;
+
+      // 2. Create a fresh Context for this execution
+      const ivmContext = await isolate.createContext();
+
+      try {
+        // 3. Bridge the Global Scope (Host -> Guest)
+        const jail = ivmContext.global;
+        
+        // Inject the 'tgp' global object which holds our bridge
+        await jail.set('global', jail.derefInto()); // standard polyfill
+
+        // Inject Context
+        for (const [key, value] of Object.entries(context)) {
+            // Special handling for the 'tgp' namespace object
+            if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                // Initialize the namespace in the guest
+                await isolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
+                const tgpHandle = await jail.get('tgp');
+                
+                // Populate the namespace
+                for (const [subKey, subValue] of Object.entries(value)) {
+                    if (typeof subValue === 'function') {
+                       // Functions must be passed by Reference
+                       await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                    } else {
+                       // Values are copied
+                       await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                    }
+                }
+            } 
+            // Handle top-level functions (like __tgp_load_module)
+            else if (typeof value === 'function') {
+              await jail.set(key, new ivm.Reference(value));
+            } 
+            // Handle standard values
+            else {
+              await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+            }
+        }
+
+        // 4. Compile the Script inside the Isolate
+        const script = await isolate.compileScript(jsCode);
+
+        // 5. Execute
+        const result = await script.run(ivmContext, { timeout });
+        
+        // 6. Return result (Unwrap from IVM)
+        if (typeof result === 'object' && result !== null && 'copy' in result) {
+            // If it's a reference, try to copy it out, otherwise return as is
+            return result.copy();
+        }
+        return result;
+
+      } finally {
+        // Cleanup the context to free memory immediately
+        ivmContext.release();
+      }
+    },
+
+    dispose() {
+      if (!isolate.isDisposed) {
+        isolate.dispose();
+      }
+    }
+  };
 }
 ````
 

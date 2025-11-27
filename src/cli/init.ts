@@ -10,6 +10,7 @@ export async function initCommand() {
   const gitIgnorePath = path.join(cwd, '.gitignore');
   const tgpDir = path.join(cwd, '.tgp');
   const toolsDir = path.join(tgpDir, 'tools');
+  const binDir = path.join(tgpDir, 'bin');
   const metaPath = path.join(tgpDir, 'meta.json');
 
   // 1. Create tgp.config.ts
@@ -37,7 +38,8 @@ export async function initCommand() {
 
   // 4. Scaffold Tools directory
   await fs.mkdir(toolsDir, { recursive: true });
-  console.log(`[TGP] Created .tgp/tools directory`);
+  await fs.mkdir(binDir, { recursive: true });
+  console.log(`[TGP] Created .tgp/tools and .tgp/bin directories`);
 
   // 5. Initialize Registry (meta.json)
   if (!await exists(metaPath)) {
@@ -62,33 +64,37 @@ import { defineTGPConfig } from '@tgp/core';
 
 export default defineTGPConfig({
   // The Root of the Agent's filesystem
+  // In serverless environments, this is ephemeral.
   rootDir: './.tgp',
 
-  // Database Configuration (Optional)
-  // db: {
-  //   dialect: 'postgres',
-  //   ddlSource: 'drizzle-kit generate --print',
-  // },
+  // 1. DATA: Database Configuration
+  db: {
+    dialect: 'postgres',
+    ddlSource: 'drizzle-kit generate --print',
+  },
 
-  // Git Backend (Required for Persistence)
+  // 2. BACKEND (GitOps)
+  // The Agent pulls state from here and pushes new tools here.
   git: {
     provider: 'github',
     repo: 'my-org/tgp-tools',
     branch: 'main',
     auth: {
-      token: process.env.GITHUB_TOKEN || '',
-      user: 'tgp-bot',
-      email: 'bot@tgp.dev'
+      // Use ENV variables for security
+      token: process.env.TGP_GITHUB_TOKEN || '',
+      user: 'tgp-bot[bot]',
+      email: 'tgp-bot@users.noreply.github.com'
     },
-    writeStrategy: 'direct' // or 'pr'
+    writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
   },
 
-  // Sandbox Security
+  // 3. FILESYSTEM JAIL (Sandbox Security)
   fs: {
-    allowedDirs: ['./tmp'],
+    allowedDirs: ['./public/exports', './tmp'],
     blockUpwardTraversal: true
   },
 
+  // 4. RUNTIME
   allowedImports: ['@tgp/std', 'zod', 'date-fns']
 });
 `;
