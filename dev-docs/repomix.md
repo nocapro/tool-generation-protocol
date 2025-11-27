@@ -121,19 +121,15 @@ The Agent writes a new tool to fill the gap.
     *   *Fail*: Agent analyzes error. If logic error -> Self-Correct. If API error -> Call `mcp_docs_lookup`.
 
 ### Phase 3: Persistence (Temporal Memory)
-Once verified, the tool is committed to the repository. This transforms a "thought" into a "capability."
-```bash
-mv temp/draft.ts ~/.tgp/tools/analytics/revenue-report.ts
-git add .
-git commit -m "feat(analytics): add monthly revenue CSV exporter"
-```
-*Note: The commit message is the index for future Lookups.*
+The Agent invokes the `tgp_publish` tool.
+*   **Input**: `{ "source": "temp/draft.ts", "dest": "tools/analytics/revenue.ts", "msg": "feat: add csv" }`
+*   **Action**: SDK runs `tgp publish ...`
+*   **Result**: `{ "status": "ok", "hash": "a1b2c3d" }`
 
 ### Phase 4: Execution (Native Speed)
-The Agent invokes the tool via the Kernel.
-```bash
-tgp run tools/analytics/revenue-report.ts --month "2023-10"
-```
+The Agent invokes `tgp_exec`.
+*   **Input**: `{ "script": "tools/analytics/revenue.ts", "args": { "month": "2023-10" } }`
+*   **Action**: SDK runs `tgp run ...` inside the V8 Isolate.
 
 ## 3.2 The Feedback Loop (Self-Healing)
 
@@ -377,27 +373,40 @@ TGP is an architecture where you build your own standard library. instead of wri
 - NO hardcoded secrets. Use `process.env`.
 ```
 
-## 7.4 Runtime Usage (The SDK)
+## 7.4 Runtime Usage (The SDK & Tool Bridge)
 
 Once initialized, your application interacts with the Agent via the SDK.
 
 ```typescript
 // src/app/api/agent/route.ts
-import { TGP } from '@tgp/core';
+import { TGP, tgpTools } from '@tgp/core';
+import { generateText } from 'ai';
+import { openai } from '@ai-sdk/openai';
+
+// 1. Initialize Kernel
+const kernel = new TGP({
+  configFile: './tgp.config.ts',
+  userContext: { role: 'admin' }
+});
 
 export async function POST(req: Request) {
-  const { prompt } = await req.json();
-  
-  // 1. Boot the Kernel
-  const agent = new TGP({
-    configFile: './tgp.config.ts',
-    userContext: { role: 'admin' }
+  const { messages } = await req.json();
+
+  // 2. Inject Capabilities
+  // TGP automatically generates the JSON Schema for:
+  // - tgp_list_tools
+  // - tgp_read_source
+  // - tgp_forge_tool
+  // - tgp_exec_tool
+  const result = await generateText({
+    model: openai('gpt-4-turbo'),
+    tools: tgpTools(kernel), // <--- THE BRIDGE
+    maxSteps: 5, // Allow Agent to "Reason -> Forge -> Fix -> Run"
+    messages,
+    system: TGP_SYSTEM_PROMPT // From Section 7.3
   });
 
-  // 2. Execute (The Agent handles the "Reuse vs Forge" logic internally)
-  const response = await agent.process(prompt);
-
-  return Response.json(response);
+  return result.response;
 }
 ```
 ````
