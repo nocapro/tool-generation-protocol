@@ -25,7 +25,7 @@ export function createExecTools(kernel: Kernel) {
         const code = await kernel.vfs.readFile(path);
         
         // The sandbox takes care of safety, timeout, and memory limits
-        const result = await executeTool(kernel, code, args);
+        const result = await executeTool(kernel, code, args, path);
         return result;
       },
     } as AgentTool<typeof ExecToolParams, any>,

@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { VFSAdapter } from './types.js';
 
@@ -27,6 +28,11 @@ export function createNodeVFS(rootDir: string): VFSAdapter {
     async readFile(target: string): Promise<string> {
       const fullPath = resolvePath(target);
       return fs.readFile(fullPath, 'utf-8');
+    },
+
+    readSync(target: string): string {
+      const fullPath = resolvePath(target);
+      return readFileSync(fullPath, 'utf-8');
     },
 
     async writeFile(target: string, content: string): Promise<void> {

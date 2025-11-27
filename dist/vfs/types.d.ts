@@ -13,6 +13,11 @@ export interface VFSAdapter {
      */
     readFile: (path: string) => Promise<string>;
     /**
+     * Synchronously reads the content of a file.
+     * Required for 'require' (synchronous module loading) in the Sandbox.
+     */
+    readSync: (path: string) => string;
+    /**
      * Writes content to a file. Creates parent directories if they don't exist.
      */
     writeFile: (path: string, content: string) => Promise<void>;

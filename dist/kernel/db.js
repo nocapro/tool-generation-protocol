@@ -1,0 +1,26 @@
+/**
+ * A No-Op Database Backend used when no DB is configured.
+ * It logs operations to the console to verify behavior.
+ */
+export function createNoOpDB() {
+    return {
+        async query(sql, params = []) {
+            console.log(`[TGP-DB] Query: ${sql}`, params);
+            return [];
+        },
+        async transaction(fn) {
+            console.log(`[TGP-DB] Begin Transaction`);
+            try {
+                // In a real DB, we would start a trx here.
+                // We pass 'this' as the transactional client (NoOp doesn't distinguish)
+                const result = await fn(this);
+                console.log(`[TGP-DB] Commit Transaction`);
+                return result;
+            }
+            catch (err) {
+                console.log(`[TGP-DB] Rollback Transaction`);
+                throw err;
+            }
+        }
+    };
+}

@@ -30,6 +30,15 @@ export function createMemoryVFS(initialFiles: Record<string, string> = {}): VFSA
       return content;
     },
 
+    readSync(target: string): string {
+      const key = normalizePath(target);
+      const content = store.get(key);
+      if (content === undefined) {
+        throw new Error(`File not found: ${target}`);
+      }
+      return content;
+    },
+
     async writeFile(target: string, content: string): Promise<void> {
       const key = normalizePath(target);
       store.set(key, content);

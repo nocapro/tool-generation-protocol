@@ -24,6 +24,14 @@ export function createMemoryVFS(initialFiles = {}) {
             }
             return content;
         },
+        readSync(target) {
+            const key = normalizePath(target);
+            const content = store.get(key);
+            if (content === undefined) {
+                throw new Error(`File not found: ${target}`);
+            }
+            return content;
+        },
         async writeFile(target, content) {
             const key = normalizePath(target);
             store.set(key, content);

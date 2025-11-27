@@ -32,7 +32,8 @@
       ".relay",
       "dev-docs",
       "LICENSE",
-      ".gitignore"
+      ".gitignore",
+      "tsconfig.tsbuildinfo"
     ]
   },
   "security": {

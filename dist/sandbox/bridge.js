@@ -5,7 +5,7 @@
  * NOTE: When passing functions to isolated-vm, arguments and return values
  * must be serializable or wrapped in References.
  */
-export function createSandboxBridge(kernel) {
+export function createSandboxBridge(kernel, db) {
     const { vfs } = kernel;
     return {
         // --- Filesystem Bridge (Jailed) ---
@@ -38,6 +38,10 @@ export function createSandboxBridge(kernel) {
         // --- Logger ---
         tgp_log: (...args) => {
             console.log('[TGP-TOOL]', ...args);
+        },
+        // --- Database (Transactional) ---
+        tgp_db_query: async (sql, params = []) => {
+            return db.query(sql, params);
         }
     };
 }

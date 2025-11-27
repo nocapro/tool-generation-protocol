@@ -1,4 +1,5 @@
 import * as fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import * as path from 'node:path';
 /**
  * Creates a VFS adapter backed by the physical disk.
@@ -22,6 +23,10 @@ export function createNodeVFS(rootDir) {
         async readFile(target) {
             const fullPath = resolvePath(target);
             return fs.readFile(fullPath, 'utf-8');
+        },
+        readSync(target) {
+            const fullPath = resolvePath(target);
+            return readFileSync(fullPath, 'utf-8');
         },
         async writeFile(target, content) {
             const fullPath = resolvePath(target);

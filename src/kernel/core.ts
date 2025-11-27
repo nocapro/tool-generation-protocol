@@ -1,6 +1,7 @@
 import { TGPConfig } from '../types.js';
 import { VFSAdapter } from '../vfs/types.js';
 import { createGitBackend, GitBackend } from './git.js';
+import { createNoOpDB, DBBackend } from './db.js';
 
 // We inject the low-level FS for Git separately from the VFS adapter
 // This is because Git needs raw FS access, while the Agent uses the VFS Jail.
@@ -16,6 +17,7 @@ export interface Kernel {
   config: TGPConfig;
   vfs: VFSAdapter;
   git: GitBackend;
+  db: DBBackend;
 }
 
 /**
@@ -26,6 +28,7 @@ export function createKernel(opts: KernelOptions): Kernel {
   const { config, vfs, fs } = opts;
   
   const git = createGitBackend(fs, config);
+  const db = createNoOpDB(); // TODO: Connect to real DB based on config.db
 
   let isBooted = false;
 
@@ -33,6 +36,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     config,
     vfs,
     git,
+    db,
 
     async boot() {
       if (isBooted) return;

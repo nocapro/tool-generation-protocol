@@ -179,13 +179,13 @@ export declare const ToolSchema: z.ZodObject<{
     parameters: z.ZodRecord<z.ZodString, z.ZodUnknown>;
     code: z.ZodString;
 }, "strip", z.ZodTypeAny, {
-    code: string;
     name: string;
+    code: string;
     description: string;
     parameters: Record<string, unknown>;
 }, {
-    code: string;
     name: string;
+    code: string;
     description: string;
     parameters: Record<string, unknown>;
 }>;

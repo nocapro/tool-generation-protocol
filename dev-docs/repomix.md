@@ -23,6 +23,7 @@ src/
     memory.ts
     node.ts
     types.ts
+  adapter.ts
   config.ts
   index.ts
   tgp.ts
@@ -30,7 +31,6 @@ src/
 package.json
 README.md
 tsconfig.json
-tsconfig.tsbuildinfo
 ```
 
 # Files
@@ -235,8 +235,8 @@ export function createKernel(opts: KernelOptions): Kernel {
 
 ## File: src/kernel/git.ts
 ````typescript
-import git from 'isomorphic-git';
-import { http } from 'isomorphic-git';
+import * as git from 'isomorphic-git';
+import * as http from 'isomorphic-git/http/node';
 import { TGPConfig } from '../types.js';
 import * as path from 'path';
 
@@ -538,6 +538,14 @@ export function createExecTools(kernel: Kernel) {
       description: 'Execute a tool inside the secure Sandbox.',
       parameters: ExecToolParams,
       execute: async ({ path, args }) => {
+        // Security: Ensure args are serializable (no functions, no circular refs)
+        // This prevents the agent from trying to pass internal objects to the guest.
+        try {
+          JSON.stringify(args);
+        } catch {
+          throw new Error("Arguments must be serializable JSON.");
+        }
+
         const code = await kernel.vfs.readFile(path);
         
         // The sandbox takes care of safety, timeout, and memory limits
@@ -690,10 +698,25 @@ export function createValidationTools(kernel: Kernel) {
             target: 'es2020',
           });
 
-          // TODO: Add AST traversal here to enforce the "8 Standards"
-          // e.g. check for prohibited imports, global state usage, etc.
+          // LINTING: Enforce the "8 Standards" via Static Analysis
+          const errors: string[] = [];
 
-          return { valid: true, errors: [] };
+          // 1. Strict Typing: No 'any'
+          if (/\bany\b/.test(code)) {
+            errors.push("Violation: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+          }
+
+          // 2. Safety: No 'eval' or 'Function' constructor
+          if (/\beval\(/.test(code) || /\bnew Function\(/.test(code)) {
+            errors.push("Violation: Dynamic code execution ('eval') is prohibited.");
+          }
+
+          // 3. Stateless: No process global access (except inside standard library wrappers which are hidden)
+          if (/\bprocess\./.test(code) && !code.includes('process.env.NODE_ENV')) {
+            errors.push("Violation: Direct access to 'process' is prohibited. Use 'args' for inputs.");
+          }
+
+          return { valid: errors.length === 0, errors };
         } catch (error: any) {
           // esbuild errors are usually descriptive
           const msg = error.message || String(error);
@@ -922,6 +945,41 @@ export interface VFSAdapter {
 }
 ````
 
+## File: src/adapter.ts
+````typescript
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+import { ToolSet } from './tools/types.js';
+
+/**
+ * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
+ * 
+ * @param tools The TGP ToolSet (from tgpTools(kernel))
+ * @returns An object compatible with the `tools` parameter of `generateText`
+ */
+export function formatTools(tools: ToolSet) {
+  // Vercel AI SDK Core accepts tools as an object where keys are names
+  // and values have { description, parameters, execute }.
+  // TGP tools already match this signature largely, but we ensure strict typing here.
+  return tools;
+}
+
+/**
+ * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
+ * Useful if using the raw OpenAI SDK.
+ */
+export function toOpenAITools(tools: ToolSet) {
+  return Object.entries(tools).map(([name, tool]) => ({
+    type: 'function',
+    function: {
+      name,
+      description: tool.description,
+      parameters: zodToJsonSchema(tool.parameters),
+    },
+  }));
+}
+````
+
 ## File: src/config.ts
 ````typescript
 import { pathToFileURL } from 'url';
@@ -983,6 +1041,7 @@ export * from './types.js';
 export * from './config.js';
 export * from './tools/index.js';
 export * from './tgp.js';
+export * from './adapter.js';
 ````
 
 ## File: src/tgp.ts
@@ -1150,6 +1209,7 @@ export type ToolDefinition = z.infer<typeof ToolSchema>;
   },
   "dependencies": {
     "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.22.4",
     "isomorphic-git": "^1.35.1",
     "memfs": "^4.51.0",
     "isolated-vm": "^4.7.2",
@@ -1183,11 +1243,6 @@ export type ToolDefinition = z.infer<typeof ToolSchema>;
   },
   "include": ["src/**/*"]
 }
-````
-
-## File: tsconfig.tsbuildinfo
-````
-{"root":["./src/config.ts","./src/index.ts","./src/tgp.ts","./src/types.ts","./src/cli/index.ts","./src/cli/init.ts","./src/kernel/core.ts","./src/kernel/git.ts","./src/sandbox/bridge.ts","./src/sandbox/execute.ts","./src/sandbox/isolate.ts","./src/tools/exec.ts","./src/tools/fs.ts","./src/tools/index.ts","./src/tools/types.ts","./src/tools/validation.ts","./src/vfs/memory.ts","./src/vfs/node.ts","./src/vfs/types.ts"],"errors":true,"version":"5.9.3"}
 ````
 
 ## File: README.md

@@ -1,5 +1,5 @@
-import git from 'isomorphic-git';
-import { http } from 'isomorphic-git';
+import * as git from 'isomorphic-git';
+import * as http from 'isomorphic-git/http/node';
 import * as path from 'path';
 export function createGitBackend(fs, config) {
     const dir = config.rootDir;

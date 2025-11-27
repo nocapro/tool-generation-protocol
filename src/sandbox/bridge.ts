@@ -1,4 +1,5 @@
 import { Kernel } from '../kernel/core.js';
+import { DBBackend } from '../kernel/db.js';
 
 /**
  * Creates the Bridge Object exposed to the Sandbox.
@@ -7,7 +8,7 @@ import { Kernel } from '../kernel/core.js';
  * NOTE: When passing functions to isolated-vm, arguments and return values 
  * must be serializable or wrapped in References.
  */
-export function createSandboxBridge(kernel: Kernel) {
+export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
   const { vfs } = kernel;
 
   return {
@@ -46,6 +47,11 @@ export function createSandboxBridge(kernel: Kernel) {
     // --- Logger ---
     tgp_log: (...args: any[]) => {
       console.log('[TGP-TOOL]', ...args);
+    },
+
+    // --- Database (Transactional) ---
+    tgp_db_query: async (sql: string, params: any[] = []) => {
+      return db.query(sql, params);
     }
   };
 }

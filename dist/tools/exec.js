@@ -10,9 +10,17 @@ export function createExecTools(kernel) {
             description: 'Execute a tool inside the secure Sandbox.',
             parameters: ExecToolParams,
             execute: async ({ path, args }) => {
+                // Security: Ensure args are serializable (no functions, no circular refs)
+                // This prevents the agent from trying to pass internal objects to the guest.
+                try {
+                    JSON.stringify(args);
+                }
+                catch {
+                    throw new Error("Arguments must be serializable JSON.");
+                }
                 const code = await kernel.vfs.readFile(path);
                 // The sandbox takes care of safety, timeout, and memory limits
-                const result = await executeTool(kernel, code, args);
+                const result = await executeTool(kernel, code, args, path);
                 return result;
             },
         },

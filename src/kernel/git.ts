@@ -1,5 +1,5 @@
-import git from 'isomorphic-git';
-import { http } from 'isomorphic-git';
+import * as git from 'isomorphic-git';
+import * as http from 'isomorphic-git/http/node';
 import { TGPConfig } from '../types.js';
 import * as path from 'path';
 
