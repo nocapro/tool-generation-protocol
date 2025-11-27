@@ -1,3 +1,7 @@
+give me diff patches fixing readme.md to achieve the goals and phylosohpy by eliminating inconsistencies
+
+===
+
 is tgp serverless friendly like cloudflare? as it rely on git so should leverege github where auto pull push right? why not asking github creds in the config
 
 ===

@@ -38,7 +38,7 @@ TGP is not just a protocol; it's a **JIT Runtime for Business Logic**. The Agent
   ### Scenario B: The Bulk Janitor
   *   **User**: "Fix the typo in 'Ohiio' for all shipping addresses, but only for active subscriptions."
   *   **Standard AI**: "I can't iterate 50,000 records via chat. It would cost $500 in tokens and timeout."
-  *   **TGP Agent**: Forges `tools/maintenance/fix_ohio.ts`. It executes a single `UPDATE ... WHERE` statement inside a transaction. **Cost: $0.01. Risk: Zero (Rollback on error).**
+  *   **TGP Agent**: Forges `tools/maintenance/fix_ohio.ts`. It executes a single `UPDATE ... WHERE` statement inside a transaction. **Cost: $0.01. Data Risk: Zero (Rollback on error).**
   
   ### Scenario C: The Feature Request Killer
   *   **User**: "Can we calculate 'User Karma' based on (Comments * 2) + Likes?"
@@ -48,15 +48,15 @@ TGP is not just a protocol; it's a **JIT Runtime for Business Logic**. The Agent
   ### Scenario D: The API Chain-Reaction (Integration)
   *   **User**: "Check our Stripe disputes. If any are > $500, fetch the customer's phone number from Salesforce and post it to the #risk-team Slack."
   *   **Standard AI**: "I can't hold context across three different API docs and authentications safely."
-  *   **TGP Agent**: Forges `tools/risk/escalate.ts`. It imports the pre-approved `fetch` bridge, chains the API calls synchronously, and handles the logic errors (e.g., Salesforce 404s) in code, not prompt.
+  *   **TGP Agent**: Forges `tools/risk/escalate.ts`. Marks tool as `sideEffect: true`. Chains API calls synchronously via the `fetch` bridge. Note: External API calls cannot be rolled back; logic must be defensive.
   
   ### Scenario E: The "Math Safeguard" (Pure Logic)
   *   **User**: "Calculate the volumetric weight for these 10,000 SKUs using the FedEx formula `(L*W*H)/139`, but cap it if `L > 48`."
   *   **Standard AI**: (Hallucinates the math) "The answer is 42." (LLMs are bad at arithmetic).
-  *   **TGP Agent**: Forges `tools/shipping/calc_dim.ts`. It doesn't "guess" the number; it **compiles the formula**. The V8 engine does the math, ensuring 100% precision.
+  *   **TGP Agent**: Forges `tools/shipping/calc_dim.ts`. It compiles the formula using `BigInt` for currency. The V8 engine ensures **Deterministic Execution** (it will never hallucinate a different answer for the same input).
   
   1.  **Just-in-Time Compilation**: The agent is not limited to your API endpoints. If a user needs a specific data transformation, the agent **writes the code**, validates it, and runs it.
-  2.  **Zero-Gen Execution**: Once a tool is forged, we stop paying the "Intelligence Tax." Invoking it costs **0 generation tokens**. The agent builds its own standard library (libc) over time.
+  2.  **Zero-Gen Execution**: Once forged, the tool is compiled and stored in an in-memory **LRU Cache** (Least Recently Used). Hot tools run instantly; cold tools incur a <5ms recompilation penalty. Invoking it costs **0 generation tokens**.
   3.  **Agent as OS**: The SaaS application is not a GUI; it is a kernel. The Agent is the Operating System. The Tools are the coreutils. The User is the Admin.
   4.  **SQL as Assembly**: ORMs are abstraction taxes for humans. LLMs speak native SQL. We strip the VM to the metal (~1MB), inject a raw SQL bridge, and rely on host-level transaction rollbacks for safety. The Agent is the Query Builder.
   
@@ -71,6 +71,9 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
 *   **Not a Browser**: Isolates have no DOM. You cannot run Puppeteer or Playwright here. If you need to scrape, the Agent must forge a tool that calls an external scraping API (e.g., Firecrawl).
 *   **Not a UI Generator**: TGP generates *logic*, not *pixels*. It returns JSON, CSV, or Text. It does not write React components or CSS.
 *   **Not a GPU**: Do not try to run PyTorch or video rendering inside the V8 Isolate. The "Math Safeguard" is for invoicing logic, not matrix multiplication.
+*   **Not an ORM**: Do not fetch data, modify it in JS, and save it back (`user.balance += 10`). This causes race conditions.
+    *   **Bad**: `const u = sql(get); u.bal++; sql(update, u.bal)`
+    *   **Good**: `sql('UPDATE users SET balance = balance + 1 WHERE id = ?')` (Atomic SQL).
 
 
 # 2. Architecture (The Stack)
@@ -83,7 +86,7 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   
   ```bash
   ./.tgp/
-  ├── .git/                  # MEMORY: Temporal audit log
+  ├── .git/                  # MEMORY: Version history of TOOL SOURCE CODE only.
   ├── bin/                   # KERNEL: The compiled 'tgp' binary
   ├── tools/                 # USER SPACE: Generated capabilities (Read-Write)
   │   ├── analytics/         # e.g., "churn-prediction.ts"
@@ -92,21 +95,26 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   ```
   
   ## 2.2 The VFS (Virtual Filesystem)
-  The Agent sees a restricted VFS.
-  *   **`/lib`**: Read-Only mount of Host's `./.tgp/tools` (Standard Library).
-  *   **`/tmp`**: Ephemeral scratchpad.
-  *   **`require()`**: Custom syscall. Loads local tools only. `require('tools/math')` works. `require('lodash')` triggers SIGKILL.
+  TGP enforces a strict separation between **The Editor (Host)** and **The Runtime (Sandbox)**.
 
-**Note on Forging**: The Agent does *not* write tools via `fs.writeFile`. The Agent *outputs* source code as a string (JSON result). The **Host SDK** performs the validation and writes the file to disk. The VM is for execution, not persistence.
+  1.  **The Editor (Agent Context)**: The Agent accesses `./.tgp` directly via `tgpTools`. It works just like a human dev using VS Code. It can read, write, and patch source files on the Host disk.
+  2.  **The Runtime (Sandbox Context)**: When code *executes*, it runs inside the V8 Isolate. The Isolate sees a restricted VFS:
+      *   **`/lib`**: Read-Only mount of Host's `./.tgp/tools`.
+      *   **`/tmp`**: Read-Write ephemeral scratchpad (wiped on exit).
+      *   **`require()`**: Custom syscall. Loads local tools only.
   
-  ## 2.3 The `tgp` Binary (Kernel)
-  
-  The agent is **never** permitted to spawn `node` or `child_process` directly. It must use the `tgp` binary, which encapsulates the security layer.
-  
-  *   **`tgp run <script> [args]`**:
-      1.  **JIT Lint**: Automatically runs syntax/import checks before execution.
-      2.  **Sandbox**: Spawns V8 Isolate with restricted ENV.
-      3.  **Injection**: Loads `TGP_CONFIG` and injects DB connections.
+  ## 2.3 The Kernel (Library vs CLI)
+
+  TGP operates in two contexts:
+
+  1.  **Runtime (`@tgp/core`)**: In production, the Host imports the Kernel library. It manages a **Worker Thread Pool**. Each tool runs inside a Worker to allow `Atomics.wait` bridging without blocking the Host's main event loop.
+  2.  **Dev Tools (`tgp` CLI)**: A wrapper around the core for humans to debug, lint, and manage the registry manually.
+
+  *   **Execution Flow**:
+      1.  **JIT Lint**: Kernel parses AST for forbidden nodes (e.g., `process.exit`).
+      2.  **Transpile**: Compiles TS to JS in <5ms using embedded `swc` (cached in memory).
+      3.  **Isolate Pool**: Reuses warmed-up V8 contexts from the pool (Zero-startup).
+      4.  **Injection**: Injects `TGP_CONFIG` and bridged syscalls.
   *   **`tgp check <script>`**:
       *   Explicit dry-run verification (used during the "Forge" phase) without executing logic.
   *   **`tgp fs <cmd> [args]`**:
@@ -142,26 +150,27 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   ### Phase 1: Lookup (Zero Token Cost)
   Before acting, the Agent queries its tool registry.
   ```bash
-  tgp list --query "revenue report"
+  tgp search "revenue report excluding churned users"
+  # Output: Rank 1: tools/analytics/net_revenue.ts (Score: 0.89)
   # Output: tools/analytics/revenue-report.ts (v0.2 - "Generates monthly CSV")
   ```
-  *   **Hit**: Proceed to **Phase 4 (Execution)**.
+  *   **Hit**: If Score > 0.85, Proceed to **Phase 4 (Execution)**.
   *   **Miss**: Proceed to **Phase 2 (Forge)**.
   
   ### Phase 2: Forge (High Token Cost)
   The Agent writes a new tool to fill the gap.
-  1.  **Read Config**: Analyze configuration for schema paths and allowed libraries.
-  2.  **Draft**: Write a TypeScript file (e.g., `temp/draft.ts`).
-      *   **Constraint 1 (Stateless)**: File must `export default function(params, context)`. NO top-level execution.
-      *   **Constraint 2 (Composable)**: Break complex logic into helper functions. Use `require()` to import existing tools.
-      *   **Constraint 3 (Abstract)**: No hardcoded IDs. All variables must be arguments.
-  3.  **Verify**: SDK runs `tgp check` automatically. (See Sec 2.3).
+  1.  **Discovery**: `tgp_inspect_schema(...)`.
+  2.  **Draft**: Agent calls `tgp_fs_write('tools/analytics/churn.ts', content)`.
+      *   **Constraint**: The Agent writes directly to the Host repo.
+  3.  **Verify**: Agent calls `tgp_check('tools/analytics/churn.ts')`.
+      *   **Static**: Kernel runs JIT Lint/Compiler.
+      *   **Runtime**: Kernel runs dry-run execution in the Sandbox.
+      *   **Feedback**: If verification fails, the Agent receives `stderr` and uses `tgp_fs_patch` to fix the code in place.
   
   ### Phase 3: Persistence (Temporal Memory)
-  The Agent invokes the `tgp_publish` tool.
-  *   **Input**: `{ "source": "temp/draft.ts", "dest": "tools/analytics/revenue.ts", "msg": "feat: add csv" }`
-  *   **Action**: SDK runs `tgp publish ...`
-  *   **Result**: `{ "status": "ok", "hash": "a1b2c3d" }`
+  Once verified, the Agent commits the work.
+  *   **Action**: `tgp_git_commit('feat: add churn metric')`
+  *   **Effect**: The tool is now immutable history in `.tgp/.git`.
   
   ### Phase 4: Execution (Native Speed)
   The Agent invokes `tgp_exec`.
@@ -172,8 +181,9 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   
   If a tool fails during [Phase 4](#phase-4-execution-native-speed):
   1.  **Capture**: Agent reads STDERR.
-  2.  **Diagnose**: Is it a data error (invalid input) or a logic error (bug)?
-  3.  **Refactor**:
+  2.  **Sanitize**: The Kernel redacts PII from the error trace, providing only the **Type Shape** of the failing row (e.g., `{ email: <Redacted String>, age: <Null> }`).
+  3.  **Diagnose**: Agent identifies that `age` was null but code didn't handle it.
+  4.  **Refactor**:
       *   Agent creates `fix/revenue-report` branch.
       *   Patches code.
       *   Runs `tgp check`.
@@ -190,9 +200,9 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   
   ## 3.4 Schema Entropy
   Tools are compiled against a specific DB schema snapshot.
-  *   **Drift Detection**: On Host boot, `tgp` hashes `schema.sql`.
-  *   **Invalidation**: If the hash changes, all tools are marked `dirty`.
-  *   **Re-Forge**: The next invocation of a dirty tool triggers a forced re-verification (Phase 2) to ensure the SQL is still valid.
+  *   **Dependency Graph**: During compilation, TGP maps tools to tables (e.g., `revenue.ts` -> `[orders, users]`).
+  *   **Surgical Invalidation**: When the schema changes, TGP only marks tools touching altered tables as `dirty`.
+  *   **Lazy Re-Forge**: Dirty tools are not rebuilt immediately. They are rebuilt JIT upon their next specific invocation, spreading the compute load.
   
   # 4. Security (The Sandbox)
   
@@ -210,7 +220,10 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
 *   **`/tmp`**: Ephemeral scratchpad.
 *   **`require()`**: Custom syscall. Loads local tools only. `require('tools/math')` works. `require('lodash')` triggers SIGKILL.
 
-**Note on Forging**: The Agent does *not* write tools via `fs.writeFile`. The Agent *outputs* source code as a string (JSON result). The **Host SDK** performs the validation and writes the file to disk. The VM is for execution, not persistence.
+**The Great Wall**:
+  *   **The Agent (Host)**: Can write to `./.tgp/tools` via `tgpTools` (IDE Mode).
+  *   **The Tool (Guest)**: Can **NEVER** write to `./.tgp/tools`. The Sandbox filesystem is read-only.
+  *   **Result**: A compromised tool cannot rewrite itself or other tools. Only the Agent (acting as Admin) can modify the codebase.
   
   TGP uses **`isolated-vm`**, which is **The Vault**.
   
@@ -235,19 +248,28 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   1.  **Separate Heaps**: The Agent cannot access Host memory, even by accident.
   2.  **Separate GC**: Garbage collection in a tool does not pause the Host.
   3.  **Sync-within-Async**: The Agent writes synchronous code (`const rows = sql(q)`).
-    *   **Mechanism**: The Host spawns a **Worker Thread** for DB interaction.
-    *   **Bridge**: The Isolate uses `Atomics.wait` on a `SharedArrayBuffer` to pause execution without blocking the Host's main event loop.
+    *   **Mechanism**: The Tool runs in a dedicated **Worker Thread**.
+    *   **Bridge**: The Isolate uses `Atomics.wait` on a `SharedArrayBuffer` to pause the Worker (cheap) while the Main Thread handles the async I/O (DB/Fetch), preventing Event Loop starvation.
   
   *   **True Isolation**: Tools cannot access the host `process` object, `require`, or the filesystem.
   *   **The Syscall Bridge**: Tools interact with the world ONLY through the injected `tgp` global object (the stable ABI).
   *   **The SQL Bridge**: We do not load ORMs (Drizzle/Prisma) into the isolate.
       *   **Host**: Exposes `jail.setSync('sql', (query) => tx.execute(query))`
       *   **Guest**: Agent calls `const rows = sql(query)`. No `await`, no callbacks.
-      *   **Safety**: The Host wraps execution in a transaction. If the tool errors or hallucinates invalid SQL, `tx.rollback()` is triggered instantly.
+      *   **Safety**: The Host leases a DB Client, starts a Transaction, and holds it open for the duration of the tool (max 30s).
+      *   **Constraint**: High-latency tools (e.g., waiting on external APIs) will block a DB connection. TGP enforces aggressive timeouts to prevent pool exhaustion.
   *   **Zero-Dependency**: The VM starts empty (~1MB RAM). Startup time is **< 2ms**.
   
   ## 4.2 The Serialization Wall
   `isolated-vm` prevents direct object passing. You cannot pass a Host Object to the Guest.
+
+**The Reference Protocol (Cursors):**
+For large datasets, we do not serialize the whole array.
+1.  **Host**: Returns a `ReferenceID` (Pointer) to the DB Cursor.
+2.  **Guest**: Calls `cursor_next(refID)`.
+3.  **Bridge**: Passes only one row at a time across the boundary.
+
+*This prevents the 64MB memory limit from killing large reports.*
   
   **The Marshalling Protocol:**
   1.  **Guest**: Serializes arguments to string (`JSON.stringify([email])`).
@@ -257,6 +279,11 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   
   *This overhead is negligible compared to the safety guarantees.*
   
+  ## 4.2.1 The Module Resolution (Cycle Detection)
+  The Kernel maintains a `moduleMap` per Isolate.
+  *   **Cache**: `require('x')` returns the memoized exports if previously loaded.
+  *   **Cycles**: Circular dependencies throw a `RUNTIME_ERROR` immediately to prevent stack overflow in the bridge.
+
   ## 4.3 Resource Quotas
   To prevent infinite loops (`while(true)`) or memory leaks from crashing the tenant pod, the Kernel applies V8 and OS-level limits per execution.
   
@@ -282,7 +309,8 @@ TGP is a **Just-In-Time Compiler**, not a Daemon. If you try to do these, you ar
   ## 4.5 Network Firewall
   *   **Default**: Block all outbound HTTP/TCP.
   *   **Allowlist**: If a tool requires API access (e.g., Stripe), the specific domain must be whitelisted in `meta.json` and the tool must use the project's pre-approved Axios/Fetch instance, not a raw socket.
-  *   **Implementation**: `global.fetch` is injected by the bridge. It is a synchronous wrapper around the Host's `fetch`, enforcing the whitelist at the network boundary.
+  *   **Implementation**: `global.fetch` is injected by the bridge. It is a synchronous wrapper around the Host's `fetch`.
+  *   **Safety**: To prevent Worker Starvation, the bridge enforces a **5000ms Hard Timeout** on all network calls. If Stripe hangs, the Tool dies instantly, freeing the thread.
   
   # 5. The Ecosystem (Join the Hive)
   
@@ -292,10 +320,11 @@ Every TGP Agent starts with a blank slate, but it shouldn't have to relearn how 
 
 ### 5.1 The `tgp-std` Library
 We are crowdsourcing verified, stateless tool definitions.
-*   **Building a SaaS?** `npm install @tgp/std-saas` (Includes: churn, MRR, cohort analysis).
-*   **Building an E-com?** `npm install @tgp/std-shopify` (Includes: inventory forecast, shipping dim-weight).
+*   **Host Installation**: You (the Dev) run `npm install @tgp/std-saas`.
+*   **Guest Injection**: In `tgp.config.ts`, you whitelist these libs. The Kernel snapshots them into the V8 context at boot.
+*   **Agent Usage**: The Agent uses `require('@tgp/std/v1')`. We enforce **Immutable Exports**. New features go to `v2`, ensuring legacy tools generated months ago never break.
 
-**Contribute:** Don't just prompt-engineer. **Code-engineer.** Submit optimized TypeScript tools to the global registry.
+**Module System**: The V8 Isolate uses a synthetic CommonJS loader. Agents use `require()` for imports and `export default function` for the entry point. The Kernel handles the interoperability.
   
   ## 5.1 The Logic/State Split
   
@@ -353,6 +382,9 @@ We are crowdsourcing verified, stateless tool definitions.
     *   *Linter*: Warns on string literals that resemble emails, UUIDs, or Credit Cards.
   2.  **Export Required**: The AST must contain a default export.
   3.  **Arity Check**: The exported function must accept exactly two arguments: `(params, context)`.
+      *   **Time Injection**: `context.now` (Date) is provided by the Kernel.
+      *   **Violation**: `const today = new Date()` (Impure, hard to test).
+      *   **Allowed**: `const today = context.now`.
       *   *Violation*: `const user = "admin@tesla.com"`
       *   *Allowed*: `const user = args.email`
   2.  **No Side Effects**: Enforced by [Security Kernel](#4-security-kernel).
@@ -370,12 +402,14 @@ We are crowdsourcing verified, stateless tool definitions.
   
   ## 6.2 Gatekeeper Mode (Production)
   *   **Behavior**: `Forge -> Compile -> Pull Request`.
-  *   **The "Human Break"**: The Agent cannot execute a *new* tool until a human (or CI pipeline) approves the signature.
+  *   **Heuristic Governance**:
+      *   **Read-Only Tools**: (e.g., Reports) AST verifies 0 side-effects. **Auto-Approved** for immediate execution. PR opened in background for persistence.
+      *   **Mutating Tools**: (e.g., Bulk Updates) **Blocked**. Agent requests approval.
   *   **Workflow**:
-      1.  User asks: "Analyze cohorts."
-      2.  Agent: "Tool missing. I have drafted `cohort-analysis.ts`. Requesting approval."
-      3.  Admin clicks "Approve" (GitHub API merge).
-      4.  Agent: "Tool merged. Executing now."
+      1.  User asks: "Fix typos."
+      2.  Agent: "I have drafted `fix_typos.ts` (Risk: High). Sent to Slack for approval."
+      3.  Admin clicks "Approve" (Webhook).
+      4.  Agent: "Approval received. Executing."
   
   # 7. Integration Spec
   
@@ -392,7 +426,7 @@ We are crowdsourcing verified, stateless tool definitions.
   **The "Wizard" performs 5 atomic actions:**
   1.  **Detection**: Scans `package.json` to identify your ORM (Drizzle/Prisma) and database driver.
   2.  **Scaffolding**: Creates the `.tgp/` directory structure and `core/` utilities.
-  3.  **Memory Init**: Runs `git init` inside `.tgp/` (separate from your main repo git).
+  3.  **Memory Init**: Runs `git init` inside `.tgp/` and adds `.tgp/` to your root `.gitignore`. This ensures the Agent's self-modifying history doesn't pollute your main branch.
   4.  **Config**: Generates a strongly-typed `tgp.config.ts`.
   5.  **Instruction**: Generates `.cursorrules` (or `.windsurfrules`) to align your IDE AI.
   
@@ -468,8 +502,8 @@ We are crowdsourcing verified, stateless tool definitions.
   
   ## 3. HOW TO FORGE (The Protocol)
   1.  **Draft**: Create `temp/draft.ts`.
-      - **NO NPM IMPORTS**: `require('lodash')` is banned.
-      - **LOCAL IMPORTS OK**: `require('tools/utils/date')` is encouraged.
+      - **NO NPM INSTALL**: You cannot access the internet.
+      - **WHITELIST IMPORTS**: Use `require()` only for `tools/*` or libraries explicitly listed in your config context (e.g., `@tgp/std`).
       - **RAW SQL**: Use the global `sql(query, params)` function. IT IS SYNCHRONOUS. DO NOT AWAIT.
       - **SCHEMA**: Refer to the `CREATE TABLE` definitions provided in context.
       - **OUTPUT**: Print final result as JSON to STDOUT.
@@ -524,10 +558,12 @@ We are crowdsourcing verified, stateless tool definitions.
   
     // 2. Inject Capabilities
     // TGP automatically generates the JSON Schema for:
-    // - tgp_list_tools
-    // - tgp_read_source
-    // - tgp_forge_tool
-    // - tgp_exec_tool
+    // - tgp_fs_list      (ls)
+    // - tgp_fs_read      (cat)
+    // - tgp_fs_write     (write file to .tgp/)
+    // - tgp_fs_patch     (search/replace)
+    // - tgp_check        (compile & dry-run)
+    // - tgp_exec_tool    (run inside sandbox)
     const result = await generateText({
       model: openai('gpt-4-turbo'),
       tools: tgpTools(kernel), // <--- THE BRIDGE
