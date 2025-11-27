@@ -1,5 +1,6 @@
 import { createGitBackend } from './git.js';
 import { createNoOpDB } from './db.js';
+import { createRegistry } from './registry.js';
 /**
  * Factory to create a TGP Kernel.
  * This wires up the configuration, the filesystem, and the git backend.
@@ -8,12 +9,14 @@ export function createKernel(opts) {
     const { config, vfs, fs } = opts;
     const git = createGitBackend(fs, config);
     const db = createNoOpDB(); // TODO: Connect to real DB based on config.db
+    const registry = createRegistry(vfs);
     let isBooted = false;
     return {
         config,
         vfs,
         git,
         db,
+        registry,
         async boot() {
             if (isBooted)
                 return;
@@ -21,6 +24,8 @@ export function createKernel(opts) {
             try {
                 // Hydrate the filesystem from Git
                 await git.hydrate();
+                // Hydrate registry from meta.json
+                await registry.hydrate();
                 isBooted = true;
                 console.log(`[TGP] Kernel ready.`);
             }

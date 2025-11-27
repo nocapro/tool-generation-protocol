@@ -38,6 +38,7 @@ export function createNodeVFS(rootDir) {
         async remove(target) {
             const fullPath = resolvePath(target);
             // Silent failure if not exists, matching standard rm -f behavior
+            // eslint-disable-next-line @typescript-eslint/no-empty-function
             await fs.rm(fullPath, { force: true }).catch(() => { });
         },
         async exists(target) {

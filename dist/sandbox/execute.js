@@ -10,6 +10,7 @@ import * as path from 'path';
  * @param args The arguments object to pass to the tool (as 'args' global)
  * @param filePath Optional path of the tool being executed (used for relative imports)
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function executeTool(kernel, code, args = {}, filePath = 'root.ts') {
     const sandbox = createSandbox({
         memoryLimitMb: 128,
@@ -55,6 +56,7 @@ export async function executeTool(kernel, code, args = {}, filePath = 'root.ts')
                     };
                 }
                 catch (err) {
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
                     throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
                 }
             };
@@ -95,8 +97,8 @@ export async function executeTool(kernel, code, args = {}, filePath = 'root.ts')
         global.require = __makeRequire('${path.dirname(filePath)}');
       `;
             const context = {
+                ...bridge, // { tgp: { ... } }
                 args,
-                ...bridge,
                 __tgp_load_module // Injected as Reference
             };
             // Combine Shim + User Code

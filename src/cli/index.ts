@@ -1,5 +1,4 @@
-import * as path from 'path';
-import * as fs from 'fs/promises';
+/* eslint-disable no-console */
 import { initCommand } from './init.js';
 
 export async function cli() {

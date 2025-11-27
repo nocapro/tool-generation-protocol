@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import * as fs from 'fs/promises';
 import * as path from 'path';
 export async function initCommand() {
@@ -6,6 +7,8 @@ export async function initCommand() {
     const configPath = path.join(cwd, 'tgp.config.ts');
     const gitIgnorePath = path.join(cwd, '.gitignore');
     const tgpDir = path.join(cwd, '.tgp');
+    const toolsDir = path.join(tgpDir, 'tools');
+    const metaPath = path.join(tgpDir, 'meta.json');
     // 1. Create tgp.config.ts
     if (await exists(configPath)) {
         console.log(`[TGP] tgp.config.ts already exists. Skipping.`);
@@ -28,6 +31,14 @@ export async function initCommand() {
     }
     // 3. Create .tgp directory (just to be nice)
     await fs.mkdir(tgpDir, { recursive: true });
+    // 4. Scaffold Tools directory
+    await fs.mkdir(toolsDir, { recursive: true });
+    console.log(`[TGP] Created .tgp/tools directory`);
+    // 5. Initialize Registry (meta.json)
+    if (!await exists(metaPath)) {
+        await fs.writeFile(metaPath, JSON.stringify({ tools: {} }, null, 2));
+        console.log(`[TGP] Created .tgp/meta.json`);
+    }
     console.log(`[TGP] Initialization complete. Run 'npx tgp' to start hacking.`);
 }
 async function exists(p) {

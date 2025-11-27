@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import { initCommand } from './init.js';
 export async function cli() {
     const args = process.argv.slice(2);

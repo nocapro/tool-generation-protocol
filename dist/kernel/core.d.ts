@@ -2,6 +2,7 @@ import { TGPConfig } from '../types.js';
 import { VFSAdapter } from '../vfs/types.js';
 import { GitBackend } from './git.js';
 import { DBBackend } from './db.js';
+import { Registry } from './registry.js';
 export interface KernelOptions {
     config: TGPConfig;
     vfs: VFSAdapter;
@@ -14,6 +15,7 @@ export interface Kernel {
     vfs: VFSAdapter;
     git: GitBackend;
     db: DBBackend;
+    registry: Registry;
 }
 /**
  * Factory to create a TGP Kernel.

@@ -47,6 +47,7 @@ export function createNodeVFS(rootDir: string): VFSAdapter {
     async remove(target: string): Promise<void> {
       const fullPath = resolvePath(target);
       // Silent failure if not exists, matching standard rm -f behavior
+      // eslint-disable-next-line @typescript-eslint/no-empty-function
       await fs.rm(fullPath, { force: true }).catch(() => {}); 
     },
 

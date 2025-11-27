@@ -54,3 +54,13 @@ export const ToolSchema = z.object({
 });
 
 export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+export interface ToolMetadata {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface RegistryState {
+  tools: Record<string, ToolMetadata>;
+}

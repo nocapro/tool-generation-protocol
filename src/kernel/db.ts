@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /**
  * The Database Kernel Interface.
  * 
@@ -10,6 +11,7 @@ export interface DBBackend {
    * @param sql The SQL query string.
    * @param params Parameter substitutions.
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   query(sql: string, params?: any[]): Promise<any[]>;
 
   /**
@@ -25,6 +27,7 @@ export interface DBBackend {
  */
 export function createNoOpDB(): DBBackend {
   return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async query(sql: string, params: any[] = []) {
       console.log(`[TGP-DB] Query: ${sql}`, params);
       return [];

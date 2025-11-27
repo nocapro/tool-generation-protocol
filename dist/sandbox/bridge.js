@@ -2,46 +2,44 @@
  * Creates the Bridge Object exposed to the Sandbox.
  * This maps secure Kernel methods to the Guest environment.
  *
- * NOTE: When passing functions to isolated-vm, arguments and return values
- * must be serializable or wrapped in References.
+ * We expose a structured 'tgp' object to the guest.
  */
 export function createSandboxBridge(kernel, db) {
     const { vfs } = kernel;
     return {
-        // --- Filesystem Bridge (Jailed) ---
-        // The Guest sees these as async functions on the global scope or a 'tgp' object.
-        // tgp_read_file('./data.txt')
-        tgp_read_file: async (path) => {
-            // VFS already enforces jail path traversal checks
-            return vfs.readFile(path);
-        },
-        // tgp_write_file('./output.txt', 'content')
-        tgp_write_file: async (path, content) => {
-            return vfs.writeFile(path, content);
-        },
-        // tgp_list_files('./tools')
-        tgp_list_files: async (dir) => {
-            return vfs.listFiles(dir, false);
-        },
-        // --- Network Bridge (Allowed Only) ---
-        // We can inject a restricted fetch here.
-        tgp_fetch: async (url, init) => {
-            // Security: Parse URL and allow-list check could happen here
-            const response = await fetch(url, init);
-            const text = await response.text();
-            return {
-                status: response.status,
-                text: () => text,
-                json: () => JSON.parse(text),
-            };
-        },
-        // --- Logger ---
-        tgp_log: (...args) => {
-            console.log('[TGP-TOOL]', ...args);
-        },
-        // --- Database (Transactional) ---
-        tgp_db_query: async (sql, params = []) => {
-            return db.query(sql, params);
+        tgp: {
+            // --- Filesystem Bridge (Jailed) ---
+            read_file: async (path) => {
+                return vfs.readFile(path);
+            },
+            write_file: async (path, content) => {
+                return vfs.writeFile(path, content);
+            },
+            list_files: async (dir) => {
+                return vfs.listFiles(dir, false);
+            },
+            // --- Network Bridge (Allowed Only) ---
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            fetch: async (url, init) => {
+                // Security: Parse URL and allow-list check could happen here
+                const response = await fetch(url, init);
+                const text = await response.text();
+                return {
+                    status: response.status,
+                    text: () => text,
+                    json: () => JSON.parse(text),
+                };
+            },
+            // --- Logger ---
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            log: (...args) => {
+                console.log('[TGP-TOOL]', ...args);
+            },
+            // --- Database (Transactional) ---
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            db_query: async (sql, params = []) => {
+                return db.query(sql, params);
+            }
         }
     };
 }

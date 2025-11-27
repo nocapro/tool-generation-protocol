@@ -35,7 +35,11 @@ export function createFsTools(kernel) {
             parameters: WriteFileParams,
             execute: async ({ path, content }) => {
                 await kernel.vfs.writeFile(path, content);
-                return { success: true, path };
+                // Register the new tool in the Registry (updates meta.json)
+                await kernel.registry.register(path, content);
+                // Persist to Git (Tool + meta.json)
+                await kernel.git.persist(`Forge: ${path}`, [path, 'meta.json']);
+                return { success: true, path, persisted: true };
             },
         },
         patch_file: {
@@ -50,7 +54,10 @@ export function createFsTools(kernel) {
                 // If the agent needs global replace, it can do so in a loop or we can expand this tool later.
                 const newContent = content.replace(search, replace);
                 await kernel.vfs.writeFile(path, newContent);
-                return { success: true, path };
+                // Update registry in case descriptions changed
+                await kernel.registry.register(path, newContent);
+                await kernel.git.persist(`Refactor: ${path}`, [path, 'meta.json']);
+                return { success: true, path, persisted: true };
             },
         },
     };

@@ -4,11 +4,12 @@ import { transform } from 'esbuild';
  * Creates a secure V8 Isolate.
  */
 export function createSandbox(opts = {}) {
-    const memoryLimit = opts.memoryLimitMb || 128;
-    const timeout = opts.timeoutMs || 5000;
+    const memoryLimit = opts.memoryLimitMb ?? 128;
+    const timeout = opts.timeoutMs ?? 5000;
     // Create the heavy V8 Isolate (The Virtual Machine)
     const isolate = new ivm.Isolate({ memoryLimit });
     return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         async compileAndRun(tsCode, context) {
             // 1. JIT Compile (TypeScript -> JavaScript)
             // We use esbuild for speed.
@@ -27,12 +28,43 @@ export function createSandbox(opts = {}) {
                 await jail.set('global', jail.derefInto()); // standard polyfill
                 // We iterate over the context object and inject functions/values
                 for (const [key, value] of Object.entries(context)) {
-                    if (typeof value === 'function') {
-                        // Bridge functions: Host runs the logic, Guest calls it
+                    if (typeof value === 'object' && value !== null) {
+                        // Handle namespaces (e.g. 'tgp')
+                        // We create a container in the guest and populate it
+                        // Note: deeply nested objects are not supported by this simple loop, just 1 level
+                        const container = new ivm.Reference({});
+                        await jail.set(key, container);
+                        // We can't easily populate a Reference from Host side without running script or intricate IVM calls.
+                        // Easier strategy: Copy by value if JSON, or if it contains functions, we need a different approach.
+                        // Since 'tgp' contains functions, we can't use ExternalCopy.
+                        // Let's recursively set on the global object's property? 
+                        // IVM makes this tricky. 
+                        // ALTERNATIVE: We inject a plain object with References.
+                        // Actually, 'context' passed here is usually flat or simple.
+                        // Since we changed Bridge to return { tgp: { ... } }, we need to handle it.
+                        // Let's use `compileScript` to setup the namespace if we can't do it via API easily.
+                        // Wait, jail.set accepts Reference. 
+                        // If we pass an object containing References, IVM doesn't auto-unwrap.
+                        // Let's treat 'tgp' special case or generic object-of-functions.
+                        if (key === 'tgp') {
+                            // Create the 'tgp' object in the guest
+                            await isolate.compileScript(`global.tgp = {}`).then(s => s.run(ivmContext));
+                            const tgpHandle = await jail.get('tgp');
+                            for (const [subKey, subValue] of Object.entries(value)) {
+                                if (typeof subValue === 'function') {
+                                    await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                                }
+                            }
+                        }
+                        else {
+                            // Fallback for non-function objects
+                            await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                        }
+                    }
+                    else if (typeof value === 'function') {
                         await jail.set(key, new ivm.Reference(value));
                     }
                     else {
-                        // Bridge values: Copy by value (JSON safe)
                         await jail.set(key, new ivm.ExternalCopy(value).copyInto());
                     }
                 }
@@ -41,7 +73,7 @@ export function createSandbox(opts = {}) {
                 // 5. Execute
                 const result = await script.run(ivmContext, { timeout });
                 // 6. Return result (Unwrap from IVM)
-                if (result && typeof result === 'object' && 'copy' in result) {
+                if (typeof result === 'object' && result !== null && 'copy' in result) {
                     // If it's a reference, try to copy it out, otherwise return as is
                     return result.copy();
                 }

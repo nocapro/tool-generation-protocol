@@ -4,6 +4,7 @@
  */
 export function createNoOpDB() {
     return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         async query(sql, params = []) {
             console.log(`[TGP-DB] Query: ${sql}`, params);
             return [];

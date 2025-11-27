@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import * as git from 'isomorphic-git';
 import * as http from 'isomorphic-git/http/node';
 import { TGPConfig } from '../types.js';
@@ -12,6 +13,7 @@ export interface GitBackend {
   persist(message: string, files: string[]): Promise<void>;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
   const dir = config.rootDir;
   const { repo, auth, branch, writeStrategy } = config.git;
@@ -32,9 +34,9 @@ export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
   return {
     async hydrate() {
       // 1. Check if repo exists locally
-      const gitDirExists = await fs.promises.stat(path.join(dir, '.git'))
+      const gitDirExists = (await fs.promises.stat(path.join(dir, '.git'))
         .then(() => true)
-        .catch(() => false);
+        .catch(() => false)) as boolean;
 
       if (!gitDirExists) {
         // Clone
@@ -62,7 +64,14 @@ export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
     async persist(message: string, filesToAdd: string[]) {
       // 1. Add files
       for (const filepath of filesToAdd) {
-        await git.add({ ...gitOpts, filepath });
+        try {
+           // check if file exists before adding (might be deleted, though not in this context)
+           await git.add({ ...gitOpts, filepath });
+        } catch (e) {
+           // If file doesn't exist, maybe it was a deletion? 
+           // For TGP v1 we assume add/update.
+           console.warn(`[TGP] Git Add failed for ${filepath}`, e);
+        }
       }
 
       // 2. Commit

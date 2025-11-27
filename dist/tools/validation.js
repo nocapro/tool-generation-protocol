@@ -32,10 +32,11 @@ export function createValidationTools(kernel) {
                         errors.push("Violation: Direct access to 'process' is prohibited. Use 'args' for inputs.");
                     }
                     return { valid: errors.length === 0, errors };
+                    // eslint-disable-next-line @typescript-eslint/no-explicit-any
                 }
                 catch (error) {
                     // esbuild errors are usually descriptive
-                    const msg = error.message || String(error);
+                    const msg = error.message ?? String(error);
                     // Return valid: false so the model can reason about the error, rather than crashing the tool call
                     return { valid: false, errors: [msg] };
                 }

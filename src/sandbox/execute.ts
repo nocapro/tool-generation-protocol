@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 import { Kernel } from '../kernel/core.js';
 import { createSandbox } from './isolate.js';
 import { createSandboxBridge } from './bridge.js';
@@ -12,6 +13,7 @@ import * as path from 'path';
  * @param args The arguments object to pass to the tool (as 'args' global)
  * @param filePath Optional path of the tool being executed (used for relative imports)
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<any> {
   const sandbox = createSandbox({
     memoryLimitMb: 128,
@@ -61,6 +63,7 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
             dirname: path.dirname(targetPath)
           };
         } catch (err: any) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
           throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
         }
       };
@@ -103,8 +106,8 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
       `;
 
       const context = {
+        ...bridge, // { tgp: { ... } }
         args,
-        ...bridge,
         __tgp_load_module // Injected as Reference
       };
 

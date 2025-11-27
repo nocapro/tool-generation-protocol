@@ -28,6 +28,7 @@ export function createExecTools(kernel: Kernel) {
         const result = await executeTool(kernel, code, args, path);
         return result;
       },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as AgentTool<typeof ExecToolParams, any>,
   };
 }

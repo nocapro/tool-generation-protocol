@@ -8,7 +8,9 @@ src/
     init.ts
   kernel/
     core.ts
+    db.ts
     git.ts
+    registry.ts
   sandbox/
     bridge.ts
     execute.ts
@@ -28,12 +30,141 @@ src/
   index.ts
   tgp.ts
   types.ts
+eslint.config.js
 package.json
 README.md
 tsconfig.json
 ```
 
 # Files
+
+## File: src/kernel/registry.ts
+````typescript
+import { VFSAdapter } from '../vfs/types.js';
+import { RegistryState, ToolMetadata } from '../types.js';
+import * as path from 'path';
+
+export interface Registry {
+  hydrate(): Promise<void>;
+  register(filePath: string, code: string): Promise<void>;
+  list(): ToolMetadata[];
+  sync(): Promise<void>;
+}
+
+export function createRegistry(vfs: VFSAdapter): Registry {
+  let state: RegistryState = { tools: {} };
+  const META_PATH = 'meta.json';
+
+  // Helper to parse JSDoc
+  function extractMetadata(filePath: string, code: string): ToolMetadata {
+    const name = path.basename(filePath, path.extname(filePath));
+    
+    // Simple JSDoc Regex: /** ... */
+    const jsDocMatch = code.match(/\/\*\*([\s\S]*?)\*\//);
+    let description = "No description provided.";
+    
+    if (jsDocMatch) {
+      const content = jsDocMatch[1];
+      // Clean up stars and whitespace
+      description = content
+        .split('\n')
+        .map(line => line.replace(/^\s*\*\s?/, '').trim())
+        .filter(line => !line.startsWith('@') && line.length > 0) // Remove param tags and empty lines
+        .join(' ');
+    }
+
+    return {
+      name,
+      description: description || "No description provided.",
+      path: filePath
+    };
+  }
+
+  return {
+    async hydrate() {
+      if (await vfs.exists(META_PATH)) {
+        try {
+          const content = await vfs.readFile(META_PATH);
+          state = JSON.parse(content);
+        } catch (err) {
+          console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
+          state = { tools: {} };
+        }
+      }
+    },
+
+    async register(filePath: string, code: string) {
+      // Ignore non-tool files (e.g. config or hidden files)
+      if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+      const metadata = extractMetadata(filePath, code);
+      state.tools[filePath] = metadata;
+      
+      // We don't sync on every register to avoid IO storm if called in loop, 
+      // but for write_file it is fine.
+      await this.sync();
+    },
+
+    list() {
+      return Object.values(state.tools);
+    },
+
+    async sync() {
+      await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+    }
+  };
+}
+````
+
+## File: eslint.config.js
+````javascript
+import typescriptESLint from '@typescript-eslint/eslint-plugin';
+import typescriptParser from '@typescript-eslint/parser';
+
+export default [
+  {
+    files: ['src/**/*.ts'],
+    languageOptions: {
+      parser: typescriptParser,
+      parserOptions: {
+        ecmaVersion: 2022,
+        sourceType: 'module',
+        project: './tsconfig.json',
+      },
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        Buffer: 'readonly',
+        __dirname: 'readonly',
+        __filename: 'readonly',
+        global: 'readonly',
+      },
+    },
+    plugins: {
+      '@typescript-eslint': typescriptESLint,
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-non-null-assertion': 'warn',
+      '@typescript-eslint/no-empty-function': 'error',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+      '@typescript-eslint/prefer-as-const': 'error',
+      '@typescript-eslint/prefer-nullish-coalescing': 'error',
+      '@typescript-eslint/prefer-optional-chain': 'error',
+      '@typescript-eslint/strict-boolean-expressions': 'error',
+      'no-console': 'warn',
+      'no-debugger': 'error',
+      'no-unused-expressions': 'error',
+      'prefer-const': 'error',
+      'no-var': 'error',
+    },
+  },
+  {
+    ignores: ['dist/', 'node_modules/', '*.js'],
+  },
+];
+````
 
 ## File: bin/tgp.js
 ````javascript
@@ -98,6 +229,8 @@ export async function initCommand() {
   const configPath = path.join(cwd, 'tgp.config.ts');
   const gitIgnorePath = path.join(cwd, '.gitignore');
   const tgpDir = path.join(cwd, '.tgp');
+  const toolsDir = path.join(tgpDir, 'tools');
+  const metaPath = path.join(tgpDir, 'meta.json');
 
   // 1. Create tgp.config.ts
   if (await exists(configPath)) {
@@ -121,6 +254,16 @@ export async function initCommand() {
 
   // 3. Create .tgp directory (just to be nice)
   await fs.mkdir(tgpDir, { recursive: true });
+
+  // 4. Scaffold Tools directory
+  await fs.mkdir(toolsDir, { recursive: true });
+  console.log(`[TGP] Created .tgp/tools directory`);
+
+  // 5. Initialize Registry (meta.json)
+  if (!await exists(metaPath)) {
+    await fs.writeFile(metaPath, JSON.stringify({ tools: {} }, null, 2));
+    console.log(`[TGP] Created .tgp/meta.json`);
+  }
 
   console.log(`[TGP] Initialization complete. Run 'npx tgp' to start hacking.`);
 }
@@ -171,263 +314,54 @@ export default defineTGPConfig({
 `;
 ````
 
-## File: src/kernel/core.ts
+## File: src/kernel/db.ts
 ````typescript
-import { TGPConfig } from '../types.js';
-import { VFSAdapter } from '../vfs/types.js';
-import { createGitBackend, GitBackend } from './git.js';
+/**
+ * The Database Kernel Interface.
+ * 
+ * TGP guarantees that all tool executions happen within a transaction.
+ * If the tool throws, the transaction is rolled back.
+ */
+export interface DBBackend {
+  /**
+   * Executes a raw SQL query.
+   * @param sql The SQL query string.
+   * @param params Parameter substitutions.
+   */
+  query(sql: string, params?: any[]): Promise<any[]>;
 
-// We inject the low-level FS for Git separately from the VFS adapter
-// This is because Git needs raw FS access, while the Agent uses the VFS Jail.
-export interface KernelOptions {
-  config: TGPConfig;
-  vfs: VFSAdapter; 
-  fs: any; // The raw filesystem object (node:fs or memfs) used by isomorphic-git
-}
-
-export interface Kernel {
-  boot(): Promise<void>;
-  shutdown(): Promise<void>;
-  config: TGPConfig;
-  vfs: VFSAdapter;
-  git: GitBackend;
+  /**
+   * Wraps a function in a database transaction.
+   * @param fn The function to execute. It receives a transactional DB instance.
+   */
+  transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
 }
 
 /**
- * Factory to create a TGP Kernel.
- * This wires up the configuration, the filesystem, and the git backend.
+ * A No-Op Database Backend used when no DB is configured.
+ * It logs operations to the console to verify behavior.
  */
-export function createKernel(opts: KernelOptions): Kernel {
-  const { config, vfs, fs } = opts;
-  
-  const git = createGitBackend(fs, config);
-
-  let isBooted = false;
-
+export function createNoOpDB(): DBBackend {
   return {
-    config,
-    vfs,
-    git,
+    async query(sql: string, params: any[] = []) {
+      console.log(`[TGP-DB] Query: ${sql}`, params);
+      return [];
+    },
 
-    async boot() {
-      if (isBooted) return;
-      console.log(`[TGP] Kernel booting...`);
-      
+    async transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T> {
+      console.log(`[TGP-DB] Begin Transaction`);
       try {
-        // Hydrate the filesystem from Git
-        await git.hydrate();
-        isBooted = true;
-        console.log(`[TGP] Kernel ready.`);
-      } catch (error) {
-        console.error(`[TGP] Boot failed:`, error);
-        throw error;
-      }
-    },
-
-    async shutdown() {
-      console.log(`[TGP] Kernel shutting down...`);
-      // Cleanup tasks (close db connections, etc) can go here
-      isBooted = false;
-    }
-  };
-}
-````
-
-## File: src/kernel/git.ts
-````typescript
-import * as git from 'isomorphic-git';
-import * as http from 'isomorphic-git/http/node';
-import { TGPConfig } from '../types.js';
-import * as path from 'path';
-
-/**
- * The Git Interface required by the Kernel.
- * We rely on the 'fs' interface compatible with isomorphic-git.
- */
-export interface GitBackend {
-  hydrate(): Promise<void>;
-  persist(message: string, files: string[]): Promise<void>;
-}
-
-export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
-  const dir = config.rootDir;
-  const { repo, auth, branch, writeStrategy } = config.git;
-
-  // Helper to configure git options
-  const gitOpts = {
-    fs,
-    dir,
-    http,
-    onAuth: () => ({ username: auth.token }),
-  };
-
-  const author = {
-    name: auth.user,
-    email: auth.email,
-  };
-
-  return {
-    async hydrate() {
-      // 1. Check if repo exists locally
-      const gitDirExists = await fs.promises.stat(path.join(dir, '.git'))
-        .then(() => true)
-        .catch(() => false);
-
-      if (!gitDirExists) {
-        // Clone
-        console.log(`[TGP] Cloning ${repo} into ${dir}...`);
-        await git.clone({
-          ...gitOpts,
-          url: `https://github.com/${repo}.git`,
-          ref: branch,
-          singleBranch: true,
-          depth: 1,
-        });
-      } else {
-        // Pull
-        console.log(`[TGP] Pulling latest from ${repo}...`);
-        await git.pull({
-          ...gitOpts,
-          remote: 'origin',
-          ref: branch,
-          singleBranch: true,
-          author,
-        });
-      }
-    },
-
-    async persist(message: string, filesToAdd: string[]) {
-      // 1. Add files
-      for (const filepath of filesToAdd) {
-        await git.add({ ...gitOpts, filepath });
-      }
-
-      // 2. Commit
-      const sha = await git.commit({
-        ...gitOpts,
-        message,
-        author,
-      });
-      console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
-
-      // 3. Push
-      if (writeStrategy === 'direct') {
-        console.log(`[TGP] Pushing to ${branch}...`);
-        await git.push({
-          ...gitOpts,
-          remote: 'origin',
-          ref: branch,
-        });
-      } else {
-        // TODO: Implement PR creation logic for 'pr' strategy
-        console.warn(`[TGP] PR Strategy not yet implemented. Changes committed locally.`);
+        // In a real DB, we would start a trx here.
+        // We pass 'this' as the transactional client (NoOp doesn't distinguish)
+        const result = await fn(this);
+        console.log(`[TGP-DB] Commit Transaction`);
+        return result;
+      } catch (err) {
+        console.log(`[TGP-DB] Rollback Transaction`);
+        throw err;
       }
     }
   };
-}
-````
-
-## File: src/sandbox/bridge.ts
-````typescript
-import { Kernel } from '../kernel/core.js';
-
-/**
- * Creates the Bridge Object exposed to the Sandbox.
- * This maps secure Kernel methods to the Guest environment.
- * 
- * NOTE: When passing functions to isolated-vm, arguments and return values 
- * must be serializable or wrapped in References.
- */
-export function createSandboxBridge(kernel: Kernel) {
-  const { vfs } = kernel;
-
-  return {
-    // --- Filesystem Bridge (Jailed) ---
-    // The Guest sees these as async functions on the global scope or a 'tgp' object.
-    
-    // tgp_read_file('./data.txt')
-    tgp_read_file: async (path: string) => {
-      // VFS already enforces jail path traversal checks
-      return vfs.readFile(path);
-    },
-
-    // tgp_write_file('./output.txt', 'content')
-    tgp_write_file: async (path: string, content: string) => {
-      return vfs.writeFile(path, content);
-    },
-
-    // tgp_list_files('./tools')
-    tgp_list_files: async (dir: string) => {
-      return vfs.listFiles(dir, false);
-    },
-
-    // --- Network Bridge (Allowed Only) ---
-    // We can inject a restricted fetch here.
-    tgp_fetch: async (url: string, init?: any) => {
-      // Security: Parse URL and allow-list check could happen here
-      const response = await fetch(url, init);
-      const text = await response.text();
-      return {
-        status: response.status,
-        text: () => text,
-        json: () => JSON.parse(text),
-      };
-    },
-
-    // --- Logger ---
-    tgp_log: (...args: any[]) => {
-      console.log('[TGP-TOOL]', ...args);
-    }
-  };
-}
-````
-
-## File: src/sandbox/execute.ts
-````typescript
-import { Kernel } from '../kernel/core.js';
-import { createSandbox } from './isolate.js';
-import { createSandboxBridge } from './bridge.js';
-
-/**
- * Executes a tool script within a secure sandbox.
- * 
- * @param kernel The TGP Kernel instance
- * @param code The TypeScript source code of the tool
- * @param args The arguments object to pass to the tool (as 'args' global)
- */
-export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}): Promise<any> {
-  const sandbox = createSandbox({
-    memoryLimitMb: 128,
-    timeoutMs: 5000 // 5s hard limit
-  });
-
-  try {
-    const bridge = createSandboxBridge(kernel);
-
-    // Context Injection:
-    // 1. The 'args' object (Input)
-    // 2. The Bridge functions (Capabilities)
-    const context = {
-      args,
-      ...bridge
-    };
-
-    // We wrap the user code to ensure it can consume the 'args' and use the bridge.
-    // The user code is expected to be a module or script. 
-    // We wrap it in an IIFE to allow top-level execution flows if needed, 
-    // but typically we expect a standard script execution.
-    // 
-    // We explicitly expose the bridge functions on the global scope by the isolate.ts logic.
-    
-    const result = await sandbox.compileAndRun(code, context);
-    return result;
-
-  } catch (error) {
-    console.error(`[TGP] Tool Execution Failed:`, error);
-    throw new Error(`Tool execution failed: ${error instanceof Error ? error.message : String(error)}`);
-  } finally {
-    sandbox.dispose();
-  }
 }
 ````
 
@@ -480,15 +414,47 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
         
         // Inject the 'tgp' global object which holds our bridge
         await jail.set('global', jail.derefInto()); // standard polyfill
-        
+
         // We iterate over the context object and inject functions/values
         for (const [key, value] of Object.entries(context)) {
-            if (typeof value === 'function') {
-                // Bridge functions: Host runs the logic, Guest calls it
-                await jail.set(key, new ivm.Reference(value));
+            if (typeof value === 'object' && value !== null) {
+                // Handle namespaces (e.g. 'tgp')
+                // We create a container in the guest and populate it
+                // Note: deeply nested objects are not supported by this simple loop, just 1 level
+                const container = new ivm.Reference({});
+                await jail.set(key, container);
+                
+                // We can't easily populate a Reference from Host side without running script or intricate IVM calls.
+                // Easier strategy: Copy by value if JSON, or if it contains functions, we need a different approach.
+                // Since 'tgp' contains functions, we can't use ExternalCopy.
+                // Let's recursively set on the global object's property? 
+                // IVM makes this tricky. 
+                // ALTERNATIVE: We inject a plain object with References.
+                // Actually, 'context' passed here is usually flat or simple.
+                // Since we changed Bridge to return { tgp: { ... } }, we need to handle it.
+                // Let's use `compileScript` to setup the namespace if we can't do it via API easily.
+                // Wait, jail.set accepts Reference. 
+                // If we pass an object containing References, IVM doesn't auto-unwrap.
+                
+                // Let's treat 'tgp' special case or generic object-of-functions.
+                if (key === 'tgp') {
+                   // Create the 'tgp' object in the guest
+                   await isolate.compileScript(`global.tgp = {}`).then(s => s.run(ivmContext));
+                   const tgpHandle = await jail.get('tgp');
+                   
+                   for (const [subKey, subValue] of Object.entries(value)) {
+                      if (typeof subValue === 'function') {
+                         await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                      }
+                   }
+                } else {
+                   // Fallback for non-function objects
+                   await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                }
+            } else if (typeof value === 'function') {
+              await jail.set(key, new ivm.Reference(value));
             } else {
-                // Bridge values: Copy by value (JSON safe)
-                await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+              await jail.set(key, new ivm.ExternalCopy(value).copyInto());
             }
         }
 
@@ -516,43 +482,6 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
         isolate.dispose();
       }
     }
-  };
-}
-````
-
-## File: src/tools/exec.ts
-````typescript
-import { z } from 'zod';
-import { Kernel } from '../kernel/core.js';
-import { executeTool } from '../sandbox/execute.js';
-import { AgentTool } from './types.js';
-
-export const ExecToolParams = z.object({
-  path: z.string().describe('The relative path of the tool to execute'),
-  args: z.record(z.any()).describe('The arguments to pass to the tool'),
-});
-
-export function createExecTools(kernel: Kernel) {
-  return {
-    exec_tool: {
-      description: 'Execute a tool inside the secure Sandbox.',
-      parameters: ExecToolParams,
-      execute: async ({ path, args }) => {
-        // Security: Ensure args are serializable (no functions, no circular refs)
-        // This prevents the agent from trying to pass internal objects to the guest.
-        try {
-          JSON.stringify(args);
-        } catch {
-          throw new Error("Arguments must be serializable JSON.");
-        }
-
-        const code = await kernel.vfs.readFile(path);
-        
-        // The sandbox takes care of safety, timeout, and memory limits
-        const result = await executeTool(kernel, code, args);
-        return result;
-      },
-    } as AgentTool<typeof ExecToolParams, any>,
   };
 }
 ````
@@ -605,7 +534,14 @@ export function createFsTools(kernel: Kernel) {
       parameters: WriteFileParams,
       execute: async ({ path, content }) => {
         await kernel.vfs.writeFile(path, content);
-        return { success: true, path };
+        
+        // Register the new tool in the Registry (updates meta.json)
+        await kernel.registry.register(path, content);
+
+        // Persist to Git (Tool + meta.json)
+        await kernel.git.persist(`Forge: ${path}`, [path, 'meta.json']);
+
+        return { success: true, path, persisted: true };
       },
     } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
 
@@ -624,7 +560,13 @@ export function createFsTools(kernel: Kernel) {
         const newContent = content.replace(search, replace);
         
         await kernel.vfs.writeFile(path, newContent);
-        return { success: true, path };
+
+        // Update registry in case descriptions changed
+        await kernel.registry.register(path, newContent);
+
+        await kernel.git.persist(`Refactor: ${path}`, [path, 'meta.json']);
+
+        return { success: true, path, persisted: true };
       },
     } as AgentTool<typeof PatchFileParams, { success: boolean; path: string }>,
   };
@@ -726,222 +668,6 @@ export function createValidationTools(kernel: Kernel) {
       },
     } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
   };
-}
-````
-
-## File: src/vfs/memory.ts
-````typescript
-import { VFSAdapter } from './types.js';
-
-// Simple path normalizer for environments where 'path' module might be limited
-// or to ensure consistent behavior across platforms.
-function normalizePath(p: string): string {
-  // Remove leading ./ and leading /
-  return p.replace(/^(\.\/|\/)+/, '').replace(/\/+$/, '');
-}
-
-/**
- * Creates an ephemeral, in-memory VFS.
- * Used for Serverless execution or Unit Testing.
- */
-export function createMemoryVFS(initialFiles: Record<string, string> = {}): VFSAdapter {
-  // Key: Normalized Path, Value: File Content
-  const store = new Map<string, string>();
-
-  // Initialize with seed data
-  for (const [p, content] of Object.entries(initialFiles)) {
-    store.set(normalizePath(p), content);
-  }
-
-  return {
-    async readFile(target: string): Promise<string> {
-      const key = normalizePath(target);
-      const content = store.get(key);
-      if (content === undefined) {
-        throw new Error(`File not found: ${target}`);
-      }
-      return content;
-    },
-
-    async writeFile(target: string, content: string): Promise<void> {
-      const key = normalizePath(target);
-      store.set(key, content);
-    },
-
-    async remove(target: string): Promise<void> {
-      const key = normalizePath(target);
-      store.delete(key);
-    },
-
-    async exists(target: string): Promise<boolean> {
-      const key = normalizePath(target);
-      return store.has(key);
-    },
-
-    async listFiles(dir: string, recursive: boolean = false): Promise<string[]> {
-      const normalizedDir = normalizePath(dir);
-      const results: string[] = [];
-
-      for (const key of store.keys()) {
-        // Check if file is inside dir
-        // We add a trailing slash to dir to ensure we match directory boundaries
-        // e.g. dir="tools", key="tools/a.ts" -> match
-        // e.g. dir="tool", key="tools/a.ts" -> no match
-        
-        // Handle root listing case
-        const prefix = normalizedDir === '' ? '' : normalizedDir + '/';
-
-        if (key.startsWith(prefix)) {
-          const relativePart = key.slice(prefix.length);
-          
-          if (recursive) {
-            results.push(key);
-          } else {
-            // If not recursive, ensure no more slashes in the remainder
-            if (!relativePart.includes('/')) {
-              results.push(key);
-            }
-          }
-        }
-      }
-      return results;
-    }
-  };
-}
-````
-
-## File: src/vfs/node.ts
-````typescript
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import { VFSAdapter } from './types.js';
-
-/**
- * Creates a VFS adapter backed by the physical disk.
- * Used for standard Node.js deployments and CLI tools.
- * 
- * @param rootDir The absolute or relative path to the sandbox root (e.g., ./.tgp)
- */
-export function createNodeVFS(rootDir: string): VFSAdapter {
-  const absoluteRoot = path.resolve(rootDir);
-
-  // Security: Ensure the target path is inside the rootDir
-  const resolvePath = (target: string): string => {
-    // Normalize and resolve against root
-    const resolved = path.resolve(absoluteRoot, target);
-    
-    // Guard: Path Traversal Attack
-    if (!resolved.startsWith(absoluteRoot)) {
-      throw new Error(`Security Violation: Path '${target}' is outside the sandbox root.`);
-    }
-    return resolved;
-  };
-
-  return {
-    async readFile(target: string): Promise<string> {
-      const fullPath = resolvePath(target);
-      return fs.readFile(fullPath, 'utf-8');
-    },
-
-    async writeFile(target: string, content: string): Promise<void> {
-      const fullPath = resolvePath(target);
-      const dir = path.dirname(fullPath);
-      
-      // Ensure directory exists (mkdir -p)
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(fullPath, content, 'utf-8');
-    },
-
-    async remove(target: string): Promise<void> {
-      const fullPath = resolvePath(target);
-      // Silent failure if not exists, matching standard rm -f behavior
-      await fs.rm(fullPath, { force: true }).catch(() => {}); 
-    },
-
-    async exists(target: string): Promise<boolean> {
-      const fullPath = resolvePath(target);
-      try {
-        await fs.access(fullPath);
-        return true;
-      } catch {
-        return false;
-      }
-    },
-
-    async listFiles(dir: string, recursive: boolean = false): Promise<string[]> {
-      const fullDir = resolvePath(dir);
-      
-      try {
-        await fs.access(fullDir);
-      } catch {
-        return []; // Return empty if dir doesn't exist
-      }
-
-      const results: string[] = [];
-
-      async function walk(currentDir: string, relativeBase: string) {
-        const entries = await fs.readdir(currentDir, { withFileTypes: true });
-
-        for (const entry of entries) {
-          const entryPath = path.join(currentDir, entry.name);
-          const relativePath = path.join(relativeBase, entry.name);
-
-          if (entry.isDirectory()) {
-            if (recursive) {
-              await walk(entryPath, relativePath);
-            }
-          } else {
-            results.push(relativePath);
-          }
-        }
-      }
-
-      await walk(fullDir, dir);
-      return results;
-    }
-  };
-}
-````
-
-## File: src/vfs/types.ts
-````typescript
-/**
- * The Virtual Filesystem Adapter Interface.
- * 
- * TGP is designed to run in environments where a real filesystem might not exist 
- * (e.g., Cloudflare Workers, Edge Functions). The VFS abstracts I/O operations.
- * 
- * All paths provided to these methods are relative to the VFS root.
- */
-export interface VFSAdapter {
-  /**
-   * Reads the content of a file as a UTF-8 string.
-   * Throws if file not found.
-   */
-  readFile: (path: string) => Promise<string>;
-
-  /**
-   * Writes content to a file. Creates parent directories if they don't exist.
-   */
-  writeFile: (path: string, content: string) => Promise<void>;
-
-  /**
-   * Deletes a file. Silent if file doesn't exist.
-   */
-  remove: (path: string) => Promise<void>;
-
-  /**
-   * Checks if a file exists.
-   */
-  exists: (path: string) => Promise<boolean>;
-
-  /**
-   * Lists files in a directory.
-   * @param dir Relative path to directory.
-   * @param recursive If true, lists all nested files.
-   * @returns Array of relative paths (e.g., ['tools/a.ts', 'tools/sub/b.ts'])
-   */
-  listFiles: (dir: string, recursive?: boolean) => Promise<string[]>;
 }
 ````
 
@@ -1180,6 +906,16 @@ export const ToolSchema = z.object({
 });
 
 export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+export interface ToolMetadata {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface RegistryState {
+  tools: Record<string, ToolMetadata>;
+}
 ````
 
 ## File: package.json
@@ -1193,6 +929,8 @@ export type ToolDefinition = z.infer<typeof ToolSchema>;
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
     "test": "echo \"Error: no test specified\" && exit 1",
     "tgp": "node bin/tgp.js"
   },
@@ -1208,15 +946,18 @@ export type ToolDefinition = z.infer<typeof ToolSchema>;
     "tgp": "./bin/tgp.js"
   },
   "dependencies": {
-    "zod": "^3.25.76",
-    "zod-to-json-schema": "^3.22.4",
+    "esbuild": "^0.19.12",
+    "isolated-vm": "^4.7.2",
     "isomorphic-git": "^1.35.1",
     "memfs": "^4.51.0",
-    "isolated-vm": "^4.7.2",
-    "esbuild": "^0.19.12"
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.22.4"
   },
   "devDependencies": {
     "@types/node": "^20.19.25",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "eslint": "^9.39.1",
     "typescript": "^5.9.3"
   }
 }
@@ -1242,6 +983,640 @@ export type ToolDefinition = z.infer<typeof ToolSchema>;
     "declaration": true
   },
   "include": ["src/**/*"]
+}
+````
+
+## File: src/kernel/core.ts
+````typescript
+import { TGPConfig } from '../types.js';
+import { VFSAdapter } from '../vfs/types.js';
+import { createGitBackend, GitBackend } from './git.js';
+import { createNoOpDB, DBBackend } from './db.js';
+import { createRegistry, Registry } from './registry.js';
+
+// We inject the low-level FS for Git separately from the VFS adapter
+// This is because Git needs raw FS access, while the Agent uses the VFS Jail.
+export interface KernelOptions {
+  config: TGPConfig;
+  vfs: VFSAdapter; 
+  fs: any; // The raw filesystem object (node:fs or memfs) used by isomorphic-git
+}
+
+export interface Kernel {
+  boot(): Promise<void>;
+  shutdown(): Promise<void>;
+  config: TGPConfig;
+  vfs: VFSAdapter;
+  git: GitBackend;
+  db: DBBackend;
+  registry: Registry;
+}
+
+/**
+ * Factory to create a TGP Kernel.
+ * This wires up the configuration, the filesystem, and the git backend.
+ */
+export function createKernel(opts: KernelOptions): Kernel {
+  const { config, vfs, fs } = opts;
+  
+  const git = createGitBackend(fs, config);
+  const db = createNoOpDB(); // TODO: Connect to real DB based on config.db
+  const registry = createRegistry(vfs);
+
+  let isBooted = false;
+
+  return {
+    config,
+    vfs,
+    git,
+    db,
+    registry,
+
+    async boot() {
+      if (isBooted) return;
+      console.log(`[TGP] Kernel booting...`);
+      
+      try {
+        // Hydrate the filesystem from Git
+        await git.hydrate();
+        
+        // Hydrate registry from meta.json
+        await registry.hydrate();
+        isBooted = true;
+        console.log(`[TGP] Kernel ready.`);
+      } catch (error) {
+        console.error(`[TGP] Boot failed:`, error);
+        throw error;
+      }
+    },
+
+    async shutdown() {
+      console.log(`[TGP] Kernel shutting down...`);
+      // Cleanup tasks (close db connections, etc) can go here
+      isBooted = false;
+    }
+  };
+}
+````
+
+## File: src/kernel/git.ts
+````typescript
+import * as git from 'isomorphic-git';
+import * as http from 'isomorphic-git/http/node';
+import { TGPConfig } from '../types.js';
+import * as path from 'path';
+
+/**
+ * The Git Interface required by the Kernel.
+ * We rely on the 'fs' interface compatible with isomorphic-git.
+ */
+export interface GitBackend {
+  hydrate(): Promise<void>;
+  persist(message: string, files: string[]): Promise<void>;
+}
+
+export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
+  const dir = config.rootDir;
+  const { repo, auth, branch, writeStrategy } = config.git;
+
+  // Helper to configure git options
+  const gitOpts = {
+    fs,
+    dir,
+    http,
+    onAuth: () => ({ username: auth.token }),
+  };
+
+  const author = {
+    name: auth.user,
+    email: auth.email,
+  };
+
+  return {
+    async hydrate() {
+      // 1. Check if repo exists locally
+      const gitDirExists = await fs.promises.stat(path.join(dir, '.git'))
+        .then(() => true)
+        .catch(() => false);
+
+      if (!gitDirExists) {
+        // Clone
+        console.log(`[TGP] Cloning ${repo} into ${dir}...`);
+        await git.clone({
+          ...gitOpts,
+          url: `https://github.com/${repo}.git`,
+          ref: branch,
+          singleBranch: true,
+          depth: 1,
+        });
+      } else {
+        // Pull
+        console.log(`[TGP] Pulling latest from ${repo}...`);
+        await git.pull({
+          ...gitOpts,
+          remote: 'origin',
+          ref: branch,
+          singleBranch: true,
+          author,
+        });
+      }
+    },
+
+    async persist(message: string, filesToAdd: string[]) {
+      // 1. Add files
+      for (const filepath of filesToAdd) {
+        try {
+           // check if file exists before adding (might be deleted, though not in this context)
+           await git.add({ ...gitOpts, filepath });
+        } catch (e) {
+           // If file doesn't exist, maybe it was a deletion? 
+           // For TGP v1 we assume add/update.
+           console.warn(`[TGP] Git Add failed for ${filepath}`, e);
+        }
+      }
+
+      // 2. Commit
+      const sha = await git.commit({
+        ...gitOpts,
+        message,
+        author,
+      });
+      console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
+
+      // 3. Push
+      if (writeStrategy === 'direct') {
+        console.log(`[TGP] Pushing to ${branch}...`);
+        await git.push({
+          ...gitOpts,
+          remote: 'origin',
+          ref: branch,
+        });
+      } else {
+        // TODO: Implement PR creation logic for 'pr' strategy
+        console.warn(`[TGP] PR Strategy not yet implemented. Changes committed locally.`);
+      }
+    }
+  };
+}
+````
+
+## File: src/sandbox/bridge.ts
+````typescript
+import { Kernel } from '../kernel/core.js';
+import { DBBackend } from '../kernel/db.js';
+
+/**
+ * Creates the Bridge Object exposed to the Sandbox.
+ * This maps secure Kernel methods to the Guest environment.
+ * 
+ * We expose a structured 'tgp' object to the guest.
+ */
+export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
+  const { vfs } = kernel;
+
+  return {
+    tgp: {
+      // --- Filesystem Bridge (Jailed) ---
+      read_file: async (path: string) => {
+        return vfs.readFile(path);
+      },
+
+      write_file: async (path: string, content: string) => {
+        return vfs.writeFile(path, content);
+      },
+
+      list_files: async (dir: string) => {
+        return vfs.listFiles(dir, false);
+      },
+
+      // --- Network Bridge (Allowed Only) ---
+      fetch: async (url: string, init?: any) => {
+        // Security: Parse URL and allow-list check could happen here
+        const response = await fetch(url, init);
+        const text = await response.text();
+        return {
+          status: response.status,
+          text: () => text,
+          json: () => JSON.parse(text),
+        };
+      },
+
+      // --- Logger ---
+      log: (...args: any[]) => {
+        console.log('[TGP-TOOL]', ...args);
+      },
+
+      // --- Database (Transactional) ---
+      db_query: async (sql: string, params: any[] = []) => {
+        return db.query(sql, params);
+      }
+    }
+  };
+}
+````
+
+## File: src/sandbox/execute.ts
+````typescript
+import { Kernel } from '../kernel/core.js';
+import { createSandbox } from './isolate.js';
+import { createSandboxBridge } from './bridge.js';
+import { transformSync } from 'esbuild';
+import * as path from 'path';
+
+/**
+ * Executes a tool script within a secure sandbox.
+ * 
+ * @param kernel The TGP Kernel instance
+ * @param code The TypeScript source code of the tool
+ * @param args The arguments object to pass to the tool (as 'args' global)
+ * @param filePath Optional path of the tool being executed (used for relative imports)
+ */
+export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<any> {
+  const sandbox = createSandbox({
+    memoryLimitMb: 128,
+    timeoutMs: 5000 // 5s hard limit
+  });
+
+  try {
+    // 1. Transactional Safety
+    // All tool execution happens within a DB transaction.
+    return await kernel.db.transaction(async (trx) => {
+      const bridge = createSandboxBridge(kernel, trx);
+
+      // 2. Module Orchestration (The 'require' Bridge)
+      // This host function is called synchronously from the Guest.
+      const __tgp_load_module = (baseDir: string, importId: string) => {
+        // Security: Ensure we don't traverse out of sandbox (handled by VFS)
+        // Resolution Logic:
+        // - Starts with '.': Relative to baseDir
+        // - Otherwise: Absolute from root (or relative to root)
+        
+        let targetPath = '';
+        if (importId.startsWith('.')) {
+          targetPath = path.join(baseDir, importId);
+        } else {
+          targetPath = importId;
+        }
+
+        // Normalize extension (assume .ts if missing)
+        if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+           // Check if it exists with .ts
+           // We can't easily check existence sync in VFS without try/catch read
+           // Let's assume .ts for TGP tools
+           targetPath += '.ts';
+        }
+
+        try {
+          const raw = kernel.vfs.readSync(targetPath);
+          const transformed = transformSync(raw, {
+            loader: 'ts',
+            format: 'cjs',
+            target: 'es2020',
+          });
+          
+          return {
+            code: transformed.code,
+            path: targetPath,
+            dirname: path.dirname(targetPath)
+          };
+        } catch (err: any) {
+          throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
+        }
+      };
+
+      // 3. Shim Injection
+      // We prepend a CommonJS loader shim to the user code.
+      // This allows 'require' to work by calling back to __tgp_load_module.
+      const shim = `
+        const __moduleCache = {};
+
+        function __makeRequire(baseDir) {
+          return function(id) {
+            // Check Cache (Global)
+            // In a real system, cache keys should be absolute paths.
+            // Here we rely on the host to return consistent paths if we wanted perfect caching.
+            // For now, we skip cache or use simple ID (flawed for relatives).
+            // Let's implement correct caching by asking Host for absolute path first?
+            // Simpler: Just reload for now (Stateless).
+            
+            // Call Host Sync
+            const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+            
+            if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+
+            // Wrap in CommonJS Function
+            const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+            const newModule = { exports: {} };
+            
+            // Execute
+            fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+            
+            __moduleCache[mod.path] = newModule.exports;
+            return newModule.exports;
+          };
+        }
+        
+        // Setup Global Require for the entry point
+        // We assume the entry point is at 'filePath'
+        global.require = __makeRequire('${path.dirname(filePath)}');
+      `;
+
+      const context = {
+        ...bridge, // { tgp: { ... } }
+        args,
+        __tgp_load_module // Injected as Reference
+      };
+
+      // Combine Shim + User Code
+      // We wrap user code to provide top-level CommonJS variables if needed, 
+      // but standard TGP tools are just scripts. 
+      // We append the code. The 'shim' sets up 'global.require'.
+      const fullScript = shim + '\n' + code;
+
+      const result = await sandbox.compileAndRun(fullScript, context);
+      return result;
+    });
+
+  } catch (error) {
+    console.error(`[TGP] Tool Execution Failed:`, error);
+    throw new Error(`Tool execution failed: ${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    sandbox.dispose();
+  }
+}
+````
+
+## File: src/tools/exec.ts
+````typescript
+import { z } from 'zod';
+import { Kernel } from '../kernel/core.js';
+import { executeTool } from '../sandbox/execute.js';
+import { AgentTool } from './types.js';
+
+export const ExecToolParams = z.object({
+  path: z.string().describe('The relative path of the tool to execute'),
+  args: z.record(z.any()).describe('The arguments to pass to the tool'),
+});
+
+export function createExecTools(kernel: Kernel) {
+  return {
+    exec_tool: {
+      description: 'Execute a tool inside the secure Sandbox.',
+      parameters: ExecToolParams,
+      execute: async ({ path, args }) => {
+        // Security: Ensure args are serializable (no functions, no circular refs)
+        // This prevents the agent from trying to pass internal objects to the guest.
+        try {
+          JSON.stringify(args);
+        } catch {
+          throw new Error("Arguments must be serializable JSON.");
+        }
+
+        const code = await kernel.vfs.readFile(path);
+        
+        // The sandbox takes care of safety, timeout, and memory limits
+        const result = await executeTool(kernel, code, args, path);
+        return result;
+      },
+    } as AgentTool<typeof ExecToolParams, any>,
+  };
+}
+````
+
+## File: src/vfs/memory.ts
+````typescript
+import { VFSAdapter } from './types.js';
+
+// Simple path normalizer for environments where 'path' module might be limited
+// or to ensure consistent behavior across platforms.
+function normalizePath(p: string): string {
+  // Remove leading ./ and leading /
+  return p.replace(/^(\.\/|\/)+/, '').replace(/\/+$/, '');
+}
+
+/**
+ * Creates an ephemeral, in-memory VFS.
+ * Used for Serverless execution or Unit Testing.
+ */
+export function createMemoryVFS(initialFiles: Record<string, string> = {}): VFSAdapter {
+  // Key: Normalized Path, Value: File Content
+  const store = new Map<string, string>();
+
+  // Initialize with seed data
+  for (const [p, content] of Object.entries(initialFiles)) {
+    store.set(normalizePath(p), content);
+  }
+
+  return {
+    async readFile(target: string): Promise<string> {
+      const key = normalizePath(target);
+      const content = store.get(key);
+      if (content === undefined) {
+        throw new Error(`File not found: ${target}`);
+      }
+      return content;
+    },
+
+    readSync(target: string): string {
+      const key = normalizePath(target);
+      const content = store.get(key);
+      if (content === undefined) {
+        throw new Error(`File not found: ${target}`);
+      }
+      return content;
+    },
+
+    async writeFile(target: string, content: string): Promise<void> {
+      const key = normalizePath(target);
+      store.set(key, content);
+    },
+
+    async remove(target: string): Promise<void> {
+      const key = normalizePath(target);
+      store.delete(key);
+    },
+
+    async exists(target: string): Promise<boolean> {
+      const key = normalizePath(target);
+      return store.has(key);
+    },
+
+    async listFiles(dir: string, recursive: boolean = false): Promise<string[]> {
+      const normalizedDir = normalizePath(dir);
+      const results: string[] = [];
+
+      for (const key of store.keys()) {
+        // Check if file is inside dir
+        // We add a trailing slash to dir to ensure we match directory boundaries
+        // e.g. dir="tools", key="tools/a.ts" -> match
+        // e.g. dir="tool", key="tools/a.ts" -> no match
+        
+        // Handle root listing case
+        const prefix = normalizedDir === '' ? '' : normalizedDir + '/';
+
+        if (key.startsWith(prefix)) {
+          const relativePart = key.slice(prefix.length);
+          
+          if (recursive) {
+            results.push(key);
+          } else {
+            // If not recursive, ensure no more slashes in the remainder
+            if (!relativePart.includes('/')) {
+              results.push(key);
+            }
+          }
+        }
+      }
+      return results;
+    }
+  };
+}
+````
+
+## File: src/vfs/node.ts
+````typescript
+import * as fs from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import * as path from 'node:path';
+import { VFSAdapter } from './types.js';
+
+/**
+ * Creates a VFS adapter backed by the physical disk.
+ * Used for standard Node.js deployments and CLI tools.
+ * 
+ * @param rootDir The absolute or relative path to the sandbox root (e.g., ./.tgp)
+ */
+export function createNodeVFS(rootDir: string): VFSAdapter {
+  const absoluteRoot = path.resolve(rootDir);
+
+  // Security: Ensure the target path is inside the rootDir
+  const resolvePath = (target: string): string => {
+    // Normalize and resolve against root
+    const resolved = path.resolve(absoluteRoot, target);
+    
+    // Guard: Path Traversal Attack
+    if (!resolved.startsWith(absoluteRoot)) {
+      throw new Error(`Security Violation: Path '${target}' is outside the sandbox root.`);
+    }
+    return resolved;
+  };
+
+  return {
+    async readFile(target: string): Promise<string> {
+      const fullPath = resolvePath(target);
+      return fs.readFile(fullPath, 'utf-8');
+    },
+
+    readSync(target: string): string {
+      const fullPath = resolvePath(target);
+      return readFileSync(fullPath, 'utf-8');
+    },
+
+    async writeFile(target: string, content: string): Promise<void> {
+      const fullPath = resolvePath(target);
+      const dir = path.dirname(fullPath);
+      
+      // Ensure directory exists (mkdir -p)
+      await fs.mkdir(dir, { recursive: true });
+      await fs.writeFile(fullPath, content, 'utf-8');
+    },
+
+    async remove(target: string): Promise<void> {
+      const fullPath = resolvePath(target);
+      // Silent failure if not exists, matching standard rm -f behavior
+      await fs.rm(fullPath, { force: true }).catch(() => {}); 
+    },
+
+    async exists(target: string): Promise<boolean> {
+      const fullPath = resolvePath(target);
+      try {
+        await fs.access(fullPath);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+
+    async listFiles(dir: string, recursive: boolean = false): Promise<string[]> {
+      const fullDir = resolvePath(dir);
+      
+      try {
+        await fs.access(fullDir);
+      } catch {
+        return []; // Return empty if dir doesn't exist
+      }
+
+      const results: string[] = [];
+
+      async function walk(currentDir: string, relativeBase: string) {
+        const entries = await fs.readdir(currentDir, { withFileTypes: true });
+
+        for (const entry of entries) {
+          const entryPath = path.join(currentDir, entry.name);
+          const relativePath = path.join(relativeBase, entry.name);
+
+          if (entry.isDirectory()) {
+            if (recursive) {
+              await walk(entryPath, relativePath);
+            }
+          } else {
+            results.push(relativePath);
+          }
+        }
+      }
+
+      await walk(fullDir, dir);
+      return results;
+    }
+  };
+}
+````
+
+## File: src/vfs/types.ts
+````typescript
+/**
+ * The Virtual Filesystem Adapter Interface.
+ * 
+ * TGP is designed to run in environments where a real filesystem might not exist 
+ * (e.g., Cloudflare Workers, Edge Functions). The VFS abstracts I/O operations.
+ * 
+ * All paths provided to these methods are relative to the VFS root.
+ */
+export interface VFSAdapter {
+  /**
+   * Reads the content of a file as a UTF-8 string.
+   * Throws if file not found.
+   */
+  readFile: (path: string) => Promise<string>;
+
+  /**
+   * Synchronously reads the content of a file.
+   * Required for 'require' (synchronous module loading) in the Sandbox.
+   */
+  readSync: (path: string) => string;
+
+  /**
+   * Writes content to a file. Creates parent directories if they don't exist.
+   */
+  writeFile: (path: string, content: string) => Promise<void>;
+
+  /**
+   * Deletes a file. Silent if file doesn't exist.
+   */
+  remove: (path: string) => Promise<void>;
+
+  /**
+   * Checks if a file exists.
+   */
+  exists: (path: string) => Promise<boolean>;
+
+  /**
+   * Lists files in a directory.
+   * @param dir Relative path to directory.
+   * @param recursive If true, lists all nested files.
+   * @returns Array of relative paths (e.g., ['tools/a.ts', 'tools/sub/b.ts'])
+   */
+  listFiles: (dir: string, recursive?: boolean) => Promise<string[]>;
 }
 ````
 

@@ -23,6 +23,7 @@ export function createExecTools(kernel) {
                 const result = await executeTool(kernel, code, args, path);
                 return result;
             },
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
         },
     };
 }
