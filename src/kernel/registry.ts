@@ -44,7 +44,7 @@ export function createRegistry(vfs: VFSAdapter): Registry {
       if (await vfs.exists(META_PATH)) {
         try {
           const content = await vfs.readFile(META_PATH);
-          state = JSON.parse(content);
+          state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
         } catch (err) {
           console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
           state = { tools: {} };

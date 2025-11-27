@@ -33,7 +33,12 @@ export function createDBBackend(config: TGPConfig): DBBackend {
   if (dbConfig) {
     // In a real implementation, we would perform a dynamic import here based on the dialect.
     // e.g. if (dbConfig.dialect === 'postgres') return new PostgresBackend(dbConfig);
-    console.log(`[TGP-DB] Configured for dialect: ${dbConfig.dialect}. Using NoOp (Mock) for now.`);
+    
+    if (dbConfig.dialect === 'postgres' || dbConfig.dialect === 'mysql' || dbConfig.dialect === 'sqlite' || dbConfig.dialect === 'libsql') {
+       console.warn(`[TGP-DB] Dialect '${dbConfig.dialect}' configured. NoOp driver active (Drivers not bundled in Core).`);
+    } else {
+      throw new Error(`[TGP-DB] Unsupported dialect: ${dbConfig.dialect}`);
+    }
   }
 
   return createNoOpDB();

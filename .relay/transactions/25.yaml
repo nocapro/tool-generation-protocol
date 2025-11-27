@@ -1,0 +1,183 @@
+uuid: d89eb96b-a251-40be-a083-d02336691c95
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T20:58:34.438Z'
+gitCommitMsg: >-
+  refactor(sandbox): Simplify db context passing to bridge
+
+  Refactored `createSandboxBridge` to accept a dependency object (`{vfs, db,
+  config}`) instead of multiple parameters. This makes the function signature
+  cleaner and its dependencies more explicit.
+
+  The `executeTool` function now constructs this dependency object, injecting
+  the transactional `trx` object as the `db` implementation. This preserves the
+  atomicity of tool executions while decoupling the bridge from the transaction
+  lifecycle management in `executeTool`.
+promptSummary: >-
+  The user requested a refactor of the sandbox database logic to simplify how
+  transactions are handled and passed into the sandboxed environment.
+reasoning:
+  - >-
+    Based on your request to simplify the database handling within the sandbox,
+    I've refactored how the transactional database connection is passed to the
+    sandbox bridge.
+  - >-
+    The goal is to make the sandbox components less aware of how database
+    transactions are managed by the host environment, aligning with the
+    principle that the sandboxed tool should just execute queries without
+    managing connections or transactions.
+  - 'Here are the changes:'
+  - >-
+    1.  **`src/sandbox/bridge.ts`**: The `createSandboxBridge` function no
+    longer accepts a separate `db` object. Instead, it now accepts a single
+    argument with the properties it needs from the `Kernel` (`vfs`, `config`,
+    and `db`). This makes its dependencies more explicit and its signature
+    cleaner.
+  - >-
+    2.  **`src/sandbox/execute.ts`**: The `executeTool` function, which is
+    responsible for managing the database transaction, now constructs the
+    necessary context object for `createSandboxBridge`. It passes the `kernel`'s
+    `vfs` and `config`, but crucially provides the transactional `trx` object as
+    the `db` implementation. This ensures that all database queries from the
+    tool are executed within the single, overarching transaction, preserving
+    atomicity without complicating the bridge's interface.
+  - >-
+    This refactoring maintains the critical transaction-safety feature while
+    improving the code's structure and adhering to your request.
+  - '```typescript // src/sandbox/execute.ts standard-diff'
+  - '--- src/sandbox/execute.ts'
+  - +++ src/sandbox/execute.ts
+  - '@@ -19,8 +19,12 @@'
+  - // 1. Transactional Safety
+  - // All tool execution happens within a DB transaction.
+  - return await kernel.db.transaction(async (trx) => {
+  - '-      const bridge = createSandboxBridge(kernel, trx);'
+  - +      const bridge = createSandboxBridge({
+  - '+        vfs: kernel.vfs,'
+  - '+        config: kernel.config,'
+  - '+        db: trx,'
+  - +      });
+  - // 2. Module Orchestration (The 'require' Bridge)
+  - // This host function is called synchronously from the Guest.
+  - 'const __tgp_load_module = (baseDir: string, importId: string) => {'
+operations:
+  - type: write
+    path: src/sandbox/bridge.ts
+    content: >+
+      --- src/sandbox/bridge.ts
+
+      +++ src/sandbox/bridge.ts
+
+      @@ -1,7 +1,6 @@
+       /* eslint-disable no-console */
+       import { Kernel } from '../kernel/core.js';
+      -import { DBBackend } from '../kernel/db.js';
+       import * as path from 'path';
+       
+       /**
+      @@ -10,10 +9,8 @@
+        * 
+        * We expose a structured 'tgp' object to the guest.
+        */
+      -export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
+
+      -  const { vfs } = kernel;
+
+      -  const { allowedDirs } = kernel.config.fs;
+
+      +export function createSandboxBridge({ vfs, db, config }: Pick<Kernel,
+      'vfs' | 'db' | 'config'>) {
+
+      +  const { allowedDirs } = config.fs;
+       
+         const isAllowedWrite = (target: string): boolean => {
+           // Normalize target to ensure clean comparison (remove leading ./, etc)
+      @@ -51,7 +48,7 @@
+       
+             // --- Database (Transactional) ---
+             // eslint-disable-next-line @typescript-eslint/no-explicit-any
+             db_query: async (sql: string, params: any[] = []) => {
+               return db.query(sql, params);
+             }
+           }
+
+    patchStrategy: standard-diff
+snapshot:
+  src/sandbox/bridge.ts: |-
+    /* eslint-disable no-console */
+    import { Kernel } from '../kernel/core.js';
+    import { DBBackend } from '../kernel/db.js';
+    import * as path from 'path';
+
+    /**
+     * Creates the Bridge Object exposed to the Sandbox.
+     * This maps secure Kernel methods to the Guest environment.
+     * 
+     * We expose a structured 'tgp' object to the guest.
+     */
+    export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
+      const { vfs } = kernel;
+      const { allowedDirs } = kernel.config.fs;
+
+      const isAllowedWrite = (target: string): boolean => {
+        // Normalize target to ensure clean comparison (remove leading ./, etc)
+        const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
+        
+        return allowedDirs.some(dir => {
+          const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
+          // Check if target is inside the allowed dir
+          return normalizedTarget.startsWith(normalizedDir);
+        });
+      };
+
+      return {
+        tgp: {
+          // --- Filesystem Bridge (Jailed) ---
+          read_file: async (path: string) => {
+            return vfs.readFile(path);
+          },
+
+          write_file: async (path: string, content: string) => {
+            if (!isAllowedWrite(path)) {
+              throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
+            }
+            return vfs.writeFile(path, content);
+          },
+
+          list_files: async (dir: string) => {
+            return vfs.listFiles(dir, false);
+          },
+
+          // --- Network Bridge (Allowed Only) ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          fetch: async (url: string, init?: any) => {
+            // Security: Parse URL and allow-list check could happen here
+            const response = await fetch(url, init);
+            const text = await response.text();
+            return {
+              status: response.status,
+              text: () => text,
+              json: () => JSON.parse(text),
+            };
+          },
+
+          // --- Logger ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          log: (...args: any[]) => {
+            console.log('[TGP-TOOL]', ...args);
+          },
+
+          // --- Database (Transactional) ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          db_query: async (sql: string, params: any[] = []) => {
+            return db.query(sql, params);
+          }
+        }
+      };
+    }
+approved: true
+linesAdded: null
+linesRemoved: null
+linesDifference: null
+gitCommittedAt: null
+status: committed
+id: 25

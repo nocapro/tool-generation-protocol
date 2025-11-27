@@ -63,32 +63,33 @@ const CONFIG_TEMPLATE = `
 import { defineTGPConfig } from '@tgp/core';
 
 export default defineTGPConfig({
-  // The Root of the Agent's filesystem
-  // In serverless environments, this is ephemeral.
+  // The Root of the Agent's filesystem (Ephemeral in serverless)
   rootDir: './.tgp',
 
-  // 1. DATA: Database Configuration
+  // 1. DATA: How the Agent sees your DB
   db: {
     dialect: 'postgres',
     ddlSource: 'drizzle-kit generate --print',
   },
 
   // 2. BACKEND (GitOps)
+  // Essential for Serverless/Ephemeral environments.
   // The Agent pulls state from here and pushes new tools here.
   git: {
-    provider: 'github',
+    provider: 'github', // or 'gitlab', 'bitbucket'
     repo: 'my-org/tgp-tools',
     branch: 'main',
     auth: {
-      // Use ENV variables for security
-      token: process.env.TGP_GITHUB_TOKEN || '',
+      // Why not in config? Because we read from ENV for security.
+      token: process.env.TGP_GITHUB_TOKEN,
       user: 'tgp-bot[bot]',
       email: 'tgp-bot@users.noreply.github.com'
     },
+    // Strategy: 'direct' (push) or 'pr' (pull request)
     writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
   },
 
-  // 3. FILESYSTEM JAIL (Sandbox Security)
+  // 3. FILESYSTEM JAIL
   fs: {
     allowedDirs: ['./public/exports', './tmp'],
     blockUpwardTraversal: true
