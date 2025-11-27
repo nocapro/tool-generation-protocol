@@ -48,45 +48,31 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
         // Inject the 'tgp' global object which holds our bridge
         await jail.set('global', jail.derefInto()); // standard polyfill
 
-        // We iterate over the context object and inject functions/values
+        // Inject Context
         for (const [key, value] of Object.entries(context)) {
-            if (typeof value === 'object' && value !== null) {
-                // Handle namespaces (e.g. 'tgp')
-                // We create a container in the guest and populate it
-                // Note: deeply nested objects are not supported by this simple loop, just 1 level
-                const container = new ivm.Reference({});
-                await jail.set(key, container);
+            // Special handling for the 'tgp' namespace object
+            if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                // Initialize the namespace in the guest
+                await isolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
+                const tgpHandle = await jail.get('tgp');
                 
-                // We can't easily populate a Reference from Host side without running script or intricate IVM calls.
-                // Easier strategy: Copy by value if JSON, or if it contains functions, we need a different approach.
-                // Since 'tgp' contains functions, we can't use ExternalCopy.
-                // Let's recursively set on the global object's property? 
-                // IVM makes this tricky. 
-                // ALTERNATIVE: We inject a plain object with References.
-                // Actually, 'context' passed here is usually flat or simple.
-                // Since we changed Bridge to return { tgp: { ... } }, we need to handle it.
-                // Let's use `compileScript` to setup the namespace if we can't do it via API easily.
-                // Wait, jail.set accepts Reference. 
-                // If we pass an object containing References, IVM doesn't auto-unwrap.
-                
-                // Let's treat 'tgp' special case or generic object-of-functions.
-                if (key === 'tgp') {
-                   // Create the 'tgp' object in the guest
-                   await isolate.compileScript(`global.tgp = {}`).then(s => s.run(ivmContext));
-                   const tgpHandle = await jail.get('tgp');
-                   
-                   for (const [subKey, subValue] of Object.entries(value)) {
-                      if (typeof subValue === 'function') {
-                         await tgpHandle.set(subKey, new ivm.Reference(subValue));
-                      }
-                   }
-                } else {
-                   // Fallback for non-function objects
-                   await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                // Populate the namespace
+                for (const [subKey, subValue] of Object.entries(value)) {
+                    if (typeof subValue === 'function') {
+                       // Functions must be passed by Reference
+                       await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                    } else {
+                       // Values are copied
+                       await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                    }
                 }
-            } else if (typeof value === 'function') {
+            } 
+            // Handle top-level functions (like __tgp_load_module)
+            else if (typeof value === 'function') {
               await jail.set(key, new ivm.Reference(value));
-            } else {
+            } 
+            // Handle standard values
+            else {
               await jail.set(key, new ivm.ExternalCopy(value).copyInto());
             }
         }

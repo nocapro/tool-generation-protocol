@@ -2,6 +2,11 @@ import * as fs from 'node:fs';
 import { createKernel, Kernel } from './kernel/core.js';
 import { loadTGPConfig } from './config.js';
 import { createNodeVFS } from './vfs/node.js';
+import { TGPConfigSchema, TGPConfig } from './types.js';
+import { VFSAdapter } from './vfs/types.js';
+import { GitBackend } from './kernel/git.js';
+import { DBBackend } from './kernel/db.js';
+import { Registry } from './kernel/registry.js';
 
 export interface TGPOptions {
   /**
@@ -12,37 +17,93 @@ export interface TGPOptions {
 }
 
 /**
- * High-level factory to create a fully initialized TGP Kernel in a Node.js environment.
- * This handles config loading, VFS setup (Disk-based), and Git backend wiring.
+ * The TGP Kernel Class.
+ * Manages the lifecycle of the Agent's runtime environment, including
+ * configuration, filesystem (VFS), Git persistence, and the Tool Registry.
  */
-export async function createTGP(opts: TGPOptions = {}): Promise<Kernel> {
-  const configPath = opts.configFile || './tgp.config.ts';
+export class TGP implements Kernel {
+  public config: TGPConfig;
+  public vfs: VFSAdapter;
+  public git: GitBackend;
+  public db: DBBackend;
+  public registry: Registry;
+  
+  private _isBooted = false;
 
-  // 1. Load Configuration
-  const config = await loadTGPConfig(configPath);
+  constructor(private opts: TGPOptions = {}) {
+    // 1. Initialize with Defaults (Sync)
+    // We use the default schema to ensure the kernel is usable immediately (e.g. for tooling)
+    // even before the async config load completes.
+    this.config = TGPConfigSchema.parse({});
+    
+    // 2. Setup Default VFS
+    // This allows tgpTools(kernel) to be called immediately.
+    this.vfs = createNodeVFS(this.config.rootDir);
 
-  // 2. Setup Filesystem (Node VFS)
-  const vfs = createNodeVFS(config.rootDir);
+    // 3. Initialize Kernel Components
+    // We use the underlying factory to wire up Git, DB, and Registry
+    const kernel = createKernel({
+      config: this.config,
+      vfs: this.vfs,
+      fs // Pass raw node:fs for isomorphic-git
+    });
 
-  // 3. Create Kernel
-  // We pass the raw 'fs' module to isomorphic-git so it can do its magic on the .git folder
-  const kernel = createKernel({
-    config,
-    vfs,
-    fs
-  });
+    this.git = kernel.git;
+    this.db = kernel.db;
+    this.registry = kernel.registry;
+  }
 
-  // 4. Boot (Hydrate from Git)
-  await kernel.boot();
+  /**
+   * Hydrates the Kernel from the configuration file and Git.
+   * This must be awaited before executing tools in production.
+   */
+  async boot(): Promise<void> {
+    if (this._isBooted) return;
 
-  return kernel;
-}
+    const configPath = this.opts.configFile || './tgp.config.ts';
 
-/**
- * Generates the System Prompt enforcing the "8 Standards" and TGP protocol.
- */
-export function getSystemPrompt(): string {
-  return `
+    try {
+      // 1. Load Real Configuration
+      const loadedConfig = await loadTGPConfig(configPath);
+      this.config = loadedConfig;
+
+      // 2. Re-initialize VFS if RootDir changed
+      // If the user configured a different rootDir, we must update the VFS.
+      this.vfs = createNodeVFS(this.config.rootDir);
+
+      // 3. Re-initialize Kernel Components with new Config/VFS
+      const kernel = createKernel({
+        config: this.config,
+        vfs: this.vfs,
+        fs
+      });
+      
+      this.git = kernel.git;
+      this.db = kernel.db;
+      this.registry = kernel.registry;
+
+      // 4. Hydrate State (Git Clone/Pull + Registry Build)
+      await kernel.boot();
+      
+      this._isBooted = true;
+    } catch (error) {
+      // If config loading fails, we might still be in a valid default state,
+      // but we should warn the user.
+      console.warn(`[TGP] Boot warning:`, error);
+      throw error;
+    }
+  }
+
+  async shutdown(): Promise<void> {
+    // Passthrough to internal kernel shutdown if needed
+    this._isBooted = false;
+  }
+
+  /**
+   * Generates the System Prompt enforcing the "8 Standards" and TGP protocol.
+   */
+  getSystemPrompt(): string {
+    return `
 You are an autonomous AI Engineer running on the Tool Generation Protocol (TGP).
 Your goal is to build, validate, and execute tools to solve the user's request.
 
@@ -71,4 +132,21 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 4.  Use check_tool to validate syntax.
 5.  Use exec_tool to run it.
 `;
+  }
+}
+
+/**
+ * Legacy Factory to create a TGP Kernel (Backward Compatibility).
+ */
+export async function createTGP(opts: TGPOptions = {}): Promise<Kernel> {
+  const tgp = new TGP(opts);
+  await tgp.boot();
+  return tgp;
+}
+
+/**
+ * Helper to get the system prompt (Backward Compatibility).
+ */
+export function getSystemPrompt(): string {
+  return new TGP().getSystemPrompt();
 }

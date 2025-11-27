@@ -1,0 +1,8 @@
+  boot(): Promise<void>;
+  shutdown(): Promise<void>;
+  config: TGPConfig;
+  vfs: VFSAdapter;
+  git: GitBackend;
+  db: DBBackend;
+  registry: Registry;
+}
