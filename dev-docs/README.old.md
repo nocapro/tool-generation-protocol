@@ -1,75 +1,4 @@
-# Directory Structure
-```
-dev-docs/
-  flow.todo.md
-.gitignore
-LICENSE
-README.md
-```
-
-# Files
-
-## File: .gitignore
-````
-# relay state
-#/.relay/
-````
-
-## File: LICENSE
-````
-MIT License
-
-Copyright (c) 2026 Tool Generation Protocol
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-````
-
-## File: dev-docs/flow.todo.md
-````markdown
-lets bring readme.md into production ready manifestation.
-
-===
-
-give me diff patches fixing readme.md to achieve the goals and phylosohpy by eliminating inconsistencies
-
-===
-
-is tgp serverless friendly like cloudflare? as it rely on git so should leverege github where auto pull push right? why not asking github creds in the config
-
-===
-
-make the agent produce code quality:
-1. abstract
-2. composable
-3. HOFs
-4. stateless
-5. reusable
-6. general by params
-7. no hardcoded values
-8. can also orchesstrate or import from existing functions
-
-also the agent need to has certain tools and capabilities like list_files, read, write, search_replace, etc
-````
-
-## File: README.md
-````markdown
-# 1. Manifesto
+  # 1. Manifesto
   
   # Table of Contents
   
@@ -685,4 +614,3 @@ We are hacking on the future of backend development. We need **Rustaceans**, **T
 
 **Get Involved:**
 `git clone` -> `npm install` -> `npm run forge`.
-````

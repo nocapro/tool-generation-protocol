@@ -1,3 +1,7 @@
+lets bring readme.md into production ready manifestation.
+
+===
+
 give me diff patches fixing readme.md to achieve the goals and phylosohpy by eliminating inconsistencies
 
 ===
