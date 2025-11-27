@@ -1,0 +1,336 @@
+uuid: c9a1f234-56b1-41e8-9022-123456789012
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T09:22:30.114Z'
+gitCommitMsg: >-
+  feat: implement secure Sandbox runtime
+
+  - Add isolated-vm and esbuild dependencies - Implement JIT compilation of TS
+  tools - Implement VFS bridge with security checks (read-only /lib, read-write
+  /tmp) - Implement execTool for running tools in V8 isolate
+promptSummary: >-
+  Implemented Part 4 (The Sandbox). Added isolated-vm and esbuild. Created
+  Isolate lifecycle manager, a secure Bridge with VFS restrictions, and the
+  Execution engine that compiles TS and runs it in the jail.
+reasoning:
+  - >-
+    To execute Part 4, I will implement the Secure Sandbox using `isolated-vm`
+    (for strong isolation) and `esbuild` (for JIT transpilation of TypeScript).
+    This ensures that tools run in a restricted environment with capped
+    resources and limited IO.
+  - '### Step 1: Dependencies'
+  - >-
+    I need `isolated-vm` for the V8 sandbox and `esbuild` for the TypeScript
+    compiler.
+  - '### Step 2: Isolate Manager'
+  - >-
+    I will implement `src/sandbox/isolate.ts`. This module manages the lifecycle
+    of the V8 Isolate. It creates a fresh environment for each execution to
+    ensure statelessness.
+  - '### Step 3: The Bridge'
+  - >-
+    I will implement `src/sandbox/bridge.ts`. This defines the API exposed to
+    the guest code (`global.tgp`). Crucially, it wraps the VFS calls to enforce
+    the "Prison Rules" (ReadOnly `/lib`, ReadWrite `/tmp`).
+  - '### Step 4: Execution Logic'
+  - >-
+    I will implement `src/sandbox/execute.ts`. This is the main runner. It ties
+    the Isolate, the Compiler, and the Bridge together.
+operations:
+  - type: write
+    path: package.json
+    content: |2
+          "isomorphic-git": "^1.25.0",
+          "memfs": "^4.6.0", 
+      +   "isolated-vm": "^4.6.0",
+      +   "esbuild": "^0.19.11",
+          "typescript": "^5.3.3"
+        }
+      }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/isolate.ts
+    content: >-
+      import ivm from 'isolated-vm';
+
+      import { transform } from 'esbuild';
+
+      import { TGPConfig } from '../types.js';
+
+
+      /**
+       * Compiles TypeScript source code to JavaScript.
+       */
+      export async function compile(source: string): Promise<string> {
+        const result = await transform(source, {
+          loader: 'ts',
+          format: 'cjs', // simplified for sandbox
+          target: 'es2020',
+        });
+        return result.code;
+      }
+
+
+      /**
+       * Creates a configured V8 Isolate.
+       */
+      export function createIsolate(config: TGPConfig): ivm.Isolate {
+        return new ivm.Isolate({
+          memoryLimit: 128, // 128MB
+        });
+      }
+
+
+      /**
+       * Helper to marshal arguments into the sandbox.
+       */
+      export async function marshalValue(context: ivm.Context, value: any):
+      Promise<ivm.Reference | any> {
+        if (value === undefined) return undefined;
+        // Primitives are copied by value, objects need ExternalCopy
+        return new ivm.ExternalCopy(value).copyInto({ release: true, transferIn: true });
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/sandbox/bridge.ts
+    content: >-
+      import ivm from 'isolated-vm';
+
+      import { Kernel } from '../kernel/core.js';
+
+      import * as path from 'path';
+
+
+      /**
+       * Creates the host API object that will be injected into the sandbox.
+       */
+      export function createBridge(kernel: Kernel) {
+        return {
+          // --- Filesystem Bridge ---
+          fs: {
+            readFile: async (target: string) => {
+              // Allow reading from anywhere inside the sandbox (includes /lib, /tmp, /tools)
+              // The VFSAdapter already prevents traversal outside .tgp root.
+              return kernel.vfs.readFile(target);
+            },
+
+            writeFile: async (target: string, content: string) => {
+              // RESTRICTION: Can only write to /tmp
+              if (!target.startsWith('tmp/') && !target.startsWith('/tmp/')) {
+                 throw new Error(`Security Violation: Tools can only write to /tmp. Attempted write to: ${target}`);
+              }
+              return kernel.vfs.writeFile(target, content);
+            },
+            
+            exists: async (target: string) => {
+              return kernel.vfs.exists(target);
+            }
+          },
+
+          // --- Network Bridge (Optional / Configurable) ---
+          // In a real impl, this would respect config.allowedDomains
+          fetch: async (url: string, init?: any) => {
+            console.log(`[Sandbox] Fetching ${url}`);
+            const res = await fetch(url, init);
+            const text = await res.text();
+            return {
+              status: res.status,
+              text: () => text,
+              json: () => JSON.parse(text)
+            };
+          },
+          
+          // --- Logging ---
+          log: (...args: any[]) => {
+            console.log('[Tool]', ...args);
+          }
+        };
+      }
+
+
+      /**
+       * Injects the bridge into the context.
+       * We must wrap functions in ivm.Reference or use applySync for simple callbacks.
+       */
+      export async function injectBridge(context: ivm.Context, bridge:
+      ReturnType<typeof createBridge>) {
+        const jail = context.global;
+        
+        // We create a global object 'tgp' in the context
+        await jail.set('global', jail.derefInto());
+        
+        // Setup the 'tgp' namespace
+        await jail.set('tgp', new ivm.Reference({})); 
+        const tgp = await jail.get('tgp');
+
+        // Helper to inject a method
+        const injectMethod = async (obj: ivm.Reference, name: string, fn: Function) => {
+          await obj.set(name, new ivm.Reference(async (...args: any[]) => {
+            try {
+              return await fn(...args);
+            } catch (err: any) {
+              throw new Error(err.message); // Re-throw as simple error to pass through IVM
+            }
+          }));
+        };
+
+        // Inject FS
+        await tgp.set('fs', new ivm.Reference({}));
+        const tgpFs = await tgp.get('fs');
+        await injectMethod(tgpFs, 'readFile', bridge.fs.readFile);
+        await injectMethod(tgpFs, 'writeFile', bridge.fs.writeFile);
+        await injectMethod(tgpFs, 'exists', bridge.fs.exists);
+
+        // Inject Utils
+        await injectMethod(tgp, 'fetch', bridge.fetch);
+        await injectMethod(tgp, 'log', bridge.log);
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/sandbox/execute.ts
+    content: >-
+      import ivm from 'isolated-vm';
+
+      import { Kernel } from '../kernel/core.js';
+
+      import { createIsolate, compile, marshalValue } from './isolate.js';
+
+      import { createBridge, injectBridge } from './bridge.js';
+
+
+      export interface ExecuteOptions {
+        path: string;
+        args: Record<string, any>;
+      }
+
+
+      /**
+       * Executes a tool inside the secure sandbox.
+       */
+      export async function execTool(kernel: Kernel, opts: ExecuteOptions):
+      Promise<any> {
+        const { path: toolRelPath, args } = opts;
+
+        // 1. Read Source
+        const rawSource = await kernel.vfs.readFile(toolRelPath);
+
+        // 2. Compile (JIT)
+        const code = await compile(rawSource);
+
+        // 3. Setup Sandbox
+        const isolate = createIsolate(kernel.config);
+        const context = await isolate.createContext();
+
+        try {
+          // 4. Inject Bridge
+          const bridge = createBridge(kernel);
+          await injectBridge(context, bridge);
+
+          // 5. Inject Arguments as global 'args'
+          // We wrap args in ExternalCopy to transfer them efficiently
+          const jail = context.global;
+          await jail.set('args', await marshalValue(context, args));
+
+          // 6. Execute
+          // We wrap the code in an async IIFE to support top-level await behavior if needed,
+          // and to ensure we can return a value.
+          // NOTE: TGP tools are expected to export a default function or just run script?
+          // README says: "Functions should do one thing and return a result". 
+          // Let's assume the file content is the body of a function or it assigns result to a variable.
+          // For better structure, let's wrap the user code:
+          // User code: "return args.a + args.b;"
+          // Wrapped: "(async () => { const exports = {}; ... userCode ... })()"
+          
+          // For now, simpler approach: The tool source is treated as a script that returns the result.
+          const script = await isolate.compileScript(`
+            (async () => {
+              try {
+                // Shim exports
+                const module = { exports: {} };
+                const exports = module.exports;
+
+                // User code execution
+                ${code}
+
+                // If default export exists, run it with args
+                if (module.exports && typeof module.exports.default === 'function') {
+                   return await module.exports.default(args);
+                }
+                // Fallback: if user just wrote logic returning something at end (not standard module)
+                return module.exports;
+              } catch (e) {
+                tgp.log('Error in tool execution:', e.message);
+                throw e;
+              }
+            })()
+          `);
+
+          const resultRef = await script.run(context);
+          
+          // 7. Marshal Result back
+          // If result is a reference (object), copy it out.
+          if (resultRef === undefined) return undefined;
+          if (typeof resultRef !== 'object') return resultRef; // primitive
+          
+          // Attempt to copy out
+          try {
+            // If it's a promise (async function), await it? 
+            // The wrapper above is (async...), so script.run returns a Promise handle?
+            // IVM returns a Reference to the Promise returned by the IIFE.
+            const promiseResult = await resultRef.promise; // This unwraps the promise from the sandbox
+            const finalResult = await promiseResult.copy(); // Copy the actual value
+            return finalResult;
+          } catch (e) {
+             // It might be a direct value if not async
+             // Check if it has copy function
+             if (resultRef.copy) return await resultRef.copy();
+             return resultRef;
+          }
+
+        } finally {
+          // 8. Cleanup
+          context.release();
+          isolate.dispose();
+        }
+      }
+    patchStrategy: replace
+snapshot:
+  src/sandbox/isolate.ts: null
+  src/sandbox/bridge.ts: null
+  src/sandbox/execute.ts: null
+  package.json: |-
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "test": "echo \"Error: no test specified\" && exit 1"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "dependencies": {
+        "zod": "^3.22.4",
+        "isomorphic-git": "^1.25.0",
+        "memfs": "^4.6.0"
+      },
+      "devDependencies": {
+        "@types/node": "^20.11.0",
+        "typescript": "^5.3.3"
+      }
+    }
+approved: false
+linesAdded: null
+linesRemoved: null
+linesDifference: null
+gitCommittedAt: null
+status: undone
+id: 5

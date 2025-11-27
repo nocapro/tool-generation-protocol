@@ -1,0 +1,228 @@
+uuid: c3075677-90c7-43a0-be89-762299723238
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T09:19:57.965Z'
+gitCommitMsg: >-
+  feat: initialize core types and config loader
+
+  - Setup package.json with zod and strict typescript config - Define Zod
+  schemas for TGPConfig, GitConfig, DBConfig in src/types.ts - Implement
+  loadTGPConfig and defineTGPConfig in src/config.ts
+promptSummary: >-
+  Implemented Part 1 of the TGP Plan. Initialized project with TypeScript and
+  Zod. Defined strict schemas for TGPConfig, GitConfig, and DBConfig.
+  Implemented functional config loader with runtime validation.
+reasoning:
+  - >-
+    To execute Part 1 of the TGP plan, I will initialize the project with strict
+    TypeScript settings, install the necessary dependencies (Zod), and define
+    the core immutable configuration schemas.
+  - '### Step 1: Project Initialization & Types'
+  - >-
+    I will create the `package.json` and `tsconfig.json` to enforce strict type
+    checking (no implicit any) and set up the `src/types.ts` with Zod schemas to
+    ensure runtime validation of the Agent's configuration.
+  - '### Step 2: Core Schema Definitions'
+  - >-
+    Now I will implement `src/types.ts`. This file defines the "DNA" of the
+    system. We use Zod to create a single source of truth for both runtime
+    validation and static TypeScript types. This prevents the "invalid
+    configuration" class of bugs.
+  - '### Step 3: Functional Configuration Loader'
+  - >-
+    Finally, I will create `src/config.ts`. This module provides pure functions
+    to load and validate the configuration. It uses a Higher Order Function
+    approach (`defineTGPConfig`) to give autocompletion to the user without
+    needing to import types manually.
+operations:
+  - type: write
+    path: package.json
+    content: |-
+      {
+        "name": "@tgp/core",
+        "version": "0.0.1",
+        "description": "The Tool Generation Protocol",
+        "main": "dist/index.js",
+        "types": "dist/index.d.ts",
+        "type": "module",
+        "scripts": {
+          "build": "tsc",
+          "test": "echo \"Error: no test specified\" && exit 1"
+        },
+        "keywords": [
+          "ai",
+          "agent",
+          "protocol",
+          "backend"
+        ],
+        "author": "",
+        "license": "MIT",
+        "dependencies": {
+          "zod": "^3.22.4"
+        },
+        "devDependencies": {
+          "@types/node": "^20.11.0",
+          "typescript": "^5.3.3"
+        }
+      }
+    patchStrategy: replace
+  - type: write
+    path: tsconfig.json
+    content: |-
+      {
+        "compilerOptions": {
+          "target": "ES2022",
+          "module": "NodeNext",
+          "moduleResolution": "NodeNext",
+          "strict": true,
+          "noImplicitAny": true,
+          "strictNullChecks": true,
+          "strictFunctionTypes": true,
+          "noImplicitThis": true,
+          "noImplicitReturns": true,
+          "skipLibCheck": true,
+          "forceConsistentCasingInFileNames": true,
+          "outDir": "./dist",
+          "rootDir": "./src",
+          "declaration": true
+        },
+        "include": ["src/**/*"]
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/types.ts
+    content: |-
+      import { z } from 'zod';
+
+      // --- Git Configuration Schema ---
+      export const GitConfigSchema = z.object({
+        provider: z.enum(['github', 'gitlab', 'bitbucket']),
+        repo: z.string().min(1, "Repository name is required"),
+        branch: z.string().default('main'),
+        auth: z.object({
+          token: z.string().min(1, "Git auth token is required"),
+          user: z.string().default('tgp-bot[bot]'),
+          email: z.string().email().default('tgp-bot@users.noreply.github.com'),
+        }),
+        writeStrategy: z.enum(['direct', 'pr']).default('direct'),
+      });
+
+      // --- Database Configuration Schema ---
+      export const DBConfigSchema = z.object({
+        dialect: z.enum(['postgres', 'mysql', 'sqlite', 'libsql']),
+        ddlSource: z.string().optional().describe("Command to generate DDL, e.g., 'drizzle-kit generate'"),
+      });
+
+      // --- Filesystem Jail Schema ---
+      export const FSConfigSchema = z.object({
+        allowedDirs: z.array(z.string()).default(['./tmp']),
+        blockUpwardTraversal: z.boolean().default(true),
+      });
+
+      // --- Main TGP Configuration Schema ---
+      export const TGPConfigSchema = z.object({
+        rootDir: z.string().default('./.tgp'),
+        db: DBConfigSchema.optional(),
+        git: GitConfigSchema,
+        fs: FSConfigSchema.default({}),
+        allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+      });
+
+      // --- Inferred Static Types ---
+      // We export these so the rest of the app relies on the Zod inference, 
+      // ensuring types and validation never drift apart.
+      export type GitConfig = z.infer<typeof GitConfigSchema>;
+      export type DBConfig = z.infer<typeof DBConfigSchema>;
+      export type FSConfig = z.infer<typeof FSConfigSchema>;
+      export type TGPConfig = z.infer<typeof TGPConfigSchema>;
+
+      /**
+       * Defines the structure for a tool file persisted in the VFS.
+       * This is what resides in ./.tgp/tools/
+       */
+      export const ToolSchema = z.object({
+        name: z.string(),
+        description: z.string(),
+        parameters: z.record(z.unknown()), // JsonSchema
+        code: z.string(), // The raw TypeScript source
+      });
+
+      export type ToolDefinition = z.infer<typeof ToolSchema>;
+    patchStrategy: replace
+  - type: write
+    path: src/config.ts
+    content: >-
+      import { pathToFileURL } from 'url';
+
+      import { TGPConfig, TGPConfigSchema } from './types.js';
+
+
+      /**
+       * Identity function to provide type inference for configuration files.
+       * usage: export default defineTGPConfig({ ... })
+       */
+      export function defineTGPConfig(config: TGPConfig): TGPConfig {
+        return config;
+      }
+
+
+      /**
+       * Dynamically loads a TGP configuration file, validates it against the schema,
+       * and returns the typed configuration object.
+       * 
+       * @param configPath - Absolute or relative path to the config file (e.g., ./tgp.config.ts)
+       */
+      export async function loadTGPConfig(configPath: string):
+      Promise<TGPConfig> {
+        try {
+          // Convert path to file URL to ensure compatibility with ESM imports
+          // We assume the host environment (Node) can handle the import.
+          // In Serverless environments, the config might be injected differently, 
+          // but this loader is primarily for the CLI/Node runtime.
+          const importPath = pathToFileURL(configPath).href;
+          
+          const module = await import(importPath);
+          
+          // Support both default export and named export 'config'
+          const rawConfig = module.default || module.config;
+
+          if (!rawConfig) {
+            throw new Error(`No default export found in ${configPath}`);
+          }
+
+          // Runtime Validation: Ensure the user provided valid configuration
+          const parsed = TGPConfigSchema.safeParse(rawConfig);
+
+          if (!parsed.success) {
+            const errors = parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('\n');
+            throw new Error(`Invalid TGP Configuration:\n${errors}`);
+          }
+
+          return parsed.data;
+        } catch (error) {
+          if (error instanceof Error) {
+            throw new Error(`Failed to load TGP config from ${configPath}: ${error.message}`);
+          }
+          throw error;
+        }
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/index.ts
+    content: |-
+      // Exporting the Core DNA for consumers
+      export * from './types.js';
+      export * from './config.js';
+    patchStrategy: replace
+snapshot:
+  package.json: null
+  tsconfig.json: null
+  src/types.ts: null
+  src/config.ts: null
+  src/index.ts: null
+approved: true
+linesAdded: 155
+linesRemoved: 0
+linesDifference: 155
+gitCommittedAt: null
+status: committed
+id: 1

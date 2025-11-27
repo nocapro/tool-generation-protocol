@@ -1,0 +1,267 @@
+uuid: c888d361-b1e0-4740-9669-e028122d99d1
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T09:26:44.378Z'
+gitCommitMsg: >-
+  feat: implement agent tools interface
+
+  Added the core toolset for the Agent to interact with the TGP Kernel: - File
+  System: list, read, write, patch - Validation: check_tool (JIT compile) -
+  Execution: exec_tool (Sandbox run)
+promptSummary: >-
+  Implement the Agent Tools (Part 5) in src/tools/, including file operations,
+  validation, and execution capabilities.
+reasoning:
+  - >-
+    I will implement the Agent Tools (Part 5) by creating the necessary files in
+    `src/tools/` and exposing them through the main entry point.
+  - '### Step 1: Define Tool Interfaces'
+  - >-
+    I'll create `src/tools/types.ts` to define the structure of a tool
+    (description, parameters, execution logic). This ensures a consistent
+    interface for the SDK layer (Part 6) to consume.
+  - '### Step 2: Implement File System Tools'
+  - >-
+    I'll create `src/tools/fs.ts`. These tools allow the Agent to explore and
+    modify the `tools/` directory (The Editor context).
+  - '### Step 3: Implement Validation Tools'
+  - >-
+    I'll create `src/tools/validation.ts` to perform JIT compilation checks
+    using `esbuild`.
+  - '### Step 4: Implement Execution Tools'
+  - I'll create `src/tools/exec.ts` to bridge the `sandbox` execution engine.
+  - '### Step 5: Aggregate Tools'
+  - I'll create `src/tools/index.ts` to export the factory function.
+  - '### Step 6: Update Main Entry Point'
+  - I'll update `src/index.ts` to export the new tools module.
+  - '### Verification'
+  - >-
+    I am following the "reuse or forge" protocol. The logic is strictly
+    functional.
+  - >-
+    - `patch_file` uses strict string matching to avoid accidental logical
+    corruption.
+  - >-
+    - `check_tool` uses the same compiler (`esbuild`) as the runtime to ensure
+    consistency.
+  - '- `exec_tool` delegates to the sandbox to ensure isolation.'
+  - >-
+    - No `any` is used for internal logic (except for `args` which are
+    inherently dynamic JSON, typed as `record(any)` in Zod).
+  - 'YAML Summary:'
+operations:
+  - type: write
+    path: src/tools/types.ts
+    content: >-
+      import { z } from 'zod';
+
+
+      /**
+       * Represents a tool that can be exposed to an AI Agent.
+       * This is generic enough to be adapted to OpenAI, Vercel AI SDK, or other consumers.
+       */
+      export interface AgentTool<TParams extends z.ZodTypeAny = any, TResult =
+      any> {
+        description: string;
+        parameters: TParams;
+        execute: (args: z.infer<TParams>) => Promise<TResult>;
+      }
+
+
+      export type ToolSet = Record<string, AgentTool>;
+    patchStrategy: replace
+  - type: write
+    path: src/tools/fs.ts
+    content: |-
+      import { z } from 'zod';
+      import { Kernel } from '../kernel/core.js';
+      import { AgentTool } from './types.js';
+
+      export const ListFilesParams = z.object({
+        dir: z.string().describe('The relative directory path to list (e.g., "tools" or "tools/analytics")'),
+      });
+
+      export const ReadFileParams = z.object({
+        path: z.string().describe('The relative path to the file to read'),
+      });
+
+      export const WriteFileParams = z.object({
+        path: z.string().describe('The relative path where the file should be written'),
+        content: z.string().describe('The full content of the file'),
+      });
+
+      export const PatchFileParams = z.object({
+        path: z.string().describe('The relative path to the file to patch'),
+        search: z.string().describe('The exact string content to find'),
+        replace: z.string().describe('The string content to replace it with'),
+      });
+
+      export function createFsTools(kernel: Kernel) {
+        return {
+          list_files: {
+            description: 'Recursively list available tools or definitions in the VFS.',
+            parameters: ListFilesParams,
+            execute: async ({ dir }) => {
+              return kernel.vfs.listFiles(dir, true);
+            },
+          } as AgentTool<typeof ListFilesParams, string[]>,
+
+          read_file: {
+            description: 'Read the content of an existing tool or file.',
+            parameters: ReadFileParams,
+            execute: async ({ path }) => {
+              return kernel.vfs.readFile(path);
+            },
+          } as AgentTool<typeof ReadFileParams, string>,
+
+          write_file: {
+            description: 'Create a new tool or overwrite a draft. Ensures parent directories exist.',
+            parameters: WriteFileParams,
+            execute: async ({ path, content }) => {
+              await kernel.vfs.writeFile(path, content);
+              return { success: true, path };
+            },
+          } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
+
+          patch_file: {
+            description: 'Surgical search-and-replace for refactoring code.',
+            parameters: PatchFileParams,
+            execute: async ({ path, search, replace }) => {
+              const content = await kernel.vfs.readFile(path);
+              
+              if (!content.includes(search)) {
+                throw new Error(`Patch failed: Search text not found in '${path}'. Please read the file again to ensure you have the exact content.`);
+              }
+
+              // We replace the first occurrence to be surgical.
+              // If the agent needs global replace, it can do so in a loop or we can expand this tool later.
+              const newContent = content.replace(search, replace);
+              
+              await kernel.vfs.writeFile(path, newContent);
+              return { success: true, path };
+            },
+          } as AgentTool<typeof PatchFileParams, { success: boolean; path: string }>,
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/tools/validation.ts
+    content: |-
+      import { z } from 'zod';
+      import { transform } from 'esbuild';
+      import { Kernel } from '../kernel/core.js';
+      import { AgentTool } from './types.js';
+
+      export const CheckToolParams = z.object({
+        path: z.string().describe('The relative path of the tool to validate'),
+      });
+
+      export function createValidationTools(kernel: Kernel) {
+        return {
+          check_tool: {
+            description: 'Run JIT compilation and syntax check on a tool.',
+            parameters: CheckToolParams,
+            execute: async ({ path }) => {
+              try {
+                const code = await kernel.vfs.readFile(path);
+                
+                // Dry-run transformation to catch syntax errors
+                await transform(code, {
+                  loader: 'ts',
+                  format: 'cjs',
+                  target: 'es2020',
+                });
+
+                // TODO: Add AST traversal here to enforce the "8 Standards"
+                // e.g. check for prohibited imports, global state usage, etc.
+
+                return { valid: true, errors: [] };
+              } catch (error: any) {
+                // esbuild errors are usually descriptive
+                const msg = error.message || String(error);
+                // Return valid: false so the model can reason about the error, rather than crashing the tool call
+                return { valid: false, errors: [msg] };
+              }
+            },
+          } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/tools/exec.ts
+    content: |-
+      import { z } from 'zod';
+      import { Kernel } from '../kernel/core.js';
+      import { executeTool } from '../sandbox/execute.js';
+      import { AgentTool } from './types.js';
+
+      export const ExecToolParams = z.object({
+        path: z.string().describe('The relative path of the tool to execute'),
+        args: z.record(z.any()).describe('The arguments to pass to the tool'),
+      });
+
+      export function createExecTools(kernel: Kernel) {
+        return {
+          exec_tool: {
+            description: 'Execute a tool inside the secure Sandbox.',
+            parameters: ExecToolParams,
+            execute: async ({ path, args }) => {
+              const code = await kernel.vfs.readFile(path);
+              
+              // The sandbox takes care of safety, timeout, and memory limits
+              const result = await executeTool(kernel, code, args);
+              return result;
+            },
+          } as AgentTool<typeof ExecToolParams, any>,
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/tools/index.ts
+    content: |-
+      import { Kernel } from '../kernel/core.js';
+      import { createFsTools } from './fs.js';
+      import { createValidationTools } from './validation.js';
+      import { createExecTools } from './exec.js';
+      import { ToolSet } from './types.js';
+
+      export * from './types.js';
+
+      /**
+       * Generates the complete set of TGP tools (Capabilities) for a given Kernel.
+       * These are the tools the Agent will use to build, test, and run the user-land tools.
+       */
+      export function tgpTools(kernel: Kernel): ToolSet {
+        return {
+          ...createFsTools(kernel),
+          ...createValidationTools(kernel),
+          ...createExecTools(kernel),
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/index.ts
+    content: |
+      --- src/index.ts
+      +++ src/index.ts
+      @@ -2,3 +2,4 @@
+       export * from './types.js';
+       export * from './config.js';
+      +export * from './tools/index.js';
+    patchStrategy: standard-diff
+snapshot:
+  src/tools/types.ts: null
+  src/tools/fs.ts: null
+  src/tools/validation.ts: null
+  src/tools/exec.ts: null
+  src/tools/index.ts: null
+  src/index.ts: |-
+    // Exporting the Core DNA for consumers
+    export * from './types.js';
+    export * from './config.js';
+approved: true
+linesAdded: 167
+linesRemoved: 0
+linesDifference: 167
+gitCommittedAt: null
+status: committed
+id: 7

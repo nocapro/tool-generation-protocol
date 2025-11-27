@@ -1,0 +1,376 @@
+uuid: c8f2b3a1-9d4e-4b5a-9c7d-8e6f0a1b2c1d
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T09:54:33.229Z'
+gitCommitMsg: >-
+  feat: Implement Public SDK and CLI
+
+  - Adds `src/tgp.ts` with the primary `createTGP` factory for Node.js
+  environments and the standard `getSystemPrompt` helper. - Implements the `tgp`
+  CLI with an `init` command to bootstrap projects. - Updates `package.json`
+  with the necessary `bin` entry to make the CLI executable. - Exports new SDK
+  components from the main `index.ts` file.
+promptSummary: Implement Part 6 - SDK Entry Point and CLI.
+reasoning:
+  - >-
+    Of course. Here is the response with the requested changes, meticulously
+    formatted according to the protocol.
+  - '### Step 1: Implement the High-Level Entry Point (`src/tgp.ts`)'
+  - >-
+    First, I will create the main SDK entry point `src/tgp.ts`. This file will
+    contain the `createTGP` factory function, which wires up the configuration,
+    the Node.js VFS, and the kernel. It also includes the `getSystemPrompt`
+    function as described in the plan. This is a new file.
+  - '### Step 2: Update the Main Export (`src/index.ts`)'
+  - >-
+    Next, I'll update the main `src/index.ts` file to export the new SDK
+    functions, making them accessible to consumers of the `@tgp/core` package.
+  - '### Step 3: Create the CLI Entry Point (`bin/tgp.js`)'
+  - >-
+    I will now create the executable file for the CLI. This file will be
+    responsible for running the CLI logic and will be referenced in
+    `package.json`. It's a new file.
+  - '### Step 4: Implement CLI Logic (`src/cli/index.ts`)'
+  - >-
+    This new file will contain the core logic for the command-line interface,
+    parsing arguments and dispatching commands like `init` and `help`.
+  - '### Step 5: Implement Init Command (`src/cli/init.ts`)'
+  - >-
+    This new file contains the implementation for the `tgp init` command. It
+    scaffolds the necessary configuration file and `.gitignore` entry in the
+    user's project.
+  - '### Step 6: Update `package.json`'
+  - >-
+    Finally, I'll modify `package.json` to add the `bin` entry, which makes
+    `tgp` a runnable command, and a convenient `tgp` script for local
+    development.
+operations:
+  - type: write
+    path: src/tgp.ts
+    content: >-
+      import * as fs from 'node:fs';
+
+      import { createKernel, Kernel } from './kernel/core.js';
+
+      import { loadTGPConfig } from './config.js';
+
+      import { createNodeVFS } from './vfs/node.js';
+
+
+      export interface TGPOptions {
+        /**
+         * Path to the configuration file.
+         * @default "./tgp.config.ts"
+         */
+        configFile?: string;
+      }
+
+
+      /**
+       * High-level factory to create a fully initialized TGP Kernel in a Node.js environment.
+       * This handles config loading, VFS setup (Disk-based), and Git backend wiring.
+       */
+      export async function createTGP(opts: TGPOptions = {}): Promise<Kernel> {
+        const configPath = opts.configFile || './tgp.config.ts';
+        
+        // 1. Load Configuration
+        const config = await loadTGPConfig(configPath);
+        
+        // 2. Setup Filesystem (Node VFS)
+        const vfs = createNodeVFS(config.rootDir);
+        
+        // 3. Create Kernel
+        // We pass the raw 'fs' module to isomorphic-git so it can do its magic on the .git folder
+        const kernel = createKernel({
+          config,
+          vfs,
+          fs
+        });
+
+        // 4. Boot (Hydrate from Git)
+        await kernel.boot();
+
+        return kernel;
+      }
+
+
+      /**
+       * Generates the System Prompt enforcing the "8 Standards" and TGP protocol.
+       */
+      export function getSystemPrompt(): string {
+        return `
+      You are an autonomous AI Engineer running on the Tool Generation Protocol
+      (TGP).
+
+      Your goal is to build, validate, and execute tools to solve the user's
+      request.
+
+
+      # THE PROTOCOL
+
+
+      1.  **Reuse or Forge**: Check if a tool exists. If not, write it.
+
+      2.  **No One-Offs**: Do not execute arbitrary scripts. Create a reusable
+      tool in 'tools/'.
+
+      3.  **Strict Typing**: All tools must be written in TypeScript. No 'any',
+      no 'unknown'.
+
+
+      # CODING STANDARDS (The 8 Commandments)
+
+
+      1.  **Abstract**: Logic must be separated from data. (e.g., args.taxRate,
+      not 0.05).
+
+      2.  **Composable**: Functions should return results usable by others.
+
+      3.  **HOFs**: Use map/reduce/filter over imperative loops.
+
+      4.  **Stateless**: No global state. No reliance on previous execution.
+
+      5.  **Reusable**: Generic enough for multiple use cases.
+
+      6.  **General by Params**: Behavior controlled by arguments.
+
+      7.  **No Hardcoded Values**: No magic numbers or IDs.
+
+      8.  **Orchestrator**: Tools can import other tools via 'require'.
+
+
+      # EXECUTION FLOW
+
+
+      1.  List files to see what you have.
+
+      2.  Read file content to understand the tool.
+
+      3.  If missing, write_file to create a new tool.
+
+      4.  Use check_tool to validate syntax.
+
+      5.  Use exec_tool to run it.
+
+      `;
+
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/index.ts
+    content: |
+      --- src/index.ts
+      +++ src/index.ts
+      @@ ... @@
+       // Exporting the Core DNA for consumers
+       export * from './types.js';
+       export * from './config.js';
+       export * from './tools/index.js';
+      +export * from './tgp.js';
+    patchStrategy: standard-diff
+  - type: write
+    path: bin/tgp.js
+    content: |-
+      #!/usr/bin/env node
+
+      import { cli } from '../dist/cli/index.js';
+
+      cli().catch((err) => {
+        console.error('TGP CLI Error:', err);
+        process.exit(1);
+      });
+    patchStrategy: replace
+  - type: write
+    path: src/cli/index.ts
+    content: |-
+      import { initCommand } from './init.js';
+
+      export async function cli() {
+        const args = process.argv.slice(2);
+        const command = args[0] || 'help';
+
+        switch (command) {
+          case 'init':
+            await initCommand();
+            break;
+          
+          case 'help':
+          case '--help':
+          case '-h':
+            printHelp();
+            break;
+
+          default:
+            console.log(`Unknown command: ${command}`);
+            printHelp();
+            process.exit(1);
+        }
+      }
+
+      function printHelp() {
+        console.log(`
+      Tool Generation Protocol (TGP) CLI
+
+      Usage:
+        tgp init    Initialize a new TGP environment in the current directory.
+        tgp help    Show this message.
+      `);
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/cli/init.ts
+    content: |-
+      import * as fs from 'fs/promises';
+      import * as path from 'path';
+
+      export async function initCommand() {
+        const cwd = process.cwd();
+        console.log(`[TGP] Initializing in ${cwd}...`);
+
+        const configPath = path.join(cwd, 'tgp.config.ts');
+        const gitIgnorePath = path.join(cwd, '.gitignore');
+        const tgpDir = path.join(cwd, '.tgp');
+
+        // 1. Create tgp.config.ts
+        if (await exists(configPath)) {
+          console.log(`[TGP] tgp.config.ts already exists. Skipping.`);
+        } else {
+          await fs.writeFile(configPath, CONFIG_TEMPLATE.trim() + '\n');
+          console.log(`[TGP] Created tgp.config.ts`);
+        }
+
+        // 2. Update .gitignore
+        if (await exists(gitIgnorePath)) {
+          const content = await fs.readFile(gitIgnorePath, 'utf-8');
+          if (!content.includes('.tgp')) {
+            await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n');
+            console.log(`[TGP] Added .tgp to .gitignore`);
+          }
+        } else {
+          await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n');
+          console.log(`[TGP] Created .gitignore`);
+        }
+
+        // 3. Create .tgp directory (just to be nice)
+        await fs.mkdir(tgpDir, { recursive: true });
+
+        console.log(`[TGP] Initialization complete.`);
+      }
+
+      async function exists(p: string) {
+        try {
+          await fs.access(p);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+
+      const CONFIG_TEMPLATE = `
+      import { defineTGPConfig } from '@tgp/core';
+
+      export default defineTGPConfig({
+        // The Root of the Agent's filesystem
+        rootDir: './.tgp',
+
+        // Database Configuration (Optional)
+        // db: {
+        //   dialect: 'postgres',
+        //   ddlSource: 'drizzle-kit generate --print',
+        // },
+
+        // Git Backend (Required for Persistence)
+        git: {
+          provider: 'github',
+          repo: 'my-org/tgp-tools',
+          branch: 'main',
+          auth: {
+            token: process.env.GITHUB_TOKEN || '',
+            user: 'tgp-bot',
+            email: 'bot@tgp.dev'
+          },
+          writeStrategy: 'direct' // or 'pr'
+        },
+
+        // Sandbox Security
+        fs: {
+          allowedDirs: ['./tmp'],
+          blockUpwardTraversal: true
+        },
+
+        allowedImports: ['@tgp/std', 'zod', 'date-fns']
+      });`;
+    patchStrategy: replace
+  - type: write
+    path: package.json
+    content: |
+      --- package.json
+      +++ package.json
+      @@ ... @@
+         "type": "module",
+         "scripts": {
+           "build": "tsc",
+      -    "test": "echo \"Error: no test specified\" && exit 1"
+      +    "test": "echo \"Error: no test specified\" && exit 1",
+      +    "tgp": "node bin/tgp.js"
+         },
+         "keywords": [
+           "ai",
+      @@ ... @@
+         "author": "",
+         "license": "MIT",
+      +  "bin": {
+      +    "tgp": "./bin/tgp.js"
+      +  },
+         "dependencies": {
+           "zod": "^3.25.76",
+           "isomorphic-git": "^1.35.1",
+    patchStrategy: standard-diff
+snapshot:
+  src/tgp.ts: null
+  bin/tgp.js: null
+  src/cli/index.ts: null
+  src/cli/init.ts: null
+  src/index.ts: |-
+    // Exporting the Core DNA for consumers
+    export * from './types.js';
+    export * from './config.js';
+    export * from './tools/index.js';
+  package.json: |-
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "test": "echo \"Error: no test specified\" && exit 1"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "dependencies": {
+        "zod": "^3.25.76",
+        "isomorphic-git": "^1.35.1",
+        "memfs": "^4.51.0",
+        "isolated-vm": "^4.7.2",
+        "esbuild": "^0.19.12"
+      },
+      "devDependencies": {
+        "@types/node": "^20.19.25",
+        "typescript": "^5.9.3"
+      }
+    }
+approved: false
+linesAdded: null
+linesRemoved: null
+linesDifference: null
+gitCommittedAt: null
+status: undone
+id: 11

@@ -1,0 +1,322 @@
+uuid: c8f30018-b223-4416-921e-781e33d26a25
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T09:29:46.569Z'
+gitCommitMsg: >-
+  feat: add SDK entry point and CLI scaffolding
+
+  Introduces `createTGP` factory for environment-agnostic runtime
+  initialization. Adds `src/cli` for the `tgp init` command. Adds
+  `formatVercelTools` for easy integration with AI SDKs.
+promptSummary: >-
+  Implement Part 6 (SDK & CLI) including createTGP factory, SDK adapters, and
+  the init command.
+reasoning:
+  - >-
+    Step 6 of the plan focuses on distribution: creating the SDK entry point
+    (`src/sdk.ts`, `src/index.ts`) and the CLI (`src/cli/`). This effectively
+    packages the TGP runtime for end-user developers.
+  - '### 1. Create the SDK Adapter (`src/sdk.ts`)'
+  - >-
+    We'll create a new file to help format TGP tools for external libraries like
+    the Vercel AI SDK and OpenAI.
+  - ts
+  - '* import { generateText } from ''ai'';'
+  - '* import { createTGP, formatVercelTools } from ''@tgp/core'';'
+  - '*'
+  - '* const { tools } = await createTGP({ ... });'
+  - '*'
+  - '* await generateText({'
+  - '*   tools: formatVercelTools(tools),'
+  - '*   ...'
+  - '* });'
+  - '*'
+  - '### 2. Update the Main Entry Point (`src/index.ts`)'
+  - >-
+    We will replace `src/index.ts` to export the high-level `createTGP` factory,
+    which abstracts away the `Kernel` creation and handles environment detection
+    (Node vs. Serverless).
+  - '### 3. Create the CLI Init Logic (`src/cli/init.ts`)'
+  - >-
+    This module handles the `tgp init` command, scaffolding the project
+    structure.
+  - '### 4. Create the CLI Entry Point (`src/cli/index.ts`)'
+  - This is the executable script that receives command line arguments.
+  - '### 5. Update `package.json`'
+  - >-
+    We need to register the `bin` command and ensure the package metadata is
+    correct for distribution.
+  - '### Summary'
+  - 'We have successfully implemented **Part 6: Distribution**.'
+  - >-
+    -   `createTGP` is now the robust entry point that auto-configures the VFS
+    based on the runtime environment.
+  - '-   `formatVercelTools` allows seamless integration with the Vercel AI SDK.'
+  - '-   The `tgp init` CLI command is ready to scaffold new projects.'
+  - >-
+    This completes the functionality implementation of the Tool Generation
+    Protocol.
+operations:
+  - type: write
+    path: src/sdk.ts
+    content: |-
+      import { ToolSet } from './tools/types.js';
+
+      /**
+       * Formats TGP tools for use with Vercel AI SDK (Core).
+       * The Vercel AI SDK (and `ai` package) supports Zod schemas natively.
+       * 
+       * Usage:
+       * 
+    patchStrategy: replace
+  - type: write
+    path: '*/'
+    content: |-
+      export function formatVercelTools(tools: ToolSet) {
+        const formatted: Record<string, any> = {};
+        
+        for (const [name, tool] of Object.entries(tools)) {
+          formatted[name] = {
+            description: tool.description,
+            parameters: tool.parameters,
+            execute: tool.execute,
+          };
+        }
+        
+        return formatted;
+      }
+
+      /**
+       * Formats TGP tools for raw OpenAI API usage.
+       * 
+       * Note: OpenAI requires JSON Schema for parameters. 
+       * Since TGP uses Zod, you may need to use `zod-to-json-schema` 
+       * if your client doesn't perform this conversion automatically.
+       */
+      export function formatOpenAITools(tools: ToolSet) {
+        return Object.entries(tools).map(([name, tool]) => ({
+          type: 'function',
+          function: {
+            name,
+            description: tool.description,
+            parameters: tool.parameters, 
+          },
+        }));
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/index.ts
+    content: |-
+      import * as nodeFs from 'node:fs';
+      import { createKernel } from './kernel/core.js';
+      import { createNodeVFS } from './vfs/node.js';
+      import { createMemoryVFS } from './vfs/memory.js';
+      import { loadTGPConfig } from './config.js';
+      import { tgpTools } from './tools/index.js';
+      import { TGPConfig } from './types.js';
+
+      export * from './types.js';
+      export * from './config.js';
+      export * from './tools/index.js';
+      export * from './sdk.js';
+
+      export interface TGPOptions {
+        /** Path to the configuration file (Node.js environments only). */
+        configFile?: string;
+        /** Direct configuration object (Serverless/Runtime environments). */
+        config?: TGPConfig;
+        /** 
+         * Filesystem module injection for Git (required if not in Node.js).
+         * In a browser/worker, pass 'memfs' or 'lightning-fs' here.
+         */
+        fs?: any;
+      }
+
+      /**
+       * Factory to create a TGP Runtime.
+       * Automatically detects the environment (Node vs Serverless) to select the correct VFS.
+       */
+      export async function createTGP(opts: TGPOptions = {}) {
+        // 1. Resolve Configuration
+        let config: TGPConfig;
+        
+        if (opts.config) {
+          config = opts.config;
+        } else if (opts.configFile) {
+          // Dynamic import works best in Node or bundlers supporting it
+          config = await loadTGPConfig(opts.configFile);
+        } else {
+          throw new Error(`[TGP] Invalid Initialization: You must provide either 'config' (object) or 'configFile' (path).`);
+        }
+
+        // 2. Resolve Environment & Filesystem
+        const isNode = typeof process !== 'undefined' && 
+                       process.versions != null && 
+                       process.versions.node != null;
+
+        let vfs;
+        let gitFs;
+
+        if (isNode && !opts.fs) {
+          // Standard Node.js mode: Use Real Disk
+          vfs = createNodeVFS(config.rootDir);
+          gitFs = nodeFs;
+        } else {
+          // Serverless / Sandbox mode: Use Memory VFS
+          vfs = createMemoryVFS();
+          
+          // For Git operations in memory, the user must inject a compatible fs
+          gitFs = opts.fs || null; 
+        }
+
+        // 3. Initialize Kernel
+        const kernel = createKernel({
+          config,
+          vfs,
+          fs: gitFs
+        });
+
+        return {
+          kernel,
+          // Capabilities (Tools) exposed to the Agent
+          tools: tgpTools(kernel),
+          // Lifecycle methods
+          boot: () => kernel.boot(),
+          shutdown: () => kernel.shutdown()
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/cli/init.ts
+    content: |-
+      import * as fs from 'node:fs';
+      import * as path from 'node:path';
+
+      export function init(targetDir: string = process.cwd()) {
+        const configPath = path.join(targetDir, 'tgp.config.ts');
+        const tgpDir = path.join(targetDir, '.tgp');
+
+        console.log(`[TGP] Initializing new project in ${targetDir}...`);
+
+        // 1. Create .tgp directory
+        if (!fs.existsSync(tgpDir)) {
+          try {
+            fs.mkdirSync(tgpDir, { recursive: true });
+            console.log(`[TGP] Created directory: ${tgpDir}`);
+          } catch (e) {
+            console.error(`[TGP] Failed to create ${tgpDir}:`, e);
+          }
+        }
+
+        // 2. Create default config file
+        if (!fs.existsSync(configPath)) {
+          const configContent = `import { defineTGPConfig } from '@tgp/core';
+
+      export default defineTGPConfig({
+        rootDir: './.tgp',
+        git: {
+          provider: 'github',
+          repo: 'my-org/tgp-tools',
+          branch: 'main',
+          auth: {
+            token: process.env.TGP_GITHUB_TOKEN || '',
+          },
+          // In production, use 'pr' to review generated tools before merging
+          writeStrategy: 'direct', 
+        },
+      });
+      `;
+          fs.writeFileSync(configPath, configContent);
+          console.log(`[TGP] Created configuration: tgp.config.ts`);
+        } else {
+          console.log(`[TGP] Configuration already exists: tgp.config.ts`);
+        }
+
+        console.log(`\n[TGP] Setup complete.`);
+        console.log(`1. Set TGP_GITHUB_TOKEN in your environment.`);
+        console.log(`2. Import 'createTGP' in your application.`);
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/cli/index.ts
+    content: |-
+      #!/usr/bin/env node
+      import { init } from './init.js';
+
+      const args = process.argv.slice(2);
+      const command = args[0];
+
+      switch (command) {
+        case 'init':
+          init();
+          break;
+        default:
+          console.log(`
+      TGP - The Tool Generation Protocol
+
+      Usage:
+        tgp init    Initialize a new TGP project structure and configuration.
+      `);
+          break;
+      }
+    patchStrategy: replace
+  - type: write
+    path: package.json
+    content: |
+      --- package.json
+      +++ package.json
+      @@ -6,2 +6,5 @@
+         "types": "dist/index.d.ts",
+      +  "bin": {
+      +    "tgp": "./dist/cli/index.js"
+      +  },
+         "type": "module",
+    patchStrategy: standard-diff
+snapshot:
+  src/sdk.ts: null
+  '*/': null
+  src/cli/init.ts: null
+  src/cli/index.ts: null
+  src/index.ts: |-
+    // Exporting the Core DNA for consumers
+    export * from './types.js';
+    export * from './config.js';
+    export * from './tools/index.js';
+  package.json: |-
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "test": "echo \"Error: no test specified\" && exit 1"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "dependencies": {
+        "zod": "^3.22.4",
+        "isomorphic-git": "^1.25.0",
+        "memfs": "^4.6.0",
+        "isolated-vm": "^4.6.0",
+        "esbuild": "^0.19.0"
+      },
+      "devDependencies": {
+        "@types/node": "^20.11.0",
+        "typescript": "^5.3.3"
+      }
+    }
+approved: false
+linesAdded: null
+linesRemoved: null
+linesDifference: null
+gitCommittedAt: null
+status: undone
+id: 8

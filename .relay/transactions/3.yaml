@@ -1,0 +1,256 @@
+uuid: c88d7123-55a1-43e8-9311-893322119199
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T09:20:15.973Z'
+gitCommitMsg: >-
+  feat: implement Kernel and GitOps engine
+
+  - Add isomorphic-git for version control - Implement GitBackend with hydrate
+  (clone/pull) and persist (commit/push) - Implement Kernel factory to wire
+  Config, VFS, and Git together
+promptSummary: >-
+  Implemented Part 3 (The Kernel). Added isomorphic-git to dependencies. Created
+  src/kernel/git.ts for GitOps (hydrate/persist) and src/kernel/core.ts as the
+  system entry point.
+reasoning:
+  - >-
+    To execute Part 3, I will implement the Kernel, which acts as the engine of
+    the TGP runtime. This involves setting up the GitOps workflow (`hydrate` and
+    `persist`) and the central `Kernel` factory.
+  - '### Step 1: Dependencies'
+  - >-
+    I need to add `isomorphic-git` (a pure JavaScript implementation of Git) to
+    handle version control operations in both Node.js and Serverless
+    environments.
+  - '### Step 2: GitOps Engine'
+  - >-
+    I will implement `src/kernel/git.ts`. This module abstracts the complex Git
+    commands into two simple primitives: `hydrate` (sync down) and `persist`
+    (sync up). It is designed to be agnostic of the underlying `fs`
+    implementation, allowing it to work with `node:fs` or `memfs`.
+  - '### Step 3: The Kernel Factory'
+  - >-
+    I will implement `src/kernel/core.ts`. The Kernel is the central object that
+    holds the state of the system. It initializes the Git backend and the VFS.
+    It provides the lifecycle methods `boot()` and `shutdown()`.
+operations:
+  - type: write
+    path: package.json
+    content: |2
+          "zod": "^3.22.4"
+        },
+        "devDependencies": {
+          "@types/node": "^20.11.0",
+      +   "isomorphic-git": "^1.25.0",
+      +   "memfs": "^4.6.0", 
+          "typescript": "^5.3.3"
+        }
+      }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/git.ts
+    content: >-
+      import git from 'isomorphic-git';
+
+      import http from 'isomorphic-git/http/node/index.js'; // Default to Node
+      HTTP for now
+
+      import { TGPConfig } from '../types.js';
+
+      import * as path from 'path';
+
+
+      /**
+       * The Git Interface required by the Kernel.
+       * We rely on the 'fs' interface compatible with isomorphic-git.
+       */
+      export interface GitBackend {
+        hydrate(): Promise<void>;
+        persist(message: string, files: string[]): Promise<void>;
+      }
+
+
+      export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
+        const dir = config.rootDir;
+        const { repo, auth, branch, writeStrategy } = config.git;
+
+        // Helper to configure git options
+        const gitOpts = {
+          fs,
+          dir,
+          http,
+          onAuth: () => ({ username: auth.token }),
+        };
+
+        const author = {
+          name: auth.user,
+          email: auth.email,
+        };
+
+        return {
+          async hydrate() {
+            // 1. Check if repo exists locally
+            const gitDirExists = await fs.promises.stat(path.join(dir, '.git'))
+              .then(() => true)
+              .catch(() => false);
+
+            if (!gitDirExists) {
+              // Clone
+              console.log(`[TGP] Cloning ${repo} into ${dir}...`);
+              await git.clone({
+                ...gitOpts,
+                url: `https://github.com/${repo}.git`,
+                ref: branch,
+                singleBranch: true,
+                depth: 1,
+              });
+            } else {
+              // Pull
+              console.log(`[TGP] Pulling latest from ${repo}...`);
+              await git.pull({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+                singleBranch: true,
+                author,
+              });
+            }
+          },
+
+          async persist(message: string, filesToAdd: string[]) {
+            // 1. Add files
+            for (const filepath of filesToAdd) {
+              await git.add({ ...gitOpts, filepath });
+            }
+
+            // 2. Commit
+            const sha = await git.commit({
+              ...gitOpts,
+              message,
+              author,
+            });
+            console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
+
+            // 3. Push
+            if (writeStrategy === 'direct') {
+              console.log(`[TGP] Pushing to ${branch}...`);
+              await git.push({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+              });
+            } else {
+              // TODO: Implement PR creation logic for 'pr' strategy
+              console.warn(`[TGP] PR Strategy not yet implemented. Changes committed locally.`);
+            }
+          }
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/kernel/core.ts
+    content: >-
+      import { TGPConfig } from '../types.js';
+
+      import { VFSAdapter } from '../vfs/types.js';
+
+      import { createGitBackend, GitBackend } from './git.js';
+
+
+      // We inject the low-level FS for Git separately from the VFS adapter
+
+      // This is because Git needs raw FS access, while the Agent uses the VFS
+      Jail.
+
+      export interface KernelOptions {
+        config: TGPConfig;
+        vfs: VFSAdapter; 
+        fs: any; // The raw filesystem object (node:fs or memfs) used by isomorphic-git
+      }
+
+
+      export interface Kernel {
+        boot(): Promise<void>;
+        shutdown(): Promise<void>;
+        config: TGPConfig;
+        vfs: VFSAdapter;
+        git: GitBackend;
+      }
+
+
+      /**
+       * Factory to create a TGP Kernel.
+       * This wires up the configuration, the filesystem, and the git backend.
+       */
+      export function createKernel(opts: KernelOptions): Kernel {
+        const { config, vfs, fs } = opts;
+        
+        const git = createGitBackend(fs, config);
+
+        let isBooted = false;
+
+        return {
+          config,
+          vfs,
+          git,
+
+          async boot() {
+            if (isBooted) return;
+            console.log(`[TGP] Kernel booting...`);
+            
+            try {
+              // Hydrate the filesystem from Git
+              await git.hydrate();
+              isBooted = true;
+              console.log(`[TGP] Kernel ready.`);
+            } catch (error) {
+              console.error(`[TGP] Boot failed:`, error);
+              throw error;
+            }
+          },
+
+          async shutdown() {
+            console.log(`[TGP] Kernel shutting down...`);
+            // Cleanup tasks (close db connections, etc) can go here
+            isBooted = false;
+          }
+        };
+      }
+    patchStrategy: replace
+snapshot:
+  src/kernel/git.ts: null
+  src/kernel/core.ts: null
+  package.json: |-
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "test": "echo \"Error: no test specified\" && exit 1"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "dependencies": {
+        "zod": "^3.22.4"
+      },
+      "devDependencies": {
+        "@types/node": "^20.11.0",
+        "typescript": "^5.3.3"
+      }
+    }
+approved: false
+linesAdded: null
+linesRemoved: null
+linesDifference: null
+gitCommittedAt: null
+status: undone
+id: 3
