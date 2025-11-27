@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
 import { Kernel } from '../kernel/core.js';
-import { DBBackend } from '../kernel/db.js';
+import * as path from 'path';
 
 /**
  * Creates the Bridge Object exposed to the Sandbox.
@@ -8,8 +8,19 @@ import { DBBackend } from '../kernel/db.js';
  * 
  * We expose a structured 'tgp' object to the guest.
  */
-export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
-  const { vfs } = kernel;
+export function createSandboxBridge({ vfs, db, config }: Pick<Kernel, 'vfs' | 'db' | 'config'>) {
+  const { allowedDirs } = config.fs;
+
+  const isAllowedWrite = (target: string): boolean => {
+    // Normalize target to ensure clean comparison (remove leading ./, etc)
+    const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
+    
+    return allowedDirs.some(dir => {
+      const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
+      // Check if target is inside the allowed dir
+      return normalizedTarget.startsWith(normalizedDir);
+    });
+  };
 
   return {
     tgp: {
@@ -19,6 +30,9 @@ export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
       },
 
       write_file: async (path: string, content: string) => {
+        if (!isAllowedWrite(path)) {
+          throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
+        }
         return vfs.writeFile(path, content);
       },
 
@@ -45,7 +59,7 @@ export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
         console.log('[TGP-TOOL]', ...args);
       },
 
-      // --- Database (Transactional) ---
+      // --- Database ---
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       db_query: async (sql: string, params: any[] = []) => {
         return db.query(sql, params);

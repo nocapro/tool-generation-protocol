@@ -21,105 +21,104 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
   });
 
   try {
-    // 1. Transactional Safety
-    // All tool execution happens within a DB transaction.
-    return await kernel.db.transaction(async (trx) => {
-      const bridge = createSandboxBridge(kernel, trx);
+    // 1. Setup Bridge
+    // We pass the kernel directly. The bridge uses kernel.db for queries.
+    // We no longer wrap in a transaction (agent manages logic, host runs raw query).
+    const bridge = createSandboxBridge(kernel);
 
-      // 2. Module Orchestration (The 'require' Bridge)
-      // This host function is called synchronously from the Guest.
-      const __tgp_load_module = (baseDir: string, importId: string) => {
-        // Security: Ensure we don't traverse out of sandbox (handled by VFS)
-        // Resolution Logic:
-        // - Starts with '.': Relative to baseDir
-        // - Otherwise: Absolute from root (or relative to root)
+    // 2. Module Orchestration (The 'require' Bridge)
+    // This host function is called synchronously from the Guest.
+    const __tgp_load_module = (baseDir: string, importId: string) => {
+      // Security: Ensure we don't traverse out of sandbox (handled by VFS)
+      // Resolution Logic:
+      // - Starts with '.': Relative to baseDir
+      // - Otherwise: Absolute from root (or relative to root)
+      
+      let targetPath = '';
+      if (importId.startsWith('.')) {
+        targetPath = path.join(baseDir, importId);
+      } else {
+        targetPath = importId;
+      }
+
+      // Normalize extension (assume .ts if missing)
+      if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+          // Check if it exists with .ts
+          // We can't easily check existence sync in VFS without try/catch read
+          // Let's assume .ts for TGP tools
+          targetPath += '.ts';
+      }
+
+      try {
+        const raw = kernel.vfs.readSync(targetPath);
+        const transformed = transformSync(raw, {
+          loader: 'ts',
+          format: 'cjs',
+          target: 'es2020',
+        });
         
-        let targetPath = '';
-        if (importId.startsWith('.')) {
-          targetPath = path.join(baseDir, importId);
-        } else {
-          targetPath = importId;
-        }
+        return {
+          code: transformed.code,
+          path: targetPath,
+          dirname: path.dirname(targetPath)
+        };
+      } catch (err: any) {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
+      }
+    };
 
-        // Normalize extension (assume .ts if missing)
-        if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
-           // Check if it exists with .ts
-           // We can't easily check existence sync in VFS without try/catch read
-           // Let's assume .ts for TGP tools
-           targetPath += '.ts';
-        }
+    // 3. Shim Injection
+    // We prepend a CommonJS loader shim to the user code.
+    // This allows 'require' to work by calling back to __tgp_load_module.
+    const shim = `
+      const __moduleCache = {};
 
-        try {
-          const raw = kernel.vfs.readSync(targetPath);
-          const transformed = transformSync(raw, {
-            loader: 'ts',
-            format: 'cjs',
-            target: 'es2020',
-          });
+      function __makeRequire(baseDir) {
+        return function(id) {
+          // Check Cache (Global)
+          // In a real system, cache keys should be absolute paths.
+          // Here we rely on the host to return consistent paths if we wanted perfect caching.
+          // For now, we skip cache or use simple ID (flawed for relatives).
+          // Let's implement correct caching by asking Host for absolute path first?
+          // Simpler: Just reload for now (Stateless).
           
-          return {
-            code: transformed.code,
-            path: targetPath,
-            dirname: path.dirname(targetPath)
-          };
-        } catch (err: any) {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
-        }
-      };
+          // Call Host Sync
+          const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+          
+          if (__moduleCache[mod.path]) return __moduleCache[mod.path];
 
-      // 3. Shim Injection
-      // We prepend a CommonJS loader shim to the user code.
-      // This allows 'require' to work by calling back to __tgp_load_module.
-      const shim = `
-        const __moduleCache = {};
+          // Wrap in CommonJS Function
+          const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+          const newModule = { exports: {} };
+          
+          // Execute
+          fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+          
+          __moduleCache[mod.path] = newModule.exports;
+          return newModule.exports;
+        };
+      }
+      
+      // Setup Global Require for the entry point
+      // We assume the entry point is at 'filePath'
+      global.require = __makeRequire('${path.dirname(filePath)}');
+    `;
 
-        function __makeRequire(baseDir) {
-          return function(id) {
-            // Check Cache (Global)
-            // In a real system, cache keys should be absolute paths.
-            // Here we rely on the host to return consistent paths if we wanted perfect caching.
-            // For now, we skip cache or use simple ID (flawed for relatives).
-            // Let's implement correct caching by asking Host for absolute path first?
-            // Simpler: Just reload for now (Stateless).
-            
-            // Call Host Sync
-            const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
-            
-            if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+    const context = {
+      ...bridge, // { tgp: { ... } }
+      args,
+      __tgp_load_module // Injected as Reference
+    };
 
-            // Wrap in CommonJS Function
-            const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
-            const newModule = { exports: {} };
-            
-            // Execute
-            fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
-            
-            __moduleCache[mod.path] = newModule.exports;
-            return newModule.exports;
-          };
-        }
-        
-        // Setup Global Require for the entry point
-        // We assume the entry point is at 'filePath'
-        global.require = __makeRequire('${path.dirname(filePath)}');
-      `;
+    // Combine Shim + User Code
+    // We wrap user code to provide top-level CommonJS variables if needed, 
+    // but standard TGP tools are just scripts. 
+    // We append the code. The 'shim' sets up 'global.require'.
+    const fullScript = shim + '\n' + code;
 
-      const context = {
-        ...bridge, // { tgp: { ... } }
-        args,
-        __tgp_load_module // Injected as Reference
-      };
-
-      // Combine Shim + User Code
-      // We wrap user code to provide top-level CommonJS variables if needed, 
-      // but standard TGP tools are just scripts. 
-      // We append the code. The 'shim' sets up 'global.require'.
-      const fullScript = shim + '\n' + code;
-
-      const result = await sandbox.compileAndRun(fullScript, context);
-      return result;
-    });
+    const result = await sandbox.compileAndRun(fullScript, context);
+    return result;
 
   } catch (error) {
     console.error(`[TGP] Tool Execution Failed:`, error);

@@ -53,10 +53,14 @@ export function createKernel(opts: KernelOptions): Kernel {
       
       try {
         // Hydrate the filesystem from Git
-        await git.hydrate();
+        await git.hydrate().catch(err => {
+          console.error(`[TGP] Git hydration failed.`, err);
+          throw err;
+        });
         
         // Hydrate registry from meta.json
-        await registry.hydrate();
+        await registry.hydrate().catch(err => console.warn(`[TGP] Registry hydration warning:`, err));
+        
         isBooted = true;
         console.log(`[TGP] Kernel ready.`);
       } catch (error) {
