@@ -1,4 +1,6 @@
 /* eslint-disable no-console */
+import { TGPConfig } from '../types.js';
+
 /**
  * The Database Kernel Interface.
  * 
@@ -19,6 +21,22 @@ export interface DBBackend {
    * @param fn The function to execute. It receives a transactional DB instance.
    */
   transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
+}
+
+/**
+ * Factory to create the Database Backend based on configuration.
+ * Loads the appropriate driver or falls back to NoOp.
+ */
+export function createDBBackend(config: TGPConfig): DBBackend {
+  const dbConfig = config.db;
+
+  if (dbConfig) {
+    // In a real implementation, we would perform a dynamic import here based on the dialect.
+    // e.g. if (dbConfig.dialect === 'postgres') return new PostgresBackend(dbConfig);
+    console.log(`[TGP-DB] Configured for dialect: ${dbConfig.dialect}. Using NoOp (Mock) for now.`);
+  }
+
+  return createNoOpDB();
 }
 
 /**

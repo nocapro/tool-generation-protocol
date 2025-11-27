@@ -1,0 +1,1506 @@
+uuid: c888dd86-3023-45c5-bc92-15f5d63f274a
+projectId: tool-generation-protocol
+createdAt: '2025-11-27T20:43:29.813Z'
+gitCommitMsg: >-
+  refactor: strip db transactions, add AST validation, fix sandbox require
+
+  - Remove `transaction()` from DBBackend; Kernel is now a pass-through. -
+  Upgrade `check_tool` to use TypeScript Compiler API (AST) for the 8 Standards.
+  - Fix relative path resolution in Sandbox `require` shim. - Move `typescript`
+  to runtime dependencies.
+promptSummary: >-
+  Executed plan: 'tgp-production-simplification-v1'.  Removed complex DB
+  transaction logic from Kernel and Sandbox. Replaced Regex-based validation
+  with robust TypeScript AST analysis in 'src/tools/validation.ts'. Improved
+  Sandbox module resolution to handle relative paths in 'require'. Updated
+  documentation.
+reasoning:
+  - >-
+    Here are the changes to simplify the Database Kernel, upgrade validation to
+    use the TypeScript AST, and harden the Sandbox module resolution.
+  - '### Step 1: Move TypeScript to Dependencies'
+  - >-
+    To support runtime AST analysis in production, `typescript` must be a core
+    dependency.
+  - '### Step 2: Strip Transaction Logic from DB Kernel'
+  - >-
+    We are removing the complex transaction wrapper logic. The DB backend is now
+    a simple pass-through for queries.
+  - '### Step 3: Update Sandbox Bridge Signature'
+  - Reflecting the removal of transaction objects.
+  - '### Step 4: Refactor Sandbox Execution & Module Resolution'
+  - >-
+    We remove the transaction wrapper around tool execution and significantly
+    improve the `require` shim to handle path resolution correctly (e.g.,
+    `require('../utils')`).
+  - '### Step 5: Implement AST-Based Validation'
+  - Replacing simple regexes with robust TypeScript AST analysis.
+  - '### Step 6: Update README Manifesto'
+  - >-
+    We remove the "Transaction Safety" claims to reflect the architectural
+    pivot.
+operations:
+  - type: write
+    path: package.json
+    content: |
+      --- package.json
+      +++ package.json
+      @@ -25,7 +25,8 @@
+           "isomorphic-git": "^1.35.1",
+           "memfs": "^4.51.0",
+           "zod": "^3.25.76",
+      -    "zod-to-json-schema": "^3.22.4"
+      +    "zod-to-json-schema": "^3.22.4",
+      +    "typescript": "^5.9.3"
+         },
+         "devDependencies": {
+           "@types/node": "^20.19.25",
+      @@ -34,6 +35,5 @@
+           "@typescript-eslint/parser": "^8.48.0",
+           "eslint": "^9.39.1",
+      -    "typescript": "^5.9.3"
+         }
+       }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/db.ts
+    content: >
+      --- src/kernel/db.ts
+
+      +++ src/kernel/db.ts
+
+      @@ -6,9 +6,6 @@
+        * The Database Kernel Interface.
+        * 
+      - * TGP guarantees that all tool executions happen within a transaction.
+
+      - * If the tool throws, the transaction is rolled back.
+
+      + * Provides a pass-through interface for tools to execute SQL.
+
+      + * The Host (Agent) is responsible for injecting the actual DB driver.
+        */
+       export interface DBBackend {
+         /**
+      @@ -17,11 +14,4 @@
+          */
+         // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         query(sql: string, params?: any[]): Promise<any[]>;
+      -
+
+      -  /**
+
+      -   * Wraps a function in a database transaction.
+
+      -   * @param fn The function to execute. It receives a transactional DB
+      instance.
+
+      -   */
+
+      -  transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
+       }
+       
+      @@ -51,16 +41,3 @@
+             return [];
+      -    },
+
+      -
+
+      -    async transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>
+      {
+
+      -      console.log(`[TGP-DB] Begin Transaction`);
+
+      -      try {
+
+      -        // In a real DB, we would start a trx here.
+
+      -        // We pass 'this' as the transactional client (NoOp doesn't
+      distinguish)
+
+      -        const result = await fn(this);
+
+      -        console.log(`[TGP-DB] Commit Transaction`);
+
+      -        return result;
+
+      -      } catch (err) {
+
+      -        console.log(`[TGP-DB] Rollback Transaction`);
+
+      -        throw err;
+
+      -      }
+           }
+         };
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/bridge.ts
+    content: |
+      --- src/sandbox/bridge.ts
+      +++ src/sandbox/bridge.ts
+      @@ -10,6 +10,6 @@
+        * We expose a structured 'tgp' object to the guest.
+        */
+      -export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
+      +export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
+         const { vfs } = kernel;
+       
+         return {
+      @@ -47,6 +47,6 @@
+             // --- Database (Transactional) ---
+             // eslint-disable-next-line @typescript-eslint/no-explicit-any
+             db_query: async (sql: string, params: any[] = []) => {
+               return db.query(sql, params);
+             }
+           }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/execute.ts
+    content: >
+      --- src/sandbox/execute.ts
+
+      +++ src/sandbox/execute.ts
+
+      @@ -21,11 +21,11 @@
+         });
+       
+         try {
+      -    // 1. Transactional Safety
+
+      -    // All tool execution happens within a DB transaction.
+
+      -    return await kernel.db.transaction(async (trx) => {
+
+      -      const bridge = createSandboxBridge(kernel, trx);
+
+      +    // 1. Setup Bridge
+
+      +    // Pass the raw DB backend (no transaction wrapper)
+
+      +    const bridge = createSandboxBridge(kernel, kernel.db);
+       
+      -      // 2. Module Orchestration (The 'require' Bridge)
+
+      -      // This host function is called synchronously from the Guest.
+
+      -      const __tgp_load_module = (baseDir: string, importId: string) => {
+
+      -        // Security: Ensure we don't traverse out of sandbox (handled by
+      VFS)
+
+      -        // Resolution Logic:
+
+      -        // - Starts with '.': Relative to baseDir
+
+      -        // - Otherwise: Absolute from root (or relative to root)
+
+      -        
+
+      -        let targetPath = '';
+
+      -        if (importId.startsWith('.')) {
+
+      -          targetPath = path.join(baseDir, importId);
+
+      -        } else {
+
+      -          targetPath = importId;
+
+      -        }
+
+      +    // 2. Module Orchestration (The 'require' Bridge)
+
+      +    // This host function is called synchronously from the Guest.
+
+      +    const __tgp_load_module = (baseDir: string, importId: string) => {
+
+      +      // Resolution Logic:
+
+      +      // - Resolve relative paths against baseDir
+
+      +      // - TGP paths are relative to VFS root, but Node's path.resolve
+      works with absolute-like paths well enough
+
+      +      //   if we treat VFS root as '/'.
+
+      +      
+
+      +      // We use path.posix or path (Node) to resolve.
+
+      +      // Since baseDir comes from the tool system, it's a VFS path.
+
+      +      
+
+      +      let targetPath = importId;
+
+      +      
+
+      +      if (importId.startsWith('.')) {
+
+      +        // resolve(from, to)
+
+      +        targetPath = path.join(baseDir, importId);
+
+      +      }
+       
+      -        // Normalize extension (assume .ts if missing)
+
+      -        if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+
+      -           // Check if it exists with .ts
+
+      -           // We can't easily check existence sync in VFS without
+      try/catch read
+
+      -           // Let's assume .ts for TGP tools
+
+      -           targetPath += '.ts';
+
+      -        }
+
+      +      // Normalize extension (assume .ts if missing)
+
+      +      if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+
+      +          targetPath += '.ts';
+
+      +      }
+
+      +
+
+      +      // Clean up leading slashes if path.join added them unnecessarily
+      for VFS lookup
+
+      +      // VFS expects 'tools/foo.ts', not '/tools/foo.ts' (depending on
+      impl, but safer to strip)
+
+      +      if (targetPath.startsWith('/')) {
+
+      +        targetPath = targetPath.slice(1);
+
+      +      }
+       
+      -        try {
+
+      -          const raw = kernel.vfs.readSync(targetPath);
+
+      -          const transformed = transformSync(raw, {
+
+      -            loader: 'ts',
+
+      -            format: 'cjs',
+
+      -            target: 'es2020',
+
+      -          });
+
+      -          
+
+      -          return {
+
+      -            code: transformed.code,
+
+      -            path: targetPath,
+
+      -            dirname: path.dirname(targetPath)
+
+      -          };
+
+      -        } catch (err: any) {
+
+      -          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+      -          throw new Error(`Failed to load module '${importId}' from
+      '${baseDir}': ${err.message}`);
+
+      -        }
+
+      -      };
+
+      +      try {
+
+      +        const raw = kernel.vfs.readSync(targetPath);
+
+      +        const transformed = transformSync(raw, {
+
+      +          loader: 'ts',
+
+      +          format: 'cjs',
+
+      +          target: 'es2020',
+
+      +        });
+
+      +        
+
+      +        return {
+
+      +          code: transformed.code,
+
+      +          path: targetPath,
+
+      +          dirname: path.dirname(targetPath)
+
+      +        };
+
+      +      } catch (err: any) {
+
+      +        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+      +        throw new Error(`Failed to load module '${importId}' from
+      '${baseDir}' (resolved: ${targetPath}): ${err.message}`);
+
+      +      }
+
+      +    };
+       
+      -      // 3. Shim Injection
+
+      -      // We prepend a CommonJS loader shim to the user code.
+
+      -      // This allows 'require' to work by calling back to
+      __tgp_load_module.
+
+      -      const shim = `
+
+      -        const __moduleCache = {};
+
+      +    // 3. Shim Injection
+
+      +    // We prepend a CommonJS loader shim to the user code.
+
+      +    const shim = `
+
+      +      const __moduleCache = {};
+       
+      -        function __makeRequire(baseDir) {
+
+      -          return function(id) {
+
+      -            // Check Cache (Global)
+
+      -            // In a real system, cache keys should be absolute paths.
+
+      -            // Here we rely on the host to return consistent paths if we
+      wanted perfect caching.
+
+      -            // For now, we skip cache or use simple ID (flawed for
+      relatives).
+
+      -            // Let's implement correct caching by asking Host for
+      absolute path first?
+
+      -            // Simpler: Just reload for now (Stateless).
+
+      -            
+
+      -            // Call Host Sync
+
+      -            const mod = __tgp_load_module.applySync(undefined, [baseDir,
+      id]);
+
+      -            
+
+      -            if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+
+      +      function __makeRequire(baseDir) {
+
+      +        return function(id) {
+
+      +          // Call Host Sync
+
+      +          const mod = __tgp_load_module.applySync(undefined, [baseDir,
+      id]);
+
+      +          
+
+      +          if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+       
+      -            // Wrap in CommonJS Function
+
+      -            const fun = new Function('exports', 'require', 'module',
+      '__filename', '__dirname', mod.code);
+
+      -            const newModule = { exports: {} };
+
+      -            
+
+      -            // Execute
+
+      -            fun(newModule.exports, __makeRequire(mod.dirname), newModule,
+      mod.path, mod.dirname);
+
+      -            
+
+      -            __moduleCache[mod.path] = newModule.exports;
+
+      -            return newModule.exports;
+
+      -          };
+
+      -        }
+
+      -        
+
+      -        // Setup Global Require for the entry point
+
+      -        // We assume the entry point is at 'filePath'
+
+      -        global.require = __makeRequire('${path.dirname(filePath)}');
+
+      -      `;
+
+      +          // Wrap in CommonJS Function
+
+      +          const fun = new Function('exports', 'require', 'module',
+      '__filename', '__dirname', mod.code);
+
+      +          const newModule = { exports: {} };
+
+      +          
+
+      +          // Execute
+
+      +          fun(newModule.exports, __makeRequire(mod.dirname), newModule,
+      mod.path, mod.dirname);
+
+      +          
+
+      +          __moduleCache[mod.path] = newModule.exports;
+
+      +          return newModule.exports;
+
+      +        };
+
+      +      }
+
+      +      
+
+      +      // Setup Global Require for the entry point
+
+      +      global.require = __makeRequire('${path.dirname(filePath)}');
+
+      +    `;
+       
+      -      const context = {
+
+      -        ...bridge, // { tgp: { ... } }
+
+      -        args,
+
+      -        __tgp_load_module // Injected as Reference
+
+      -      };
+
+      +    const context = {
+
+      +      ...bridge, // { tgp: { ... } }
+
+      +      args,
+
+      +      __tgp_load_module // Injected as Reference
+
+      +    };
+       
+      -      // Combine Shim + User Code
+
+      -      // We wrap user code to provide top-level CommonJS variables if
+      needed, 
+
+      -      // but standard TGP tools are just scripts. 
+
+      -      // We append the code. The 'shim' sets up 'global.require'.
+
+      -      const fullScript = shim + '\n' + code;
+
+      +    // Combine Shim + User Code
+
+      +    const fullScript = shim + '\n' + code;
+       
+      -      const result = await sandbox.compileAndRun(fullScript, context);
+
+      -      return result;
+
+      -    });
+
+      +    const result = await sandbox.compileAndRun(fullScript, context);
+
+      +    return result;
+       
+         } catch (error) {
+           console.error(`[TGP] Tool Execution Failed:`, error);
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tools/validation.ts
+    content: |-
+      import { z } from 'zod';
+      import { transform } from 'esbuild';
+      import ts from 'typescript';
+      import { Kernel } from '../kernel/core.js';
+      import { AgentTool } from './types.js';
+
+      export const CheckToolParams = z.object({
+        path: z.string().describe('The relative path of the tool to validate'),
+      });
+
+      export function createValidationTools(kernel: Kernel) {
+        return {
+          check_tool: {
+            description: 'Run JIT compilation and syntax check on a tool.',
+            parameters: CheckToolParams,
+            execute: async ({ path }) => {
+              try {
+                const code = await kernel.vfs.readFile(path);
+                
+                // 1. Syntax Check (via esbuild)
+                await transform(code, {
+                  loader: 'ts',
+                  format: 'cjs',
+                  target: 'es2020',
+                });
+
+                // 2. Static Analysis (AST Walker)
+                // We use the TypeScript Compiler API to walk the tree.
+                const sourceFile = ts.createSourceFile(
+                  path,
+                  code,
+                  ts.ScriptTarget.Latest,
+                  true
+                );
+
+                const errors: string[] = [];
+
+                function visit(node: ts.Node) {
+                  // [Standard 3] Strict Typing: No 'any'
+                  if (node.kind === ts.SyntaxKind.AnyKeyword) {
+                    errors.push(`Violation [Standard 3]: Explicit 'any' type found. Use specific types or generics.`);
+                  }
+
+                  // [Safety] No 'eval' or 'Function' constructor
+                  if (ts.isCallExpression(node)) {
+                    const expression = node.expression;
+                    if (ts.isIdentifier(expression) && expression.text === 'eval') {
+                      errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+                    }
+                  }
+                  if (ts.isNewExpression(node)) {
+                     const expression = node.expression;
+                     if (ts.isIdentifier(expression) && expression.text === 'Function') {
+                       errors.push("Violation [Safety]: Dynamic code execution ('new Function') is prohibited.");
+                     }
+                  }
+
+                  // [Standard 4] Stateless: No process global access (except process.env)
+                  if (ts.isPropertyAccessExpression(node)) {
+                    if (ts.isIdentifier(node.expression) && node.expression.text === 'process') {
+                      // Allow process.env
+                      if (node.name.text !== 'env') {
+                         errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs.");
+                      }
+                    }
+                  }
+                  // Catch standalone 'process' usage if not property access? 
+                  // Usually process is used as process.something. If used as 'process', likely an error anyway or type ref.
+
+                  // [Standard 1] No Magic Numbers
+                  // We look for numeric literals that are not 0, 1, -1, 100
+                  if (ts.isNumericLiteral(node)) {
+                     // Heuristic: Ignore if parent is a property assignment or index access?
+                     // For now, strict check on the value.
+                     const val = parseFloat(node.text);
+                     const allowed = [0, 1, -1, 100];
+                     
+                     // To reduce noise, we only flag if it's part of a variable declaration or binary expression
+                     // (e.g. const x = 0.05 or x * 0.05)
+                     const parent = node.parent;
+                     if (ts.isVariableDeclaration(parent) || ts.isBinaryExpression(parent)) {
+                       if (!allowed.includes(val)) {
+                          // Check if it looks like an integer used for indexing (simple heuristic)
+                          if (!Number.isInteger(val) || (val > 10 && val !== 100)) {
+                             errors.push(`Violation [Standard 1]: Found potential magic number '${node.text}'. Abstract logic from data (e.g., args.taxRate).`);
+                          }
+                       }
+                     }
+                  }
+
+                  // [Standard 7] Hardcoded Secrets (Heuristic on String Literals)
+                  if (ts.isStringLiteral(node)) {
+                    const text = node.text;
+                    // Email
+                    if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(text)) {
+                       errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+                    }
+                    // Potential Keys (long, no spaces, mixed case/numbers)
+                    if (text.length > 30 && !text.includes(' ') && /[0-9]/.test(text) && /[a-zA-Z]/.test(text)) {
+                       // Exclude imports/paths which usually contain slashes
+                       if (!text.includes('/') && !text.includes('\\')) {
+                         errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+                       }
+                    }
+                  }
+
+                  ts.forEachChild(node, visit);
+                }
+
+                visit(sourceFile);
+
+                return { valid: errors.length === 0, errors };
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } catch (error: any) {
+                const msg = error.message ?? String(error);
+                return { valid: false, errors: [msg] };
+              }
+            },
+          } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: README.md
+    content: >
+      --- README.md
+
+      +++ README.md
+
+      @@ -101,8 +101,6 @@
+       1.  **Zero-Trust**: Tools run in a stripped V8 context. No `process`, no `fs`, no `eval`.
+       2.  **Resource Caps**: 64MB RAM, 50ms CPU time. Infinite loops die instantly.
+      -3.  **Transaction Safety**: All DB writes run inside a transaction. If
+      the tool throws, the DB rolls back.
+       
+       ## 4.1 The Great Wall (isolated-vm)
+       TGP uses `isolated-vm` to create a boundary between the Host (Agent) and the Guest (Tool).
+    patchStrategy: standard-diff
+snapshot:
+  src/kernel/db.ts: |-
+    /* eslint-disable no-console */
+    import { TGPConfig } from '../types.js';
+
+    /**
+     * The Database Kernel Interface.
+     * 
+     * TGP guarantees that all tool executions happen within a transaction.
+     * If the tool throws, the transaction is rolled back.
+     */
+    export interface DBBackend {
+      /**
+       * Executes a raw SQL query.
+       * @param sql The SQL query string.
+       * @param params Parameter substitutions.
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      query(sql: string, params?: any[]): Promise<any[]>;
+
+      /**
+       * Wraps a function in a database transaction.
+       * @param fn The function to execute. It receives a transactional DB instance.
+       */
+      transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
+    }
+
+    /**
+     * Factory to create the Database Backend based on configuration.
+     * Loads the appropriate driver or falls back to NoOp.
+     */
+    export function createDBBackend(config: TGPConfig): DBBackend {
+      const dbConfig = config.db;
+
+      if (dbConfig) {
+        // In a real implementation, we would perform a dynamic import here based on the dialect.
+        // e.g. if (dbConfig.dialect === 'postgres') return new PostgresBackend(dbConfig);
+        console.log(`[TGP-DB] Configured for dialect: ${dbConfig.dialect}. Using NoOp (Mock) for now.`);
+      }
+
+      return createNoOpDB();
+    }
+
+    /**
+     * A No-Op Database Backend used when no DB is configured.
+     * It logs operations to the console to verify behavior.
+     */
+    export function createNoOpDB(): DBBackend {
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async query(sql: string, params: any[] = []) {
+          console.log(`[TGP-DB] Query: ${sql}`, params);
+          return [];
+        },
+
+        async transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T> {
+          console.log(`[TGP-DB] Begin Transaction`);
+          try {
+            // In a real DB, we would start a trx here.
+            // We pass 'this' as the transactional client (NoOp doesn't distinguish)
+            const result = await fn(this);
+            console.log(`[TGP-DB] Commit Transaction`);
+            return result;
+          } catch (err) {
+            console.log(`[TGP-DB] Rollback Transaction`);
+            throw err;
+          }
+        }
+      };
+    }
+  src/sandbox/bridge.ts: |-
+    /* eslint-disable no-console */
+    import { Kernel } from '../kernel/core.js';
+    import { DBBackend } from '../kernel/db.js';
+
+    /**
+     * Creates the Bridge Object exposed to the Sandbox.
+     * This maps secure Kernel methods to the Guest environment.
+     * 
+     * We expose a structured 'tgp' object to the guest.
+     */
+    export function createSandboxBridge(kernel: Kernel, db: DBBackend) {
+      const { vfs } = kernel;
+
+      return {
+        tgp: {
+          // --- Filesystem Bridge (Jailed) ---
+          read_file: async (path: string) => {
+            return vfs.readFile(path);
+          },
+
+          write_file: async (path: string, content: string) => {
+            return vfs.writeFile(path, content);
+          },
+
+          list_files: async (dir: string) => {
+            return vfs.listFiles(dir, false);
+          },
+
+          // --- Network Bridge (Allowed Only) ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          fetch: async (url: string, init?: any) => {
+            // Security: Parse URL and allow-list check could happen here
+            const response = await fetch(url, init);
+            const text = await response.text();
+            return {
+              status: response.status,
+              text: () => text,
+              json: () => JSON.parse(text),
+            };
+          },
+
+          // --- Logger ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          log: (...args: any[]) => {
+            console.log('[TGP-TOOL]', ...args);
+          },
+
+          // --- Database (Transactional) ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          db_query: async (sql: string, params: any[] = []) => {
+            return db.query(sql, params);
+          }
+        }
+      };
+    }
+  src/sandbox/execute.ts: >-
+    /* eslint-disable no-console */
+
+    import { Kernel } from '../kernel/core.js';
+
+    import { createSandbox } from './isolate.js';
+
+    import { createSandboxBridge } from './bridge.js';
+
+    import { transformSync } from 'esbuild';
+
+    import * as path from 'path';
+
+
+    /**
+     * Executes a tool script within a secure sandbox.
+     * 
+     * @param kernel The TGP Kernel instance
+     * @param code The TypeScript source code of the tool
+     * @param args The arguments object to pass to the tool (as 'args' global)
+     * @param filePath Optional path of the tool being executed (used for relative imports)
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+    export async function executeTool(kernel: Kernel, code: string, args:
+    Record<string, any> = {}, filePath: string = 'root.ts'): Promise<any> {
+      const sandbox = createSandbox({
+        memoryLimitMb: 128,
+        timeoutMs: 5000 // 5s hard limit
+      });
+
+      try {
+        // 1. Transactional Safety
+        // All tool execution happens within a DB transaction.
+        return await kernel.db.transaction(async (trx) => {
+          const bridge = createSandboxBridge(kernel, trx);
+
+          // 2. Module Orchestration (The 'require' Bridge)
+          // This host function is called synchronously from the Guest.
+          const __tgp_load_module = (baseDir: string, importId: string) => {
+            // Security: Ensure we don't traverse out of sandbox (handled by VFS)
+            // Resolution Logic:
+            // - Starts with '.': Relative to baseDir
+            // - Otherwise: Absolute from root (or relative to root)
+            
+            let targetPath = '';
+            if (importId.startsWith('.')) {
+              targetPath = path.join(baseDir, importId);
+            } else {
+              targetPath = importId;
+            }
+
+            // Normalize extension (assume .ts if missing)
+            if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+               // Check if it exists with .ts
+               // We can't easily check existence sync in VFS without try/catch read
+               // Let's assume .ts for TGP tools
+               targetPath += '.ts';
+            }
+
+            try {
+              const raw = kernel.vfs.readSync(targetPath);
+              const transformed = transformSync(raw, {
+                loader: 'ts',
+                format: 'cjs',
+                target: 'es2020',
+              });
+              
+              return {
+                code: transformed.code,
+                path: targetPath,
+                dirname: path.dirname(targetPath)
+              };
+            } catch (err: any) {
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
+            }
+          };
+
+          // 3. Shim Injection
+          // We prepend a CommonJS loader shim to the user code.
+          // This allows 'require' to work by calling back to __tgp_load_module.
+          const shim = `
+            const __moduleCache = {};
+
+            function __makeRequire(baseDir) {
+              return function(id) {
+                // Check Cache (Global)
+                // In a real system, cache keys should be absolute paths.
+                // Here we rely on the host to return consistent paths if we wanted perfect caching.
+                // For now, we skip cache or use simple ID (flawed for relatives).
+                // Let's implement correct caching by asking Host for absolute path first?
+                // Simpler: Just reload for now (Stateless).
+                
+                // Call Host Sync
+                const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+                
+                if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+
+                // Wrap in CommonJS Function
+                const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+                const newModule = { exports: {} };
+                
+                // Execute
+                fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+                
+                __moduleCache[mod.path] = newModule.exports;
+                return newModule.exports;
+              };
+            }
+            
+            // Setup Global Require for the entry point
+            // We assume the entry point is at 'filePath'
+            global.require = __makeRequire('${path.dirname(filePath)}');
+          `;
+
+          const context = {
+            ...bridge, // { tgp: { ... } }
+            args,
+            __tgp_load_module // Injected as Reference
+          };
+
+          // Combine Shim + User Code
+          // We wrap user code to provide top-level CommonJS variables if needed, 
+          // but standard TGP tools are just scripts. 
+          // We append the code. The 'shim' sets up 'global.require'.
+          const fullScript = shim + '\n' + code;
+
+          const result = await sandbox.compileAndRun(fullScript, context);
+          return result;
+        });
+
+      } catch (error) {
+        console.error(`[TGP] Tool Execution Failed:`, error);
+        throw new Error(`Tool execution failed: ${error instanceof Error ? error.message : String(error)}`);
+      } finally {
+        sandbox.dispose();
+      }
+    }
+  src/tools/validation.ts: |-
+    import { z } from 'zod';
+    import { transform } from 'esbuild';
+    import { Kernel } from '../kernel/core.js';
+    import { AgentTool } from './types.js';
+
+    export const CheckToolParams = z.object({
+      path: z.string().describe('The relative path of the tool to validate'),
+    });
+
+    export function createValidationTools(kernel: Kernel) {
+      return {
+        check_tool: {
+          description: 'Run JIT compilation and syntax check on a tool.',
+          parameters: CheckToolParams,
+          execute: async ({ path }) => {
+            try {
+              const code = await kernel.vfs.readFile(path);
+              
+              // Dry-run transformation to catch syntax errors
+              await transform(code, {
+                loader: 'ts',
+                format: 'cjs',
+                target: 'es2020',
+              });
+
+              // LINTING: Enforce the "8 Standards" via Static Analysis
+              const errors: string[] = [];
+
+              // 1. Strict Typing: No 'any'
+              if (/\bany\b/.test(code)) {
+                errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+              }
+
+              // 2. Safety: No 'eval' or 'Function' constructor
+              if (/\beval\(/.test(code) || /\bnew Function\(/.test(code)) {
+                errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+              }
+
+              // 3. Stateless: No process global access (except inside standard library wrappers which are hidden)
+              if (/\bprocess\./.test(code) && !code.includes('process.env.NODE_ENV')) {
+                errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+              }
+
+              // 4. Abstract / No Magic Numbers (Heuristic)
+              // We look for 'const x = 0.05' type patterns.
+              // This matches: const name = number; (with optional decimals)
+              // We skip common integers like 0, 1, -1, 100 which are often used for loops or percentages base.
+              const magicNumMatch = code.match(/\bconst\s+[a-zA-Z0-9_]+\s*=\s*(\d+(?:\.\d+)?)\s*;/);
+              if (magicNumMatch) {
+                const val = parseFloat(magicNumMatch[1]);
+                if (val !== 0 && val !== 1 && val !== -1 && val !== 100) {
+                   errors.push(`Violation [Standard 1]: Found potential magic number '${magicNumMatch[0]}'. Abstract logic from data (e.g., args.taxRate, not 0.05).`);
+                }
+              }
+
+              // 5. No Hardcoded Secrets/IDs
+              // Emails
+              if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(code)) {
+                errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+              }
+              // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+              if (/['"][a-zA-Z0-9-]{24,}['"]/.test(code)) {
+                 errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+              }
+
+              return { valid: errors.length === 0, errors };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } catch (error: any) {
+              // esbuild errors are usually descriptive
+              const msg = error.message ?? String(error);
+              // Return valid: false so the model can reason about the error, rather than crashing the tool call
+              return { valid: false, errors: [msg] };
+            }
+          },
+        } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+      };
+    }
+  package.json: |
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "lint": "eslint src/**/*.ts",
+        "lint:fix": "eslint src/**/*.ts --fix",
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "tgp": "node bin/tgp.js"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "bin": {
+        "tgp": "./bin/tgp.js"
+      },
+      "dependencies": {
+        "esbuild": "^0.19.12",
+        "isolated-vm": "^6.0.2",
+        "isomorphic-git": "^1.35.1",
+        "memfs": "^4.51.0",
+        "zod": "^3.25.76",
+        "zod-to-json-schema": "^3.22.4"
+      },
+      "devDependencies": {
+        "@types/node": "^20.19.25",
+        "@typescript-eslint/eslint-plugin": "^8.48.0",
+        "@typescript-eslint/parser": "^8.48.0",
+        "eslint": "^9.39.1",
+        "typescript": "^5.9.3"
+      }
+    }
+  README.md: >
+    # Tool Generation Protocol (TGP)
+
+
+    > **The Self-Assembling Backend.**
+
+    > **MCP is dead.** Stop streaming context. Start compiling tools.
+
+
+    # 1. Manifesto
+
+
+    **The Problem:** You spend 80% of your time writing "glue code"—RPCs, CRUD
+    wrappers, and slightly different "Export to CSV" endpoints.
+
+    **The Trap (MCP):** Model Context Protocol (MCP) is just better glue. It
+    requires you to pre-build tools. If you didn't write the endpoint, the Agent
+    fails.
+
+    **The Solution (TGP):** Give the Agent a compiler.
+
+
+    TGP is a **JIT Runtime for Business Logic**. The Agent forges its own tools,
+    validates them, and persists them to Git. It builds a personalized standard
+    library for your application.
+
+
+    *   **MCP**: "I can't do that. I don't have a tool."
+
+    *   **TGP**: "I wrote a tool. It's running."
+
+
+    ## 1.1 Use Cases (The Long Tail)
+
+
+    99% of features are never built because they are too specific. TGP solves
+    the "I wish the app could do X" problem.
+
+
+    *   **Reporting**: "List users who downgraded in June, pipe-delimited." ->
+    Forges `tools/reports/downgrade.ts`. Time: 4s.
+
+    *   **Cleanup**: "Fix typo in 'Ohiio' for active users." -> Forges
+    `tools/maintenance/fix_typo.ts`. Atomic SQL update.
+
+    *   **Logic**: "Calculate dimensional weight `(L*W*H)/139`." -> Forges
+    `tools/shipping/dim_weight.ts`. Deterministic V8 execution.
+
+
+    ## 1.2 Anti-Patterns
+
+
+    TGP is a **JIT Compiler**, not a Daemon.
+
+    *   **Not a Server**: No `express.listen()`. Tools are ephemeral
+    (Lambda-style).
+
+    *   **Not a Browser**: No DOM. No Puppeteer.
+
+    *   **Not an ORM**: No object mutation. Use raw, atomic SQL.
+
+
+    # 2. Architecture (The Stack)
+
+
+    TGP drops into your existing Node/Next.js/Nest apps. It is **just
+    TypeScript**.
+
+
+    ## 2.1 The Developer View
+
+
+    The agent views `./.tgp` as its root directory. This is a standard Git
+    repository.
+
+
+    ```bash
+
+    ./.tgp/
+
+    ├── .git/                  # MEMORY: Version history of TOOL SOURCE CODE.
+
+    ├── bin/                   # KERNEL: The compiled 'tgp' binary.
+
+    ├── tools/                 # USER SPACE: Generated capabilities.
+
+    │   ├── analytics/         # e.g., "churn-prediction.ts"
+
+    │   └── reports/           # e.g., "revenue-csv.ts"
+
+    └── meta.json              # REGISTRY: Fast lookup index.
+
+    ```
+
+
+    ## 2.2 GitOps & Serverless Harmony
+
+
+    **Is TGP Serverless Friendly?** Yes.
+
+
+    In a Serverless environment (Cloudflare Workers, AWS Lambda, Vercel), the
+    runtime filesystem is ephemeral. TGP handles this by treating **Git as the
+    Backend**.
+
+
+    1.  **Hydration**: On boot, TGP checks if the local cache matches the remote
+    `HEAD`. If not, it pulls the latest tools from GitHub/GitLab.
+
+    2.  **Execution**: Tools run in the local V8 Isolate (milliseconds).
+
+    3.  **Persistence**: When an Agent forges a new tool, it commits and pushes
+    to the remote repository.
+
+    4.  **Concurrency**: TGP uses standard Git locking to handle concurrent
+    writes from multiple agents.
+
+
+    *Configuring GitHub credentials enables the "Infinite Memory" feature.*
+
+
+    ## 2.3 The VFS (Virtual Filesystem)
+
+
+    TGP enforces a strict separation between **The Editor (Host)** and **The
+    Runtime (Sandbox)**.
+
+
+    1.  **The Editor (Agent Context)**: The Agent accesses `./.tgp` directly via
+    the Kernel Tools. It works just like a human dev using VS Code.
+
+    2.  **The Runtime (Sandbox Context)**: When code *executes*, it runs inside
+    the V8 Isolate with a restricted VFS:
+        *   **`/lib`**: Read-Only mount of Host's `./.tgp/tools`.
+        *   **`/tmp`**: Read-Write ephemeral scratchpad (wiped on exit).
+
+    ## 2.4 The Kernel Tools (Agent Capabilities)
+
+
+    The Agent is provided with a specific set of primitives to interact with the
+    environment. It does not have generic shell access.
+
+
+    | Tool | Signature | Description |
+
+    | :--- | :--- | :--- |
+
+    | **`list_files`** | `(dir: string) => string[]` | Recursively list
+    available tools or definitions. |
+
+    | **`read_file`** | `(path: string) => string` | Read the content of an
+    existing tool or schema. |
+
+    | **`write_file`** | `(path: string, content: string) => void` | Create a
+    new tool or overwrite a draft. |
+
+    | **`patch_file`** | `(path: string, search: string, replace: string) =>
+    void` | Surgical search-and-replace for refactoring. |
+
+    | **`check_tool`** | `(path: string) => { valid: boolean, errors: string[]
+    }` | Run the JIT compiler and linter. |
+
+    | **`exec_tool`** | `(path: string, args: object) => any` | Execute a tool
+    inside the secure Sandbox. |
+
+
+    ---
+
+
+    # 3. The Protocol
+
+
+    This is the algorithm the Agent must follow. It is the "software" running on
+    the Agent's "CPU".
+
+
+    ## 3.1 The Prime Directive: "Reuse or Forge"
+
+
+    The Agent is forbidden from executing one-off scripts for repetitive tasks.
+
+
+    1.  **Lookup**: Query registry. If a tool exists (Score > 0.85), **Reuse**.
+
+    2.  **Forge**: If no tool exists, **Create**.
+
+    3.  **Persist**: Commit to Git.
+
+
+    ## 3.2 The 8 Standards of Code Quality
+
+
+    To ensure the ecosystem remains clean, the Agent must adhere to strict code
+    quality guidelines. The Linter/Reviewer will reject tools that violate these
+    principles.
+
+
+    1.  **Abstract**: Logic must be separated from specific data instances.
+        *   *Bad*: `const tax = 0.05`
+        *   *Good*: `const tax = args.taxRate`
+    2.  **Composable**: Functions should do one thing and return a result usable
+    by other functions.
+
+    3.  **HOFs (Higher Order Functions)**: Use map/reduce/filter patterns rather
+    than imperative loops where possible.
+
+    4.  **Stateless**: Tools must not rely on variables outside their scope or
+    previous executions.
+
+    5.  **Reusable**: The code should be generic enough to serve multiple use
+    cases.
+
+    6.  **General by Params**: Behavior is controlled by arguments, not
+    hardcoded strings.
+
+    7.  **No Hardcoded Values**: No magic numbers, no specific IDs, no emails in
+    source code.
+
+    8.  **Orchestrator Capable**: Tools should be able to import and invoke
+    other TGP tools (via the `require` bridge).
+
+
+    ## 3.3 The Feedback Loop (Self-Healing)
+
+
+    If a tool fails during execution:
+
+    1.  **Capture**: Agent reads STDERR.
+
+    2.  **Diagnose**: Agent identifies the logic error or schema mismatch.
+
+    3.  **Patch**: Agent uses `patch_file` to fix the code in place.
+
+    4.  **Verify**: Agent runs `check_tool`.
+
+
+    ---
+
+
+    # 4. Security (The Sandbox)
+
+
+    **TL;DR:**
+
+    1.  **Zero-Trust**: Tools run in a stripped V8 context. No `process`, no
+    `fs`, no `eval`.
+
+    2.  **Resource Caps**: 64MB RAM, 50ms CPU time. Infinite loops die
+    instantly.
+
+    3.  **Transaction Safety**: All DB writes run inside a transaction. If the
+    tool throws, the DB rolls back.
+
+
+    ## 4.1 The Great Wall (isolated-vm)
+
+    TGP uses `isolated-vm` to create a boundary between the Host (Agent) and the
+    Guest (Tool).
+
+    *   **Memory**: Separate Heaps.
+
+    *   **Syscalls**: Bridged via specific `tgp` global object.
+
+    *   **Network**: Blocked by default. Allowed only via whitelisted `fetch`
+    bridge.
+
+
+    ---
+
+
+    # 5. The Ecosystem (Join the Hive)
+
+
+    We are building the **`libc` of the AI Age**.
+
+
+    ## 5.1 The Logic/State Split
+
+    In TGP, **Tools are Stateless**.
+
+    *   **Logic (Public)**: The TypeScript code
+    (`tools/analytics/retention.ts`).
+
+    *   **State (Private)**: The Database Connection (`DATABASE_URL`).
+
+
+    ## 5.2 Hub & Spoke Topology (Git Backed)
+
+    Because TGP relies on Git, your tools are portable.
+
+    *   **Upstream**: A private repo (e.g., `github.com/org/tgp-global`).
+
+    *   **Downstream**: The ephemeral serverless instances pull from Upstream.
+
+
+    ---
+
+
+    # 6. Governance Modes
+
+
+    ## 6.1 God Mode (Development)
+
+    *   **Behavior**: `Forge -> Compile -> Execute`.
+
+    *   **Target**: Local `.tgp/` folder or direct push to `main`.
+
+
+    ## 6.2 Gatekeeper Mode (Production)
+
+    *   **Behavior**: `Forge -> Compile -> Pull Request`.
+
+    *   **Target**: Agent creates a branch `feat/tool-name` and opens a PR.
+
+    *   **Approval**: A human or a Senior Agent reviews the diff before merging
+    to `main`.
+
+
+    ---
+
+
+    # 7. Integration Spec
+
+
+    ## 7.1 The Bootstrap
+
+    ```bash
+
+    npx tgp@latest init
+
+    ```
+
+
+    ## 7.2 Configuration (`tgp.config.ts`)
+
+
+    The configuration defines the Sandbox boundaries and the Git backend.
+
+
+    ```typescript
+
+    import { defineTGPConfig } from '@tgp/core';
+
+
+    export default defineTGPConfig({
+      // The Root of the Agent's filesystem (Ephemeral in serverless)
+      rootDir: './.tgp',
+
+      // 1. DATA: How the Agent sees your DB
+      db: {
+        dialect: 'postgres',
+        ddlSource: 'drizzle-kit generate --print',
+      },
+
+      // 2. BACKEND (GitOps)
+      // Essential for Serverless/Ephemeral environments.
+      // The Agent pulls state from here and pushes new tools here.
+      git: {
+        provider: 'github', // or 'gitlab', 'bitbucket'
+        repo: 'my-org/tgp-tools',
+        branch: 'main',
+        auth: {
+          // Why not in config? Because we read from ENV for security.
+          token: process.env.TGP_GITHUB_TOKEN,
+          user: 'tgp-bot[bot]',
+          email: 'tgp-bot@users.noreply.github.com'
+        },
+        // Strategy: 'direct' (push) or 'pr' (pull request)
+        writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
+      },
+
+      // 3. FILESYSTEM JAIL
+      fs: {
+        allowedDirs: ['./public/exports', './tmp'],
+        blockUpwardTraversal: true
+      },
+
+      // 4. RUNTIME
+      allowedImports: ['@tgp/std', 'zod', 'date-fns']
+    });
+
+    ```
+
+
+    ## 7.3 Runtime Usage (The SDK)
+
+
+    ```typescript
+
+    // src/app/api/agent/route.ts
+
+    import { TGP, tgpTools } from '@tgp/core';
+
+    import { generateText } from 'ai';
+
+
+    const kernel = new TGP({ configFile: './tgp.config.ts' });
+
+
+    export async function POST(req: Request) {
+      const { messages } = await req.json();
+
+      // Injects: list_files, read_file, write_file, exec_tool
+      const tools = tgpTools(kernel);
+
+      const result = await generateText({
+        model: openai('gpt-4-turbo'),
+        tools, 
+        messages,
+        // The System Prompt enforces the "8 Standards"
+        system: kernel.getSystemPrompt() 
+      });
+
+      return result.response;
+    }
+
+    ```
+
+
+    ---
+
+
+    # 8. Roadmap & Contributing
+
+
+    We are hacking on the future of backend development.
+
+
+    *   **[P0] The LSP**: IDE extension for real-time tool visibility.
+
+    *   **[P1] Vector Memory**: Semantic search for tool reuse.
+
+    *   **[P2] Multi-Lang**: Python support via WebAssembly.
+
+
+    **Get Involved:**
+
+    `git clone` -> `npm install` -> `npm run forge`.
+
+    ```
+approved: false
+linesAdded: null
+linesRemoved: null
+linesDifference: null
+gitCommittedAt: null
+status: undone
+id: 22

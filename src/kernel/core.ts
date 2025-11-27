@@ -1,17 +1,20 @@
 /* eslint-disable no-console */
 import { TGPConfig } from '../types.js';
 import { VFSAdapter } from '../vfs/types.js';
-import { createGitBackend, GitBackend } from './git.js';
-import { createNoOpDB, DBBackend } from './db.js';
+import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+import { createDBBackend, DBBackend } from './db.js';
 import { createRegistry, Registry } from './registry.js';
 
-// We inject the low-level FS for Git separately from the VFS adapter
-// This is because Git needs raw FS access, while the Agent uses the VFS Jail.
+// We inject the platform-specific environment dependencies here.
+// This allows the Kernel to run in Node, Edge, or Browser environments.
+export interface KernelEnvironment extends GitDependencies {
+  // We can extend this if Kernel needs more platform specific components later
+}
+
 export interface KernelOptions {
   config: TGPConfig;
   vfs: VFSAdapter; 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  fs: any; // The raw filesystem object (node:fs or memfs) used by isomorphic-git
+  env: KernelEnvironment;
 }
 
 export interface Kernel {
@@ -29,10 +32,10 @@ export interface Kernel {
  * This wires up the configuration, the filesystem, and the git backend.
  */
 export function createKernel(opts: KernelOptions): Kernel {
-  const { config, vfs, fs } = opts;
+  const { config, vfs, env } = opts;
   
-  const git = createGitBackend(fs, config);
-  const db = createNoOpDB(); // TODO: Connect to real DB based on config.db
+  const git = createGitBackend(env, config);
+  const db = createDBBackend(config); 
   const registry = createRegistry(vfs);
 
   let isBooted = false;

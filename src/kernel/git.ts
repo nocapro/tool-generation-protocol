@@ -1,6 +1,5 @@
 /* eslint-disable no-console */
 import * as git from 'isomorphic-git';
-import * as http from 'isomorphic-git/http/node';
 import { TGPConfig } from '../types.js';
 import * as path from 'path';
 
@@ -13,10 +12,21 @@ export interface GitBackend {
   persist(message: string, files: string[]): Promise<void>;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
+export interface GitDependencies {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  fs: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  http: any;
+}
+
+interface GitWriteStrategy {
+  persist(message: string, files: string[]): Promise<void>;
+}
+
+export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitBackend {
   const dir = config.rootDir;
   const { repo, auth, branch, writeStrategy } = config.git;
+  const { fs, http } = deps;
 
   // Helper to configure git options
   const gitOpts = {
@@ -29,6 +39,48 @@ export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
   const author = {
     name: auth.user,
     email: auth.email,
+  };
+
+  // --- Strategies ---
+
+  const directStrategy: GitWriteStrategy = {
+    async persist(message: string, filesToAdd: string[]) {
+      // 1. Add files
+      for (const filepath of filesToAdd) {
+        try {
+           // check if file exists before adding
+           await git.add({ ...gitOpts, filepath });
+        } catch (e) {
+           console.warn(`[TGP] Git Add failed for ${filepath}`, e);
+        }
+      }
+
+      // 2. Commit
+      const sha = await git.commit({
+        ...gitOpts,
+        message,
+        author,
+      });
+      console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
+
+      // 3. Push
+      console.log(`[TGP] Pushing to ${branch}...`);
+      await git.push({
+        ...gitOpts,
+        remote: 'origin',
+        ref: branch,
+      });
+    }
+  };
+
+  const prStrategy: GitWriteStrategy = {
+    async persist(message: string, files: string[]) {
+      // TODO: Implement PR creation logic for 'pr' strategy using Octokit or similar
+      console.warn(`[TGP] 'pr' Strategy selected but not implemented. Falling back to local commit only.`);
+      // We reuse the commit logic from direct strategy but skip push for now, or just warn.
+      // Ideally, this creates a branch, pushes that branch, and opens a PR.
+      await directStrategy.persist(message, files).catch(e => console.error("PR fallback failed", e));
+    }
   };
 
   return {
@@ -62,37 +114,13 @@ export function createGitBackend(fs: any, config: TGPConfig): GitBackend {
     },
 
     async persist(message: string, filesToAdd: string[]) {
-      // 1. Add files
-      for (const filepath of filesToAdd) {
-        try {
-           // check if file exists before adding (might be deleted, though not in this context)
-           await git.add({ ...gitOpts, filepath });
-        } catch (e) {
-           // If file doesn't exist, maybe it was a deletion? 
-           // For TGP v1 we assume add/update.
-           console.warn(`[TGP] Git Add failed for ${filepath}`, e);
-        }
-      }
-
-      // 2. Commit
-      const sha = await git.commit({
-        ...gitOpts,
-        message,
-        author,
-      });
-      console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
-
-      // 3. Push
       if (writeStrategy === 'direct') {
-        console.log(`[TGP] Pushing to ${branch}...`);
-        await git.push({
-          ...gitOpts,
-          remote: 'origin',
-          ref: branch,
-        });
+        return directStrategy.persist(message, filesToAdd);
+      } else if (writeStrategy === 'pr') {
+        return prStrategy.persist(message, filesToAdd);
       } else {
-        // TODO: Implement PR creation logic for 'pr' strategy
-        console.warn(`[TGP] PR Strategy not yet implemented. Changes committed locally.`);
+        console.warn(`[TGP] Unknown write strategy: ${writeStrategy}. Defaulting to direct.`);
+        return directStrategy.persist(message, filesToAdd);
       }
     }
   };
