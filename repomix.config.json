@@ -26,7 +26,14 @@
   "ignore": {
     "useGitignore": true,
     "useDefaultPatterns": true,
-    "customPatterns": ["repomix.config.json", "relay.config.json", ".relay"]
+    "customPatterns": [
+      "repomix.config.json",
+      "relay.config.json",
+      ".relay",
+      "dev-docs",
+      "LICENSE",
+      ".gitignore"
+    ]
   },
   "security": {
     "enableSecurityCheck": true

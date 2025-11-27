@@ -1,4 +1,4 @@
-lets bring readme.md into production ready manifestation.
+lets bring readme.md into production ready manifestation by developing codebase. I want HOFs, no OOP or classes, no casting as any or unknown. all should follows readme.md requirements
 
 ===
 
