@@ -1,6 +1,14 @@
 
 ===
 
+generate e2e, integration, unit test cases plan based on readme.md
+
+=== DONE
+
+spot any unimplemented, todo, stub, placeholder etc... we need production ready codebase
+
+=== DONE
+
 Lets achieve readme.md requirements compliance
 
 Lets achieve readme.md requirements and expectations compliance and production ready codebase

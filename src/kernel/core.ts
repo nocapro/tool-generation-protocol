@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-import { TGPConfig } from '../types.js';
+import { TGPConfig, Logger } from '../types.js';
 import { VFSAdapter } from '../vfs/types.js';
 import { createGitBackend, GitBackend, GitDependencies } from './git.js';
 import { createDBBackend, DBBackend } from './db.js';
@@ -15,6 +15,8 @@ export interface KernelOptions {
   config: TGPConfig;
   vfs: VFSAdapter; 
   env: KernelEnvironment;
+  logger?: Logger;
+  db?: DBBackend;
 }
 
 export interface Kernel {
@@ -25,7 +27,15 @@ export interface Kernel {
   git: GitBackend;
   db: DBBackend;
   registry: Registry;
+  logger: Logger;
 }
+
+const defaultLogger: Logger = {
+  debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
+  info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
+  warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
+  error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
+};
 
 /**
  * Factory to create a TGP Kernel.
@@ -33,9 +43,10 @@ export interface Kernel {
  */
 export function createKernel(opts: KernelOptions): Kernel {
   const { config, vfs, env } = opts;
+  const logger = opts.logger ?? defaultLogger;
   
-  const git = createGitBackend(env, config);
-  const db = createDBBackend(config); 
+  const git = createGitBackend(env, config, logger);
+  const db = opts.db ?? createDBBackend(config); 
   const registry = createRegistry(vfs);
 
   let isBooted = false;
@@ -46,31 +57,32 @@ export function createKernel(opts: KernelOptions): Kernel {
     git,
     db,
     registry,
+    logger,
 
     async boot() {
       if (isBooted) return;
-      console.log(`[TGP] Kernel booting...`);
+      logger.info(`Kernel booting...`);
       
       try {
         // Hydrate the filesystem from Git
         await git.hydrate().catch(err => {
-          console.error(`[TGP] Git hydration failed.`, err);
+          logger.error(`Git hydration failed.`, err);
           throw err;
         });
         
         // Hydrate registry from meta.json
-        await registry.hydrate().catch(err => console.warn(`[TGP] Registry hydration warning:`, err));
+        await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
         
         isBooted = true;
-        console.log(`[TGP] Kernel ready.`);
+        logger.info(`Kernel ready.`);
       } catch (error) {
-        console.error(`[TGP] Boot failed:`, error);
+        logger.error(`Boot failed:`, error);
         throw error;
       }
     },
 
     async shutdown() {
-      console.log(`[TGP] Kernel shutting down...`);
+      logger.info(`Kernel shutting down...`);
       // Cleanup tasks (close db connections, etc) can go here
       isBooted = false;
     }

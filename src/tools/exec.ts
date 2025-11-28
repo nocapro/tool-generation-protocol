@@ -11,7 +11,7 @@ export const ExecToolParams = z.object({
 export function createExecTools(kernel: Kernel) {
   return {
     exec_tool: {
-      description: 'Execute a tool inside the secure Sandbox.',
+      description: 'Execute a tool inside the secure Sandbox. Returns { result, logs, error }.',
       parameters: ExecToolParams,
       execute: async ({ path, args }) => {
         // Security: Ensure args are serializable (no functions, no circular refs)
@@ -25,8 +25,12 @@ export function createExecTools(kernel: Kernel) {
         const code = await kernel.vfs.readFile(path);
         
         // The sandbox takes care of safety, timeout, and memory limits
-        const result = await executeTool(kernel, code, args, path);
-        return result;
+        const { result, logs, error } = await executeTool(kernel, code, args, path);
+        
+        if (error !== undefined) {
+           return { success: false, error, logs };
+        }
+        return { success: true, result, logs };
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as AgentTool<typeof ExecToolParams, any>,

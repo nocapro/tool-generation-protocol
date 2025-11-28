@@ -64,3 +64,10 @@ export interface ToolMetadata {
 export interface RegistryState {
   tools: Record<string, ToolMetadata>;
 }
+
+export interface Logger {
+  debug(message: string, ...args: any[]): void;
+  info(message: string, ...args: any[]): void;
+  warn(message: string, ...args: any[]): void;
+  error(message: string, ...args: any[]): void;
+}

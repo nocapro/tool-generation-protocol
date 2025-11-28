@@ -3,7 +3,7 @@ import * as http from 'isomorphic-git/http/node';
 import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
 import { loadTGPConfig } from './config.js';
 import { createNodeVFS } from './vfs/node.js';
-import { TGPConfigSchema, TGPConfig } from './types.js';
+import { TGPConfigSchema, TGPConfig, Logger } from './types.js';
 import { VFSAdapter } from './vfs/types.js';
 import { GitBackend } from './kernel/git.js';
 import { DBBackend } from './kernel/db.js';
@@ -22,6 +22,16 @@ export interface TGPOptions {
    * If omitted, defaults to NodeVFS rooted at config.rootDir.
    */
   vfs?: VFSAdapter;
+
+  /**
+   * Inject a custom logger. Defaults to console.
+   */
+  logger?: Logger;
+
+  /**
+   * Inject a custom Database Backend.
+   */
+  db?: DBBackend;
 
   /**
    * Override the raw filesystem used by Git.
@@ -49,6 +59,7 @@ export class TGP implements Kernel {
   public git: GitBackend;
   public db: DBBackend;
   public registry: Registry;
+  public logger: Logger;
   
   private _isBooted = false;
 
@@ -72,12 +83,15 @@ export class TGP implements Kernel {
     const kernel = createKernel({
       config: this.config,
       vfs: this.vfs,
-      env
+      env,
+      logger: opts.logger,
+      db: opts.db
     });
 
     this.git = kernel.git;
     this.db = kernel.db;
     this.registry = kernel.registry;
+    this.logger = kernel.logger;
   }
 
   /**
@@ -109,7 +123,9 @@ export class TGP implements Kernel {
       const kernel = createKernel({
         config: this.config,
         vfs: this.vfs,
-        env
+        env,
+        logger: this.opts.logger,
+        db: this.opts.db
       });
       
       this.git = kernel.git;

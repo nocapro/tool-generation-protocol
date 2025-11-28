@@ -2,13 +2,19 @@
 import { Kernel } from '../kernel/core.js';
 import * as path from 'path';
 
+export interface SandboxBridgeOptions {
+  kernel: Pick<Kernel, 'vfs' | 'config'>;
+  onLog?: (message: string) => void;
+}
+
 /**
  * Creates the Bridge Object exposed to the Sandbox.
  * This maps secure Kernel methods to the Guest environment.
  * 
  * We expose a structured 'tgp' object to the guest.
  */
-export function createSandboxBridge({ vfs, db, config }: Pick<Kernel, 'vfs' | 'db' | 'config'>) {
+export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
+  const { vfs, config } = kernel;
   const { allowedDirs } = config.fs;
 
   const isAllowedWrite = (target: string): boolean => {
@@ -56,13 +62,12 @@ export function createSandboxBridge({ vfs, db, config }: Pick<Kernel, 'vfs' | 'd
       // --- Logger ---
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       log: (...args: any[]) => {
-        console.log('[TGP-TOOL]', ...args);
-      },
-
-      // --- Database ---
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      db_query: async (sql: string, params: any[] = []) => {
-        return db.query(sql, params);
+        const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+        if (onLog) {
+            onLog(msg);
+        } else {
+            console.log('[TGP-TOOL]', msg);
+        }
       }
     }
   };
