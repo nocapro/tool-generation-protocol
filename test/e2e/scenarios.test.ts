@@ -215,6 +215,125 @@ describe('E2E Scenarios', () => {
     expect(res.error).toContain('Database Error');
   });
 
+  it('Scenario 9: Tool Composition (Orchestrator)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    // 1. Create the Library Tool (The Dependency)
+    const libPath = 'tools/lib/multiplier.ts';
+    await tools.write_file.execute({
+      path: libPath,
+      content: `
+        export default function multiply(a: number, b: number) {
+          return a * b;
+        }
+      `
+    });
+
+    // 2. Create the Consumer Tool (The Orchestrator)
+    const consumerPath = 'tools/calc.ts';
+    // Note: We use require() because the sandbox environment uses CommonJS shim for inter-tool dependencies.
+    await tools.write_file.execute({
+      path: consumerPath,
+      content: `
+        const multiplier = require('./lib/multiplier').default;
+
+        export default function calculate(args: { a: number, b: number }) {
+          // Logic: (a * b) + 100
+          const product = multiplier(args.a, args.b);
+          return product + 100;
+        }
+      `
+    });
+
+    // 3. Execute
+    const res = await tools.exec_tool.execute({ 
+      path: consumerPath, 
+      args: { a: 5, b: 5 } 
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.result).toBe(125); // (5 * 5) + 100
+  });
+
+  it('Scenario 10: Registry Integrity (Meta.json)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    const docTool = 'tools/docs/roi.ts';
+    const description = 'Calculates the Return on Investment based on cost and revenue.';
+    
+    // Write tool with JSDoc
+    await tools.write_file.execute({
+      path: docTool,
+      content: `
+        /**
+         * ${description}
+         */
+        export default function roi(args: { cost: number, revenue: number }) {
+          return (args.revenue - args.cost) / args.cost;
+        }
+      `
+    });
+
+    // Verify meta.json in the VFS backing store (on disk)
+    // Note: The VFS root is at .tgp inside the tempDir
+    const metaPath = path.join(tempDir, '.tgp/meta.json');
+    const metaContent = await fs.readFile(metaPath, 'utf-8');
+    const meta = JSON.parse(metaContent);
+
+    expect(meta.tools[docTool]).toBeDefined();
+    expect(meta.tools[docTool].description).toBe(description);
+  });
+
+  it('Scenario 11: Standards Enforcement (Linter)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    // Test 1: Magic Number
+    const magicTool = 'tools/bad/magic.ts';
+    await tools.write_file.execute({
+      path: magicTool,
+      content: `export default function(args: { x: number }) { return args.x * 9999; }`
+    });
+
+    let check = await tools.check_tool.execute({ path: magicTool });
+    expect(check.valid).toBe(false);
+    expect(check.errors.some(e => e.includes('Magic Number'))).toBe(true);
+
+    // Test 2: Hardcoded Secret
+    const secretTool = 'tools/bad/secret.ts';
+    await tools.write_file.execute({
+      path: secretTool,
+      content: `
+        export default function() { 
+          const apiKey = "sk-live-1234567890abcdef12345678"; 
+          return apiKey;
+        }
+      `
+    });
+
+    check = await tools.check_tool.execute({ path: secretTool });
+    expect(check.valid).toBe(false);
+    expect(check.errors.some(e => e.includes('Secret'))).toBe(true);
+
+    // Test 3: Valid Tool (Control)
+    const validTool = 'tools/good/clean.ts';
+    await tools.write_file.execute({
+      path: validTool,
+      content: `export default function(args: { factor: number }) { return args.factor * 100; }` // 100 is allowed
+    });
+
+    check = await tools.check_tool.execute({ path: validTool });
+    expect(check.valid).toBe(true);
+  });
+
   // Note: Scenario 7 (SIGTERM) is skipped as the CLI currently does not have a long-running 'serve' mode to test against.
 
   it('Scenario 8: CLI Bootstrap', async () => {

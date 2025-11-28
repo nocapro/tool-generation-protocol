@@ -35,8 +35,10 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.25",
+    "@types/better-sqlite3": "^7.6.9",
     "@typescript-eslint/eslint-plugin": "^8.48.0",
     "@typescript-eslint/parser": "^8.48.0",
+    "better-sqlite3": "^9.4.3",
     "eslint": "^9.39.1",
     "tsx": "^4.16.2",
     "vitest": "^1.6.0"
