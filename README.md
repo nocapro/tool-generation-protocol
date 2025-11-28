@@ -182,6 +182,8 @@ import { defineTGPConfig } from '@tgp/core';
 export default defineTGPConfig({
   // The Root of the Agent's filesystem (Ephemeral in serverless)
   rootDir: './.tgp',
+  // NOTE: The 'db' and 'fs' sections below are METADATA for the Agent.
+  // The actual database and filesystem permissions must be injected at runtime.
 
   // 1. DATA: How the Agent sees your DB
   db: {

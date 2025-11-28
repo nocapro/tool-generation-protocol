@@ -1,27 +1,5 @@
 /* eslint-disable no-console */
-import { TGPConfig } from '../types.js';
-
-/**
- * The Database Kernel Interface.
- * 
- * TGP guarantees that all tool executions happen within a transaction.
- * If the tool throws, the transaction is rolled back.
- */
-export interface DBBackend {
-  /**
-   * Executes a raw SQL query.
-   * @param sql The SQL query string.
-   * @param params Parameter substitutions.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  query(sql: string, params?: any[]): Promise<any[]>;
-
-  /**
-   * Wraps a function in a database transaction.
-   * @param fn The function to execute. It receives a transactional DB instance.
-   */
-  transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
-}
+import { TGPConfig, DBBackend } from '../types.js';
 
 /**
  * Factory to create the Database Backend based on configuration.

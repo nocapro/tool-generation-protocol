@@ -1,8 +1,8 @@
 /* eslint-disable no-console */
-import { TGPConfig, Logger } from '../types.js';
+import { TGPConfig, Logger, DBBackend } from '../types.js';
 import { VFSAdapter } from '../vfs/types.js';
 import { createGitBackend, GitBackend, GitDependencies } from './git.js';
-import { createDBBackend, DBBackend } from './db.js';
+import { createDBBackend } from './db.js';
 import { createRegistry, Registry } from './registry.js';
 
 // We inject the platform-specific environment dependencies here.

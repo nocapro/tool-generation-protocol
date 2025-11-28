@@ -5,6 +5,7 @@ export const GitConfigSchema = z.object({
   provider: z.enum(['github', 'gitlab', 'bitbucket']),
   repo: z.string().min(1, "Repository name is required"),
   branch: z.string().default('main'),
+  apiBaseUrl: z.string().url().default('https://api.github.com'),
   auth: z.object({
     token: z.string().min(1, "Git auth token is required"),
     user: z.string().default('tgp-bot[bot]'),
@@ -70,4 +71,27 @@ export interface Logger {
   info(message: string, ...args: any[]): void;
   warn(message: string, ...args: any[]): void;
   error(message: string, ...args: any[]): void;
+}
+
+/**
+ * The Database Kernel Interface.
+ *
+ * TGP guarantees that all tool executions happen within a transaction.
+ * If the tool throws, the transaction is rolled back.
+ * This interface must be implemented by the host application and injected into the TGP Kernel.
+ */
+export interface DBBackend {
+  /**
+   * Executes a raw SQL query.
+   * @param sql The SQL query string.
+   * @param params Parameter substitutions.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  query(sql: string, params?: any[]): Promise<any[]>;
+
+  /**
+   * Wraps a function in a database transaction.
+   * @param fn The function to execute. It receives a transactional DB instance.
+   */
+  transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
 }

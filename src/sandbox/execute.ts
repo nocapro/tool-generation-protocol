@@ -81,38 +81,41 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
 
     // 3. Shim Injection
     // We prepend a CommonJS loader shim to the user code.
-    // This allows 'require' to work by calling back to __tgp_load_module.
+    // This allows 'require' to work by calling back to the host via __tgp_load_module.
+    // It includes a cache to prevent reloading the same module within a single execution.
     const shim = `
       const __moduleCache = {};
 
       function __makeRequire(baseDir) {
         return function(id) {
-          // Check Cache (Global)
-          // In a real system, cache keys should be absolute paths.
-          // Here we rely on the host to return consistent paths if we wanted perfect caching.
-          // For now, we skip cache or use simple ID (flawed for relatives).
-          // Let's implement correct caching by asking Host for absolute path first?
-          // Simpler: Just reload for now (Stateless).
-          
-          // Call Host Sync
+          // HOST INTERACTION: Resolve module path and get its source code from the host.
+          // This is a synchronous call to the Node.js environment.
           const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
-          
-          if (__moduleCache[mod.path]) return __moduleCache[mod.path];
 
-          // Wrap in CommonJS Function
-          const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+          // CACHE CHECK: If the module has already been loaded, return it from the cache.
+          if (__moduleCache[mod.path]) {
+            return __moduleCache[mod.path].exports;
+          }
+
+          // MODULE EXECUTION: If it's a new module, execute its code.
           const newModule = { exports: {} };
-          
-          // Execute
+
+          // Before executing, store the module object in the cache to handle circular dependencies.
+          __moduleCache[mod.path] = newModule;
+
+          // We provide the module with its own 'exports' object, a 'require' function
+          // scoped to its own directory, and other CommonJS globals.
+          const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+
+          // Execute the module's code.
           fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
-          
-          __moduleCache[mod.path] = newModule.exports;
+
+          // The 'newModule.exports' object is now populated.
           return newModule.exports;
         };
       }
-      
+
       // Setup Global Require for the entry point
-      // We assume the entry point is at 'filePath'
       global.require = __makeRequire('${path.dirname(filePath)}');
     `;
 
