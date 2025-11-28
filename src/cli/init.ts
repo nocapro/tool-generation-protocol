@@ -25,11 +25,11 @@ export async function initCommand() {
   if (await exists(gitIgnorePath)) {
     const content = await fs.readFile(gitIgnorePath, 'utf-8');
     if (!content.includes('.tgp')) {
-      await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n');
+      await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n.tgp/meta.json\n');
       console.log(`[TGP] Added .tgp to .gitignore`);
     }
   } else {
-    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n');
+    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n.tgp/meta.json\n');
     console.log(`[TGP] Created .gitignore`);
   }
 

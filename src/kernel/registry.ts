@@ -8,6 +8,7 @@ export interface Registry {
   hydrate(): Promise<void>;
   register(filePath: string, code: string): Promise<void>;
   list(): ToolMetadata[];
+  rebuild(): Promise<void>;
   sync(): Promise<void>;
 }
 
@@ -80,11 +81,12 @@ export function createRegistry(vfs: VFSAdapter): Registry {
         try {
           const content = await vfs.readFile(META_PATH);
           state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+          return;
         } catch (err) {
-          console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
-          state = { tools: {} };
+          console.warn('[TGP] Failed to parse meta.json, rebuilding cache.', err);
         }
       }
+      await this.rebuild();
     },
 
     async register(filePath: string, code: string) {
@@ -96,6 +98,24 @@ export function createRegistry(vfs: VFSAdapter): Registry {
       
       // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
       // during tool creation.
+      await this.sync();
+    },
+
+    async rebuild() {
+      state = { tools: {} };
+      // Scan for tools recursively
+      const files = await vfs.listFiles('tools', true);
+      for (const file of files) {
+        if (file.endsWith('.ts')) {
+          try {
+            const code = await vfs.readFile(file);
+            const metadata = extractMetadata(file, code);
+            state.tools[file] = metadata;
+          } catch (err) {
+            console.warn(`[TGP] Failed to index ${file}`, err);
+          }
+        }
+      }
       await this.sync();
     },
 

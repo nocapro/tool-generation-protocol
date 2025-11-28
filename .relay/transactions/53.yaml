@@ -1,0 +1,879 @@
+uuid: d68511f6-142b-48d3-8076-e968fd827b24
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T06:41:49.918Z'
+gitCommitMsg: >-
+  refactor: Make Registry local-only and fix strict types.
+
+  - Implemented `rebuild()` in Registry to scan tool files. - Stopped persisting
+  `meta.json` to Git in `write_file`/`patch_file`. - Updated `.gitignore`
+  template. - Fixed lint errors: `any` types, nullish coalescing, and non-null
+  assertions.
+promptSummary: >-
+  Refactored Registry to rebuild locally instead of relying on Git persistence
+  for meta.json, and fixed strict typing lint errors across the codebase.
+reasoning:
+  - Refactoring registry to local-only cache and fixing strict linting issues.
+operations:
+  - type: write
+    path: src/kernel/registry.ts
+    content: >
+      --- src/kernel/registry.ts
+
+      +++ src/kernel/registry.ts
+
+      @@ -8,6 +8,7 @@
+         hydrate(): Promise<void>;
+         register(filePath: string, code: string): Promise<void>;
+         list(): ToolMetadata[];
+      +  rebuild(): Promise<void>;
+         sync(): Promise<void>;
+       }
+       
+      @@ -77,10 +78,11 @@
+           async hydrate() {
+             if (await vfs.exists(META_PATH)) {
+               try {
+                 const content = await vfs.readFile(META_PATH);
+                 state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+      +          return;
+               } catch (err) {
+      -          console.warn('[TGP] Failed to parse meta.json, starting
+      fresh.', err);
+
+      -          state = { tools: {} };
+
+      +          console.warn('[TGP] Failed to parse meta.json, rebuilding
+      cache.', err);
+               }
+             }
+      +      await this.rebuild();
+           },
+       
+           async register(filePath: string, code: string) {
+      @@ -95,6 +97,22 @@
+             await this.sync();
+           },
+       
+      +    async rebuild() {
+
+      +      state = { tools: {} };
+
+      +      // Scan for tools recursively
+
+      +      const files = await vfs.listFiles('tools', true);
+
+      +      for (const file of files) {
+
+      +        if (file.endsWith('.ts')) {
+
+      +          try {
+
+      +            const code = await vfs.readFile(file);
+
+      +            const metadata = extractMetadata(file, code);
+
+      +            state.tools[file] = metadata;
+
+      +          } catch (err) {
+
+      +            console.warn(`[TGP] Failed to index ${file}`, err);
+
+      +          }
+
+      +        }
+
+      +      }
+
+      +      await this.sync();
+
+      +    },
+
+      +
+           list() {
+             return Object.values(state.tools);
+           },
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tools/fs.ts
+    content: >
+      --- src/tools/fs.ts
+
+      +++ src/tools/fs.ts
+
+      @@ -49,7 +49,7 @@
+               await kernel.registry.register(path, content);
+       
+               // Persist to Git (Tool + meta.json)
+      -        await kernel.git.persist(`Forge: ${path}`, [path, 'meta.json']);
+
+      +        await kernel.git.persist(`Forge: ${path}`, [path]);
+       
+               return { success: true, path, persisted: true };
+             },
+      @@ -74,7 +74,7 @@
+               // Update registry in case descriptions changed
+               await kernel.registry.register(path, newContent);
+       
+      -        await kernel.git.persist(`Refactor: ${path}`, [path,
+      'meta.json']);
+
+      +        await kernel.git.persist(`Refactor: ${path}`, [path]);
+       
+               return { success: true, path, persisted: true };
+             },
+    patchStrategy: standard-diff
+  - type: write
+    path: src/cli/init.ts
+    content: >
+      --- src/cli/init.ts
+
+      +++ src/cli/init.ts
+
+      @@ -25,11 +25,11 @@
+         if (await exists(gitIgnorePath)) {
+           const content = await fs.readFile(gitIgnorePath, 'utf-8');
+           if (!content.includes('.tgp')) {
+      -      await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n');
+
+      +      await fs.appendFile(gitIgnorePath, '\n#
+      TGP\n.tgp\n.tgp/meta.json\n');
+             console.log(`[TGP] Added .tgp to .gitignore`);
+           }
+         } else {
+      -    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n');
+
+      +    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n.tgp/meta.json\n');
+           console.log(`[TGP] Created .gitignore`);
+         }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/core.ts
+    content: |
+      --- src/kernel/core.ts
+      +++ src/kernel/core.ts
+      @@ -15,7 +15,7 @@
+         vfs: VFSAdapter; 
+         env: KernelEnvironment;
+         logger?: Logger;
+      -  sandboxAPI?: Record<string, any>;
+      +  sandboxAPI?: Record<string, unknown>;
+       }
+       
+       export interface Kernel {
+      @@ -25,7 +25,7 @@
+         git: GitBackend;
+         registry: Registry;
+         logger: Logger;
+      -  sandboxAPI: Record<string, any>;
+      +  sandboxAPI: Record<string, unknown>;
+       }
+       
+       const defaultLogger: Logger = {
+      @@ -44,7 +44,7 @@
+         
+         const git = createGitBackend(env, config, logger);
+         const registry = createRegistry(vfs);
+      -  const api = sandboxAPI || {};
+      +  const api = sandboxAPI ?? {};
+       
+         let isBooted = false;
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/bridge.ts
+    content: |
+      --- src/sandbox/bridge.ts
+      +++ src/sandbox/bridge.ts
+      @@ -20,7 +20,7 @@
+       export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
+         const { vfs, config } = kernel;
+      -  const { allowedDirs } = config.fs || { allowedDirs: [] };
+      +  const { allowedDirs } = config.fs;
+         const { allowedFetchUrls } = config;
+       
+         const isAllowedWrite = (target: string): boolean => {
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/isolate.ts
+    content: >
+      --- src/sandbox/isolate.ts
+
+      +++ src/sandbox/isolate.ts
+
+      @@ -69,11 +69,13 @@
+             }
+       
+             // Initialize isolate if not already created (reuse across executions)
+      -      isolate ??= new ivm.Isolate({ memoryLimit });
+
+      +      const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
+
+      +      // Update state
+
+      +      isolate = currentIsolate;
+       
+             // 2. Create a fresh Context for this execution
+      -      // We use '!' because we know isolate is defined if useFallback is
+      false.
+
+      -      const ivmContext = await isolate!.createContext();
+
+      +      // We use currentIsolate which is guaranteed to be defined
+
+      +      const ivmContext = await currentIsolate.createContext();
+       
+             try {
+               // 3. Bridge the Global Scope (Host -> Guest)
+      @@ -87,7 +89,7 @@
+                   // Special handling for the 'tgp' namespace object
+                   if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                       // Initialize the namespace in the guest
+      -                await isolate!.compileScript('global.tgp = {}').then(s =>
+      s.run(ivmContext));
+
+      +                await currentIsolate.compileScript('global.tgp =
+      {}').then(s => s.run(ivmContext));
+                       const tgpHandle = await jail.get('tgp');
+                       
+                       // Populate the namespace
+      @@ -112,7 +114,7 @@
+               }
+       
+               // 4. Compile the Script inside the Isolate
+      -        const script = await isolate!.compileScript(jsCode);
+
+      +        const script = await currentIsolate.compileScript(jsCode);
+       
+               // 5. Execute
+               const result = await script.run(ivmContext, { timeout });
+    patchStrategy: standard-diff
+snapshot:
+  src/kernel/registry.ts: |-
+    /* eslint-disable no-console */
+    import { VFSAdapter } from '../vfs/types.js';
+    import { RegistryState, ToolMetadata } from '../types.js';
+    import * as path from 'path';
+    import * as ts from 'typescript';
+
+    export interface Registry {
+      hydrate(): Promise<void>;
+      register(filePath: string, code: string): Promise<void>;
+      list(): ToolMetadata[];
+      sync(): Promise<void>;
+    }
+
+    export function createRegistry(vfs: VFSAdapter): Registry {
+      let state: RegistryState = { tools: {} };
+      const META_PATH = 'meta.json';
+
+      // Helper to parse JSDoc
+      function extractMetadata(filePath: string, code: string): ToolMetadata {
+        const name = path.basename(filePath, path.extname(filePath));
+        let description = "No description provided.";
+
+        try {
+          // Use TypeScript AST to safely locate comments (avoids matching inside strings/templates)
+          const sourceFile = ts.createSourceFile(
+            filePath,
+            code,
+            ts.ScriptTarget.ES2020,
+            true
+          );
+
+          const cleanJSDoc = (comment: string) => {
+            return comment
+              .replace(/^\/\*\*/, '')
+              .replace(/\*\/$/, '')
+              .split('\n')
+              .map(line => line.replace(/^\s*\*\s?/, '').trim())
+              .filter(line => !line.startsWith('@') && line.length > 0)
+              .join(' ');
+          };
+
+          const findComment = (pos: number) => {
+            const ranges = ts.getLeadingCommentRanges(code, pos);
+            if (ranges && ranges.length > 0) {
+              const range = ranges[ranges.length - 1]; // Closest to the node
+              if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
+                const text = code.substring(range.pos, range.end);
+                if (text.startsWith('/**')) return cleanJSDoc(text);
+              }
+            }
+            return null;
+          };
+
+          // 1. Try attached to first statement (e.g. export const...)
+          if (sourceFile.statements.length > 0) {
+            const extracted = findComment(sourceFile.statements[0].getFullStart());
+            if (extracted !== null) description = extracted;
+          }
+          
+          // 2. Fallback: Try top of file (detached)
+          if (description === "No description provided.") {
+            const extracted = findComment(0);
+            if (extracted !== null) description = extracted;
+          }
+
+        } catch (err) {
+          console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling back to default.`, err);
+        }
+
+        return {
+          name,
+          description: description || "No description provided.",
+          path: filePath
+        };
+      }
+
+      return {
+        async hydrate() {
+          if (await vfs.exists(META_PATH)) {
+            try {
+              const content = await vfs.readFile(META_PATH);
+              state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+            } catch (err) {
+              console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
+              state = { tools: {} };
+            }
+          }
+        },
+
+        async register(filePath: string, code: string) {
+          // Ignore non-tool files (e.g. config or hidden files)
+          if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+          const metadata = extractMetadata(filePath, code);
+          state.tools[filePath] = metadata;
+          
+          // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
+          // during tool creation.
+          await this.sync();
+        },
+
+        list() {
+          return Object.values(state.tools);
+        },
+
+        async sync() {
+          await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+        }
+      };
+    }
+  src/tools/fs.ts: |-
+    import { z } from 'zod';
+    import { Kernel } from '../kernel/core.js';
+    import { AgentTool } from './types.js';
+
+    export const ListFilesParams = z.object({
+      dir: z.string().describe('The relative directory path to list (e.g., "tools" or "tools/analytics")'),
+    });
+
+    export const ReadFileParams = z.object({
+      path: z.string().describe('The relative path to the file to read'),
+    });
+
+    export const WriteFileParams = z.object({
+      path: z.string().describe('The relative path where the file should be written'),
+      content: z.string().describe('The full content of the file'),
+    });
+
+    export const PatchFileParams = z.object({
+      path: z.string().describe('The relative path to the file to patch'),
+      search: z.string().describe('The exact string content to find'),
+      replace: z.string().describe('The string content to replace it with'),
+    });
+
+    export function createFsTools(kernel: Kernel) {
+      return {
+        list_files: {
+          description: 'Recursively list available tools or definitions in the VFS.',
+          parameters: ListFilesParams,
+          execute: async ({ dir }) => {
+            return kernel.vfs.listFiles(dir, true);
+          },
+        } as AgentTool<typeof ListFilesParams, string[]>,
+
+        read_file: {
+          description: 'Read the content of an existing tool or file.',
+          parameters: ReadFileParams,
+          execute: async ({ path }) => {
+            return kernel.vfs.readFile(path);
+          },
+        } as AgentTool<typeof ReadFileParams, string>,
+
+        write_file: {
+          description: 'Create a new tool or overwrite a draft. Ensures parent directories exist.',
+          parameters: WriteFileParams,
+          execute: async ({ path, content }) => {
+            await kernel.vfs.writeFile(path, content);
+            
+            // Register the new tool in the Registry (updates meta.json)
+            await kernel.registry.register(path, content);
+
+            // Persist to Git (Tool + meta.json)
+            await kernel.git.persist(`Forge: ${path}`, [path, 'meta.json']);
+
+            return { success: true, path, persisted: true };
+          },
+        } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
+
+        patch_file: {
+          description: 'Surgical search-and-replace for refactoring code.',
+          parameters: PatchFileParams,
+          execute: async ({ path, search, replace }) => {
+            const content = await kernel.vfs.readFile(path);
+            
+            if (!content.includes(search)) {
+              throw new Error(`Patch failed: Search text not found in '${path}'. Please read the file again to ensure you have the exact content.`);
+            }
+
+            // We replace the first occurrence to be surgical.
+            // If the agent needs global replace, it can do so in a loop or we can expand this tool later.
+            const newContent = content.replace(search, replace);
+            
+            await kernel.vfs.writeFile(path, newContent);
+
+            // Update registry in case descriptions changed
+            await kernel.registry.register(path, newContent);
+
+            await kernel.git.persist(`Refactor: ${path}`, [path, 'meta.json']);
+
+            return { success: true, path, persisted: true };
+          },
+        } as AgentTool<typeof PatchFileParams, { success: boolean; path: string }>,
+      };
+    }
+  src/cli/init.ts: |-
+    /* eslint-disable no-console */
+    import * as fs from 'fs/promises';
+    import * as path from 'path';
+
+    export async function initCommand() {
+      const cwd = process.cwd();
+      console.log(`[TGP] Initializing in ${cwd}...`);
+
+      const configPath = path.join(cwd, 'tgp.config.ts');
+      const gitIgnorePath = path.join(cwd, '.gitignore');
+      const tgpDir = path.join(cwd, '.tgp');
+      const toolsDir = path.join(tgpDir, 'tools');
+      const binDir = path.join(tgpDir, 'bin');
+      const metaPath = path.join(tgpDir, 'meta.json');
+
+      // 1. Create tgp.config.ts
+      if (await exists(configPath)) {
+        console.log(`[TGP] tgp.config.ts already exists. Skipping.`);
+      } else {
+        await fs.writeFile(configPath, CONFIG_TEMPLATE.trim());
+        console.log(`[TGP] Created tgp.config.ts`);
+      }
+
+      // 2. Update .gitignore
+      if (await exists(gitIgnorePath)) {
+        const content = await fs.readFile(gitIgnorePath, 'utf-8');
+        if (!content.includes('.tgp')) {
+          await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n');
+          console.log(`[TGP] Added .tgp to .gitignore`);
+        }
+      } else {
+        await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n');
+        console.log(`[TGP] Created .gitignore`);
+      }
+
+      // 3. Create .tgp directory (just to be nice)
+      await fs.mkdir(tgpDir, { recursive: true });
+
+      // 4. Scaffold Tools directory
+      await fs.mkdir(toolsDir, { recursive: true });
+      await fs.mkdir(binDir, { recursive: true });
+      console.log(`[TGP] Created .tgp/tools and .tgp/bin directories`);
+
+      // 5. Initialize Registry (meta.json)
+      if (!await exists(metaPath)) {
+        await fs.writeFile(metaPath, JSON.stringify({ tools: {} }, null, 2));
+        console.log(`[TGP] Created .tgp/meta.json`);
+      }
+
+      console.log(`[TGP] Initialization complete. Run 'npx tgp' to start hacking.`);
+    }
+
+    async function exists(p: string) {
+      try {
+        await fs.access(p);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    const CONFIG_TEMPLATE = `
+    import { defineTGPConfig } from '@tgp/core';
+
+    export default defineTGPConfig({
+      // The Root of the Agent's filesystem (Ephemeral in serverless)
+      rootDir: './.tgp',
+
+      // 1. BACKEND (GitOps)
+      // Essential for Serverless/Ephemeral environments.
+      // The Agent pulls state from here and pushes new tools here.
+      git: {
+        provider: 'github', // or 'gitlab', 'bitbucket'
+        repo: 'my-org/tgp-tools',
+        branch: 'main',
+        auth: {
+          // Why not in config? Because we read from ENV for security.
+          token: process.env.TGP_GITHUB_TOKEN,
+          user: 'tgp-bot[bot]',
+          email: 'tgp-bot@users.noreply.github.com'
+        },
+        // Strategy: 'direct' (push) or 'pr' (pull request)
+        writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
+      },
+
+      // 2. FILESYSTEM JAIL
+      fs: {
+        allowedDirs: ['./public/exports', './tmp'],
+        blockUpwardTraversal: true
+      },
+
+      // 3. RUNTIME
+      allowedImports: ['@tgp/std', 'zod', 'date-fns'],
+
+      // 4. NETWORKING
+      // Whitelist of URL prefixes the sandbox fetch can access.
+      // e.g. allowedFetchUrls: ['https://api.stripe.com', 'https://api.github.com']
+      allowedFetchUrls: []
+    });
+    `;
+  src/kernel/core.ts: |-
+    /* eslint-disable no-console */
+    import { TGPConfig, Logger } from '../types.js';
+    import { VFSAdapter } from '../vfs/types.js';
+    import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+    import { createRegistry, Registry } from './registry.js';
+
+    // We inject the platform-specific environment dependencies here.
+    // This allows the Kernel to run in Node, Edge, or Browser environments.
+    export interface KernelEnvironment extends GitDependencies {
+      // We can extend this if Kernel needs more platform specific components later
+    }
+
+    export interface KernelOptions {
+      config: TGPConfig;
+      vfs: VFSAdapter; 
+      env: KernelEnvironment;
+      logger?: Logger;
+      sandboxAPI?: Record<string, any>;
+    }
+
+    export interface Kernel {
+      boot(): Promise<void>;
+      shutdown(): Promise<void>;
+      config: TGPConfig;
+      vfs: VFSAdapter;
+      git: GitBackend;
+      registry: Registry;
+      logger: Logger;
+      sandboxAPI: Record<string, any>;
+    }
+
+    const defaultLogger: Logger = {
+      debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
+      info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
+      warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
+      error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
+    };
+
+    /**
+     * Factory to create a TGP Kernel.
+     * This wires up the configuration, the filesystem, and the git backend.
+     */
+    export function createKernel(opts: KernelOptions): Kernel {
+      const { config, vfs, env, sandboxAPI } = opts;
+      const logger = opts.logger ?? defaultLogger;
+      
+      const git = createGitBackend(env, config, logger);
+      const registry = createRegistry(vfs);
+      const api = sandboxAPI || {};
+
+      let isBooted = false;
+
+      return {
+        config,
+        vfs,
+        git,
+        registry,
+        logger,
+        sandboxAPI: api,
+
+        async boot() {
+          if (isBooted) return;
+          logger.info(`Kernel booting...`);
+          
+          try {
+            // Hydrate the filesystem from Git
+            await git.hydrate().catch(err => {
+              logger.error(`Git hydration failed.`, err);
+              throw err;
+            });
+            
+            // Hydrate registry from meta.json
+            await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
+            
+            isBooted = true;
+            logger.info(`Kernel ready.`);
+          } catch (error) {
+            logger.error(`Boot failed:`, error);
+            throw error;
+          }
+        },
+
+        async shutdown() {
+          logger.info(`Kernel shutting down...`);
+          // Cleanup tasks (close db connections, etc) can go here
+          isBooted = false;
+        }
+      };
+    }
+  src/sandbox/bridge.ts: >-
+    /* eslint-disable no-console */
+
+    import { Kernel } from '../kernel/core.js';
+
+    import * as path from 'path';
+
+    import { TGPConfig } from '../types.js';
+
+
+    export interface SandboxBridgeOptions {
+      kernel: {
+        vfs: Kernel['vfs'];
+        config: TGPConfig;
+        sandboxAPI: Kernel['sandboxAPI'];
+      };
+      onLog?: (message: string) => void;
+    }
+
+
+    /**
+     * Creates the Bridge Object exposed to the Sandbox.
+     * This maps secure Kernel methods to the Guest environment.
+     * 
+     * We expose a structured 'tgp' object to the guest.
+     */
+    export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions)
+    {
+      const { vfs, config } = kernel;
+      const { allowedDirs } = config.fs || { allowedDirs: [] };
+      const { allowedFetchUrls } = config;
+
+      const isAllowedWrite = (target: string): boolean => {
+        // Normalize target to ensure clean comparison (remove leading ./, etc)
+        const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
+        
+        return allowedDirs.some(dir => {
+          const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
+          // Check if target is inside the allowed dir
+          return normalizedTarget.startsWith(normalizedDir);
+        });
+      };
+
+      return {
+        tgp: {
+          // --- Filesystem Bridge (Jailed) ---
+          read_file: async (path: string) => {
+            return vfs.readFile(path);
+          },
+
+          write_file: async (path: string, content: string) => {
+            if (!isAllowedWrite(path)) {
+              throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
+            }
+            return vfs.writeFile(path, content);
+          },
+
+          list_files: async (dir: string) => {
+            return vfs.listFiles(dir, false);
+          },
+
+          // --- Network Bridge (Allowed Only) ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          fetch: async (url: string, init?: any) => {
+            // Security: Enforce URL allow-list
+            if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
+              throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
+            }
+            const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
+            if (!isAllowed) {
+              throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
+            }
+
+            const response = await fetch(url, init);
+
+            // Return a serializable, safe subset of the Response object.
+            // The methods must be wrapped to be transferred correctly.
+            return {
+              status: response.status,
+              statusText: response.statusText,
+              headers: Object.fromEntries(response.headers.entries()),
+              text: () => response.text(),
+              json: () => response.json(),
+            };
+          },
+
+          // --- Logger ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          log: (...args: any[]) => {
+            const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+            if (onLog) {
+                onLog(msg);
+            } else {
+                console.log('[TGP-TOOL]', msg);
+            }
+          },
+
+          // --- Dynamic API Injection ---
+          ...kernel.sandboxAPI
+        }
+      };
+    }
+  src/sandbox/isolate.ts: |-
+    import type * as IVM from 'isolated-vm';
+    import { transform } from 'esbuild';
+    import * as vm from 'node:vm';
+
+    /**
+     * Configuration for the V8 Sandbox.
+     */
+    export interface SandboxOptions {
+      memoryLimitMb?: number; // Default 128MB
+      timeoutMs?: number;     // Default 5000ms
+    }
+
+    export interface Sandbox {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+      dispose: () => void;
+    }
+
+    /**
+     * Creates a secure V8 Isolate.
+     * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
+     */
+    export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+      const memoryLimit = opts.memoryLimitMb ?? 128;
+      const timeout = opts.timeoutMs ?? 5000;
+
+      let isolate: IVM.Isolate | undefined;
+      let useFallback = false;
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async compileAndRun(tsCode: string, context: Record<string, any>) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let ivm: any;
+          try {
+            // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+            ivm = (await import('isolated-vm')).default;
+          } catch {
+            useFallback = true;
+          }
+
+          // 1. JIT Compile (TypeScript -> JavaScript)
+          // We use esbuild for speed.
+          const transformed = await transform(tsCode, {
+            loader: 'ts',
+            format: 'cjs', // CommonJS ensures simple execution in V8
+            target: 'es2020',
+          });
+
+          const jsCode = transformed.code;
+
+          if (useFallback) {
+             // --- Node.js VM Fallback ---
+             const sandboxContext = vm.createContext({ ...context });
+             // Setup global self-reference
+             sandboxContext.global = sandboxContext;
+             
+             try {
+                 const script = new vm.Script(jsCode);
+                 return script.runInContext(sandboxContext, { timeout });
+             } catch (e) {
+                 throw e;
+             }
+          }
+
+          // Initialize isolate if not already created (reuse across executions)
+          isolate ??= new ivm.Isolate({ memoryLimit });
+
+          // 2. Create a fresh Context for this execution
+          // We use '!' because we know isolate is defined if useFallback is false.
+          const ivmContext = await isolate!.createContext();
+
+          try {
+            // 3. Bridge the Global Scope (Host -> Guest)
+            const jail = ivmContext.global;
+            
+            // Inject the 'tgp' global object which holds our bridge
+            await jail.set('global', jail.derefInto()); // standard polyfill
+
+            // Inject Context
+            for (const [key, value] of Object.entries(context)) {
+                // Special handling for the 'tgp' namespace object
+                if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                    // Initialize the namespace in the guest
+                    await isolate!.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
+                    const tgpHandle = await jail.get('tgp');
+                    
+                    // Populate the namespace
+                    for (const [subKey, subValue] of Object.entries(value)) {
+                        if (typeof subValue === 'function') {
+                           // Functions must be passed by Reference
+                           await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                        } else {
+                           // Values are copied
+                           await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                        }
+                    }
+                } 
+                // Handle top-level functions (like __tgp_load_module)
+                else if (typeof value === 'function') {
+                  await jail.set(key, new ivm.Reference(value));
+                } 
+                // Handle standard values
+                else {
+                  await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                }
+            }
+
+            // 4. Compile the Script inside the Isolate
+            const script = await isolate!.compileScript(jsCode);
+
+            // 5. Execute
+            const result = await script.run(ivmContext, { timeout });
+            
+            // 6. Return result (Unwrap from IVM)
+            if (typeof result === 'object' && result !== null && 'copy' in result) {
+                // If it's a reference, try to copy it out, otherwise return as is
+                return result.copy();
+            }
+            return result;
+
+          } finally {
+            // Cleanup the context to free memory immediately
+            ivmContext.release();
+          }
+        },
+
+        dispose() {
+          if (isolate && !isolate.isDisposed) {
+            isolate.dispose();
+          }
+        }
+      };
+    }
+approved: true
+linesAdded: 37
+linesRemoved: 15
+linesDifference: 52
+gitCommittedAt: null
+status: committed
+id: 53

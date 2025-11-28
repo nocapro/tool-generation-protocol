@@ -49,7 +49,7 @@ export function createFsTools(kernel: Kernel) {
         await kernel.registry.register(path, content);
 
         // Persist to Git (Tool + meta.json)
-        await kernel.git.persist(`Forge: ${path}`, [path, 'meta.json']);
+        await kernel.git.persist(`Forge: ${path}`, [path]);
 
         return { success: true, path, persisted: true };
       },
@@ -74,7 +74,7 @@ export function createFsTools(kernel: Kernel) {
         // Update registry in case descriptions changed
         await kernel.registry.register(path, newContent);
 
-        await kernel.git.persist(`Refactor: ${path}`, [path, 'meta.json']);
+        await kernel.git.persist(`Refactor: ${path}`, [path]);
 
         return { success: true, path, persisted: true };
       },

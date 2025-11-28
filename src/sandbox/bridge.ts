@@ -7,6 +7,7 @@ export interface SandboxBridgeOptions {
   kernel: {
     vfs: Kernel['vfs'];
     config: TGPConfig;
+    sandboxAPI: Kernel['sandboxAPI'];
   };
   onLog?: (message: string) => void;
 }
@@ -85,7 +86,10 @@ export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
         } else {
             console.log('[TGP-TOOL]', msg);
         }
-      }
+      },
+
+      // --- Dynamic API Injection ---
+      ...kernel.sandboxAPI
     }
   };
 }

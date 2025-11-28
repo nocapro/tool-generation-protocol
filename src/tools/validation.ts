@@ -79,7 +79,7 @@ export function createValidationTools(kernel: Kernel) {
             // [Standard 1] No Magic Numbers
             if (ts.isNumericLiteral(node)) {
                 const val = parseFloat(node.text);
-                const allowed = [0, 1, -1, 100, 1000]; 
+                const allowed = [0, 1, 2, -1, 100, 1000]; 
                 if (!allowed.includes(val)) {
                     // Filter out array indices? Hard to detect without type checker.
                     // We enforce strictness: abstract data to args.
