@@ -3,7 +3,7 @@ import * as http from 'isomorphic-git/http/node';
 import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
 import { loadTGPConfig } from './config.js';
 import { createNodeVFS } from './vfs/node.js';
-import { TGPConfigSchema, TGPConfig, Logger, DBBackend } from './types.js';
+import { TGPConfigSchema, TGPConfig, Logger } from './types.js';
 import { VFSAdapter } from './vfs/types.js';
 import { GitBackend } from './kernel/git.js';
 import { Registry } from './kernel/registry.js';
@@ -26,11 +26,6 @@ export interface TGPOptions {
    * Inject a custom logger. Defaults to console.
    */
   logger?: Logger;
-
-  /**
-   * Inject a custom Database Backend.
-   */
-  db?: DBBackend;
 
   /**
    * Override the raw filesystem used by Git.
@@ -56,7 +51,6 @@ export class TGP implements Kernel {
   public config: TGPConfig;
   public vfs: VFSAdapter;
   public git: GitBackend;
-  public db: DBBackend;
   public registry: Registry;
   public logger: Logger;
   
@@ -83,12 +77,10 @@ export class TGP implements Kernel {
       config: this.config,
       vfs: this.vfs,
       env,
-      logger: opts.logger,
-      db: opts.db
+      logger: opts.logger
     });
 
     this.git = kernel.git;
-    this.db = kernel.db;
     this.registry = kernel.registry;
     this.logger = kernel.logger;
   }
@@ -123,12 +115,10 @@ export class TGP implements Kernel {
         config: this.config,
         vfs: this.vfs,
         env,
-        logger: this.opts.logger,
-        db: this.opts.db
+        logger: this.opts.logger
       });
       
       this.git = kernel.git;
-      this.db = kernel.db;
       this.registry = kernel.registry;
 
       // 4. Hydrate State (Git Clone/Pull + Registry Build)
@@ -161,6 +151,7 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 1.  **Reuse or Forge**: Check if a tool exists. If not, write it.
 2.  **No One-Offs**: Do not execute arbitrary scripts. Create a reusable tool in 'tools/'.
 3.  **Strict Typing**: All tools must be written in TypeScript. No 'any', no 'unknown'.
+4.  **Database Interaction**: You MUST use the 'exec_sql' tool to interact with the database. Do not write tools that attempt to connect to a database themselves.
 
 # CODING STANDARDS (The 8 Commandments)
 
@@ -182,20 +173,4 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 5.  Use exec_tool to run it.
 `;
   }
-}
-
-/**
- * Legacy Factory to create a TGP Kernel (Backward Compatibility).
- */
-export async function createTGP(opts: TGPOptions = {}): Promise<Kernel> {
-  const tgp = new TGP(opts);
-  await tgp.boot();
-  return tgp;
-}
-
-/**
- * Helper to get the system prompt (Backward Compatibility).
- */
-export function getSystemPrompt(): string {
-  return new TGP().getSystemPrompt();
 }

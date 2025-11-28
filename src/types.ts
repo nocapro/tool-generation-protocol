@@ -14,12 +14,6 @@ export const GitConfigSchema = z.object({
   writeStrategy: z.enum(['direct', 'pr']).default('direct'),
 });
 
-// --- Database Configuration Schema ---
-export const DBConfigSchema = z.object({
-  dialect: z.enum(['postgres', 'mysql', 'sqlite', 'libsql']),
-  ddlSource: z.string().optional().describe("Command to generate DDL, e.g., 'drizzle-kit generate'"),
-});
-
 // --- Filesystem Jail Schema ---
 export const FSConfigSchema = z.object({
   allowedDirs: z.array(z.string()).default(['./tmp']),
@@ -29,17 +23,16 @@ export const FSConfigSchema = z.object({
 // --- Main TGP Configuration Schema ---
 export const TGPConfigSchema = z.object({
   rootDir: z.string().default('./.tgp'),
-  db: DBConfigSchema.optional(),
   git: GitConfigSchema,
   fs: FSConfigSchema.default({}),
   allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+  allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
 });
 
 // --- Inferred Static Types ---
 // We export these so the rest of the app relies on the Zod inference, 
 // ensuring types and validation never drift apart.
 export type GitConfig = z.infer<typeof GitConfigSchema>;
-export type DBConfig = z.infer<typeof DBConfigSchema>;
 export type FSConfig = z.infer<typeof FSConfigSchema>;
 export type TGPConfig = z.infer<typeof TGPConfigSchema>;
 
@@ -71,27 +64,4 @@ export interface Logger {
   info(message: string, ...args: any[]): void;
   warn(message: string, ...args: any[]): void;
   error(message: string, ...args: any[]): void;
-}
-
-/**
- * The Database Kernel Interface.
- *
- * TGP guarantees that all tool executions happen within a transaction.
- * If the tool throws, the transaction is rolled back.
- * This interface must be implemented by the host application and injected into the TGP Kernel.
- */
-export interface DBBackend {
-  /**
-   * Executes a raw SQL query.
-   * @param sql The SQL query string.
-   * @param params Parameter substitutions.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  query(sql: string, params?: any[]): Promise<any[]>;
-
-  /**
-   * Wraps a function in a database transaction.
-   * @param fn The function to execute. It receives a transactional DB instance.
-   */
-  transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
 }
