@@ -32,6 +32,9 @@ src/
   tgp.ts
   types.ts
 test/
+  docker/
+    npm-compat.test.ts
+    utils.ts
   e2e/
     scenarios.test.ts
     utils.ts
@@ -55,6 +58,306 @@ tsup.config.ts
 ```
 
 # Files
+
+## File: test/docker/npm-compat.test.ts
+````typescript
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import { createTarball, Container } from './utils.js';
+
+// Define the root of the project
+const projectRoot = path.resolve(__dirname, '../../');
+
+// Modified utils.ts to be injected into the container
+// This ensures tests use the installed package 'tool-generation-protocol' 
+// instead of trying to resolve local paths or dist/ folders.
+const CONTAINER_UTILS_TS = `
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { spawn, execSync } from 'node:child_process';
+
+const tempDirs: string[] = [];
+
+export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
+  const tmpDir = os.tmpdir();
+  const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+export async function cleanupDir(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+export async function initBareRepo(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  execSync(\`git init --bare\`, { cwd: dir, stdio: 'ignore' });
+  const initDir = await createTempDir('tgp-init-');
+  execSync(\`git init\`, { cwd: initDir, stdio: 'ignore' });
+  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
+  execSync(\`git add .\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git commit -m "Initial commit"\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git remote add origin \${dir}\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git push origin master:main\`, { cwd: initDir, stdio: 'ignore' });
+  await cleanupDir(initDir);
+  execSync(\`git symbolic-ref HEAD refs/heads/main\`, { cwd: dir, stdio: 'ignore' });
+}
+
+export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
+    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
+    const remotePath = remoteRepo.split(path.sep).join('/');
+    const allowedDir = workDir.split(path.sep).join('/');
+
+    // OVERRIDE: Use the package name directly for imports
+    const configContent = \`
+import { defineTGPConfig } from 'tool-generation-protocol';
+
+export default defineTGPConfig({
+  rootDir: '\${rootDir}',
+  git: {
+    provider: 'local',
+    repo: '\${remotePath}',
+    branch: 'main',
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+  },
+  fs: {
+    allowedDirs: ['\${allowedDir}', '\${os.tmpdir().split(path.sep).join('/')}'],
+    blockUpwardTraversal: false
+  },
+  allowedImports: ['zod', 'date-fns']
+});
+\`;
+    const configPath = path.join(workDir, fileName);
+    await fs.writeFile(configPath, configContent);
+    return configPath;
+}
+
+export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
+    return new Promise(async (resolve) => {
+        // OVERRIDE: Use bunx tgp to execute the installed binary
+        const proc = spawn('bunx', ['tgp', ...args], {
+            cwd,
+            env: { ...process.env, NODE_ENV: 'test' }
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.stderr.on('data', d => stderr += d.toString());
+
+        proc.on('close', (code) => {
+            resolve({ stdout, stderr, code: code ?? -1 });
+        });
+    });
+}
+
+process.on('exit', () => {
+    tempDirs.forEach(d => {
+        try { execSync(\`rm -rf \${d}\`); } catch {}
+    });
+});
+`;
+
+describe('Docker: NPM Compatibility', () => {
+  let tarballPath: string;
+  let container: Container;
+  
+  // High timeout for Docker operations
+  const TIMEOUT = 120000; 
+
+  beforeAll(async () => {
+    // 1. Build the Tarball from source
+    console.log('[Docker] Building NPM Tarball...');
+    tarballPath = await createTarball(projectRoot);
+    console.log(`[Docker] Tarball created at: ${tarballPath}`);
+  });
+
+  beforeEach(async () => {
+    // 2. Start a fresh container
+    container = new Container('oven/bun:1');
+    await container.start();
+    console.log(`[Docker] Container started: ${container.id}`);
+  });
+
+  afterEach(async () => {
+    if (container) await container.stop();
+  });
+
+  afterAll(async () => {
+    // Cleanup the local tarball
+    if (tarballPath) await fs.rm(tarballPath, { force: true });
+  });
+
+  it('installs and runs E2E scenarios correctly', async () => {
+    // 3. Prepare Environment inside Container
+    console.log('[Docker] Installing dependencies (git)...');
+    await container.exec(['apt-get', 'update']);
+    await container.exec(['apt-get', 'install', '-y', 'git']);
+    
+    // Configure Git (required for TGP tests)
+    await container.exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
+    await container.exec(['git', 'config', '--global', 'user.name', 'Test User']);
+
+    // 4. Setup Test Project
+    await container.exec(['mkdir', '-p', '/app']);
+    
+    // Copy tarball
+    console.log('[Docker] Copying artifacts...');
+    await container.cp(tarballPath, '/app/tgp.tgz');
+    
+    // Copy tests (We only copy e2e as those are the consumer-facing tests)
+    await container.exec(['mkdir', '-p', '/app/test']);
+    await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
+
+    // Initialize Project & Install Package
+    console.log('[Docker] Installing package...');
+    await container.exec(['bun', 'init', '-y'], { cwd: '/app' });
+    await container.exec(['bun', 'add', './tgp.tgz'], { cwd: '/app' });
+    // Install dev dependencies needed for the tests themselves
+    await container.exec(['bun', 'add', '-d', 'bun-types'], { cwd: '/app' });
+
+    // 5. Patch Test Files
+    console.log('[Docker] Patching tests to use installed package...');
+    
+    // Inject the Utils Override
+    const utilsOverridePath = path.join(os.tmpdir(), 'utils_override.ts');
+    await fs.writeFile(utilsOverridePath, CONTAINER_UTILS_TS);
+    await container.cp(utilsOverridePath, '/app/test/e2e/utils.ts');
+    
+    // Patch scenarios.test.ts to import from 'tool-generation-protocol' instead of relative paths
+    // Regex matches ../../src/... paths
+    const sedCmd = `sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" /app/test/e2e/scenarios.test.ts`;
+    await container.exec(['bash', '-c', sedCmd]);
+
+    // 6. Run Tests
+    console.log('[Docker] Running Tests...');
+    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts'], { cwd: '/app' });
+    
+    if (res.exitCode !== 0) {
+        console.error('STDOUT:', res.stdout);
+        console.error('STDERR:', res.stderr);
+    }
+
+    expect(res.exitCode).toBe(0);
+    expect(res.stdout).toContain('passed');
+  }, TIMEOUT);
+});
+````
+
+## File: test/docker/utils.ts
+````typescript
+import { spawn, spawnSync, execSync } from 'node:child_process';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
+
+/**
+ * Creates an NPM tarball from the current project directory.
+ * Ensures a fresh build is present before packing.
+ * Returns the absolute path to the generated .tgz file.
+ */
+export async function createTarball(cwd: string): Promise<string> {
+  // Ensure we have a clean build. 'npm pack' relies on the presence of dist/ 
+  // if 'dist' is in the 'files' list in package.json.
+  try {
+      execSync('npm run build', { cwd, stdio: 'inherit' });
+  } catch (e) {
+      throw new Error('Build failed before packing');
+  }
+
+  const res = spawnSync('npm', ['pack'], { cwd, encoding: 'utf-8' });
+  
+  if (res.error) throw res.error;
+  if (res.status !== 0) throw new Error(`npm pack failed: ${res.stderr}`);
+  
+  // npm pack outputs the filename on stdout (e.g., tool-generation-protocol-0.0.1.tgz)
+  const filename = res.stdout.trim().split('\n').pop()?.trim();
+  if (!filename) throw new Error('Could not determine tarball filename from npm pack output');
+  
+  return path.resolve(cwd, filename);
+}
+
+/**
+ * A simple wrapper around Docker CLI to manage a test container.
+ */
+export class Container {
+  id: string | null = null;
+
+  constructor(public image: string) {}
+
+  /**
+   * Starts the container in detached mode with TTY to keep it alive.
+   */
+  async start(): Promise<void> {
+    const res = spawnSync('docker', ['run', '-d', '--rm', '-t', this.image, 'bash'], { encoding: 'utf-8' });
+    if (res.status !== 0) {
+        throw new Error(`Failed to start container: ${res.stderr}`);
+    }
+    this.id = res.stdout.trim();
+  }
+
+  /**
+   * Executes a command inside the container.
+   */
+  async exec(cmd: string[], opts: { cwd?: string, env?: Record<string, string> } = {}): Promise<{ stdout: string, stderr: string, exitCode: number }> {
+    if (!this.id) throw new Error('Container not started');
+    
+    const args = ['exec'];
+    if (opts.cwd) {
+        args.push('-w', opts.cwd);
+    }
+    if (opts.env) {
+        for (const [k, v] of Object.entries(opts.env)) {
+            args.push('-e', `${k}=${v}`);
+        }
+    }
+    args.push(this.id);
+    args.push(...cmd);
+
+    return new Promise((resolve, reject) => {
+        const proc = spawn('docker', args);
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.stderr.on('data', d => stderr += d.toString());
+
+        proc.on('close', (code) => {
+            resolve({ stdout, stderr, exitCode: code ?? -1 });
+        });
+        
+        proc.on('error', (err) => reject(err));
+    });
+  }
+
+  /**
+   * Copies a file or directory from the host to the container.
+   */
+  async cp(src: string, dest: string): Promise<void> {
+      if (!this.id) throw new Error('Container not started');
+      try {
+          execSync(`docker cp "${src}" "${this.id}:${dest}"`);
+      } catch (e: any) {
+          throw new Error(`Failed to copy ${src} to ${dest}: ${e.message}`);
+      }
+  }
+
+  /**
+   * Stops the container (which auto-removes it due to --rm).
+   */
+  async stop(): Promise<void> {
+    if (this.id) {
+        try {
+            execSync(`docker stop -t 0 ${this.id}`, { stdio: 'ignore' });
+        } catch {}
+        this.id = null;
+    }
+  }
+}
+````
 
 ## File: src/config.ts
 ````typescript
@@ -1246,97 +1549,6 @@ export default [
 ];
 ````
 
-## File: src/tools/fs.ts
-````typescript
-import { z } from 'zod';
-import { Kernel } from '../kernel/core.js';
-import { AgentTool } from './types.js';
-
-export const ListFilesParams = z.object({
-  dir: z.string().describe('The relative directory path to list (e.g., "tools" or "tools/analytics")'),
-});
-
-export const ReadFileParams = z.object({
-  path: z.string().describe('The relative path to the file to read'),
-});
-
-export const WriteFileParams = z.object({
-  path: z.string().describe('The relative path where the file should be written'),
-  content: z.string().describe('The full content of the file'),
-});
-
-export const PatchFileParams = z.object({
-  path: z.string().describe('The relative path to the file to patch'),
-  search: z.string().describe('The exact string content to find'),
-  replace: z.string().describe('The string content to replace it with'),
-});
-
-export function createFsTools(kernel: Kernel) {
-  return {
-    list_files: {
-      description: 'Recursively list available tools or definitions in the VFS.',
-      parameters: ListFilesParams,
-      inputSchema: ListFilesParams,
-      execute: async ({ dir }) => {
-        return kernel.vfs.listFiles(dir, true);
-      },
-    } as AgentTool<typeof ListFilesParams, string[]>,
-
-    read_file: {
-      description: 'Read the content of an existing tool or file.',
-      parameters: ReadFileParams,
-      inputSchema: ReadFileParams,
-      execute: async ({ path }) => {
-        return kernel.vfs.readFile(path);
-      },
-    } as AgentTool<typeof ReadFileParams, string>,
-
-    write_file: {
-      description: 'Create a new tool or overwrite a draft. Ensures parent directories exist.',
-      parameters: WriteFileParams,
-      inputSchema: WriteFileParams,
-      execute: async ({ path, content }) => {
-        await kernel.vfs.writeFile(path, content);
-
-        // Register the new tool in the Registry (updates meta.json)
-        await kernel.registry.register(path, content);
-
-        // Persist to Git (Tool + meta.json)
-        await kernel.git.persist(`Forge: ${path}`, [path]);
-
-        return { success: true, path, persisted: true };
-      },
-    } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
-
-    patch_file: {
-      description: 'Surgical search-and-replace for refactoring code.',
-      parameters: PatchFileParams,
-      inputSchema: PatchFileParams,
-      execute: async ({ path, search, replace }) => {
-        const content = await kernel.vfs.readFile(path);
-
-        if (!content.includes(search)) {
-          throw new Error(`Patch failed: Search text not found in '${path}'. Please read the file again to ensure you have the exact content.`);
-        }
-
-        // We replace the first occurrence to be surgical.
-        // If the agent needs global replace, it can do so in a loop or we can expand this tool later.
-        const newContent = content.replace(search, replace);
-
-        await kernel.vfs.writeFile(path, newContent);
-
-        // Update registry in case descriptions changed
-        await kernel.registry.register(path, newContent);
-
-        await kernel.git.persist(`Refactor: ${path}`, [path]);
-
-        return { success: true, path, persisted: true };
-      },
-    } as AgentTool<typeof PatchFileParams, { success: boolean; path: string }>,
-  };
-}
-````
-
 ## File: src/tools/sql.ts
 ````typescript
 import { z } from 'zod';
@@ -1435,6 +1647,105 @@ export function createExecTools(kernel: Kernel) {
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as AgentTool<typeof ExecToolParams, any>,
+  };
+}
+````
+
+## File: src/tools/fs.ts
+````typescript
+import { z } from 'zod';
+import { applyStandardDiff, applySearchReplace } from 'apply-multi-diff';
+import { Kernel } from '../kernel/core.js';
+import { AgentTool } from './types.js';
+
+export const ListFilesParams = z.object({
+  dir: z.string().describe('The relative directory path to list (e.g., "tools" or "tools/analytics")'),
+});
+
+export const ReadFileParams = z.object({
+  path: z.string().describe('The relative path to the file to read'),
+});
+
+export const WriteFileParams = z.object({
+  path: z.string().describe('The relative path where the file should be written'),
+  content: z.string().describe('The full content of the file'),
+});
+
+export const ApplyDiffParams = z.object({
+  path: z.string().describe('The relative path to the file to modify'),
+  diff: z.string().describe('The patch content. Either a standard Unified Diff or a Search/Replace block (<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE).'),
+  start_line: z.number().optional().describe('The 1-based line number to start searching from (for Search/Replace disambiguation).'),
+  end_line: z.number().optional().describe('The 1-based line number to stop searching at (for Search/Replace disambiguation).'),
+});
+
+export function createFsTools(kernel: Kernel) {
+  return {
+    list_files: {
+      description: 'Recursively list available tools or definitions in the VFS.',
+      parameters: ListFilesParams,
+      inputSchema: ListFilesParams,
+      execute: async ({ dir }) => {
+        return kernel.vfs.listFiles(dir, true);
+      },
+    } as AgentTool<typeof ListFilesParams, string[]>,
+
+    read_file: {
+      description: 'Read the content of an existing tool or file.',
+      parameters: ReadFileParams,
+      inputSchema: ReadFileParams,
+      execute: async ({ path }) => {
+        return kernel.vfs.readFile(path);
+      },
+    } as AgentTool<typeof ReadFileParams, string>,
+
+    write_file: {
+      description: 'Create a new tool or overwrite a draft. Ensures parent directories exist.',
+      parameters: WriteFileParams,
+      inputSchema: WriteFileParams,
+      execute: async ({ path, content }) => {
+        await kernel.vfs.writeFile(path, content);
+
+        // Register the new tool in the Registry (updates meta.json)
+        await kernel.registry.register(path, content);
+
+        // Persist to Git (Tool + meta.json)
+        await kernel.git.persist(`Forge: ${path}`, [path]);
+
+        return { success: true, path, persisted: true };
+      },
+    } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
+
+    apply_diff: {
+      description: 'Apply a patch to a file using either Unified Diff format or Search/Replace blocks.',
+      parameters: ApplyDiffParams,
+      inputSchema: ApplyDiffParams,
+      execute: async ({ path, diff, start_line, end_line }) => {
+        const content = await kernel.vfs.readFile(path);
+        
+        let result;
+
+        // Use Search-Replace strategy if the marker is present, otherwise fallback to Standard Diff
+        if (diff.includes('<<<<<<< SEARCH')) {
+          result = applySearchReplace(content, diff, { start_line, end_line });
+        } else {
+          result = applyStandardDiff(content, diff);
+        }
+
+        if (!result.success) {
+          throw new Error(`Failed to apply diff to '${path}': ${result.error?.message ?? 'Unknown error'}`);
+        }
+
+        const newContent = result.content;
+        await kernel.vfs.writeFile(path, newContent);
+
+        // Update registry in case descriptions changed
+        await kernel.registry.register(path, newContent);
+
+        await kernel.git.persist(`Refactor: ${path}`, [path]);
+
+        return { success: true, path, persisted: true };
+      },
+    } as AgentTool<typeof ApplyDiffParams, { success: boolean; path: string }>,
   };
 }
 ````
@@ -2055,6 +2366,185 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
 }
 ````
 
+## File: src/types.ts
+````typescript
+import { z } from 'zod';
+
+// --- Git Configuration Schema ---
+export const GitConfigSchema = z.object({
+  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
+  repo: z.string().min(1, "Repository name is required"),
+  branch: z.string().default('main'),
+  apiBaseUrl: z.string().url().default('https://api.github.com'),
+  auth: z.object({
+    token: z.string().min(1, "Git auth token is required"),
+    user: z.string().default('tgp-bot[bot]'),
+    email: z.string().email().default('tgp-bot@users.noreply.github.com'),
+  }),
+  writeStrategy: z.enum(['direct', 'pr']).default('direct'),
+});
+
+// --- Filesystem Jail Schema ---
+export const FSConfigSchema = z.object({
+  allowedDirs: z.array(z.string()).default(['./tmp']),
+  blockUpwardTraversal: z.boolean().default(true),
+});
+
+// --- Main TGP Configuration Schema ---
+export const TGPConfigSchema = z.object({
+  rootDir: z.string().default('./.tgp'),
+  git: GitConfigSchema.default({
+    provider: 'local',
+    repo: 'local',
+    auth: { token: 'local' },
+  }),
+  fs: FSConfigSchema.default({}),
+  allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+  allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
+});
+
+// --- Inferred Static Types ---
+// We export these so the rest of the app relies on the Zod inference, 
+// ensuring types and validation never drift apart.
+export type GitConfig = z.infer<typeof GitConfigSchema>;
+export type FSConfig = z.infer<typeof FSConfigSchema>;
+export type TGPConfig = z.infer<typeof TGPConfigSchema>;
+
+/**
+ * Defines the structure for a tool file persisted in the VFS.
+ * This is what resides in ./.tgp/tools/
+ */
+export const ToolSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  parameters: z.record(z.unknown()), // JsonSchema
+  code: z.string(), // The raw TypeScript source
+});
+
+export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+export interface ToolMetadata {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface RegistryState {
+  tools: Record<string, ToolMetadata>;
+}
+
+export interface Logger {
+  debug(message: string, ...args: any[]): void;
+  info(message: string, ...args: any[]): void;
+  warn(message: string, ...args: any[]): void;
+  error(message: string, ...args: any[]): void;
+}
+````
+
+## File: src/cli/init.ts
+````typescript
+/* eslint-disable no-console */
+import fs from 'node:fs/promises';
+import path from 'node:path';
+
+export async function initCommand() {
+  const cwd = process.cwd();
+  console.log(`[TGP] Initializing in ${cwd}...`);
+
+  const configPath = path.join(cwd, 'tgp.config.ts');
+  const gitIgnorePath = path.join(cwd, '.gitignore');
+  const tgpDir = path.join(cwd, '.tgp');
+  const toolsDir = path.join(tgpDir, 'tools');
+  const binDir = path.join(tgpDir, 'bin');
+  const metaPath = path.join(tgpDir, 'meta.json');
+
+  // 1. Create tgp.config.ts
+  if (await exists(configPath)) {
+    console.log(`[TGP] tgp.config.ts already exists. Skipping.`);
+  } else {
+    await fs.writeFile(configPath, CONFIG_TEMPLATE.trim());
+    console.log(`[TGP] Created tgp.config.ts`);
+  }
+
+  // 2. Update .gitignore
+  if (await exists(gitIgnorePath)) {
+    const content = await fs.readFile(gitIgnorePath, 'utf-8');
+    if (!content.includes('.tgp')) {
+      await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n.tgp/meta.json\n');
+      console.log(`[TGP] Added .tgp to .gitignore`);
+    }
+  } else {
+    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n.tgp/meta.json\n');
+    console.log(`[TGP] Created .gitignore`);
+  }
+
+  // 3. Create .tgp directory (just to be nice)
+  await fs.mkdir(tgpDir, { recursive: true });
+
+  // 4. Scaffold Tools directory
+  await fs.mkdir(toolsDir, { recursive: true });
+  await fs.mkdir(binDir, { recursive: true });
+  console.log(`[TGP] Created .tgp/tools and .tgp/bin directories`);
+
+  // 5. Initialize Registry (meta.json)
+  if (!await exists(metaPath)) {
+    await fs.writeFile(metaPath, JSON.stringify({ tools: {} }, null, 2));
+    console.log(`[TGP] Created .tgp/meta.json`);
+  }
+
+  console.log(`[TGP] Initialization complete. Run 'npx tgp' to start hacking.`);
+}
+
+async function exists(p: string) {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const CONFIG_TEMPLATE = `
+import { defineTGPConfig } from 'tool-generation-protocol';
+
+export default defineTGPConfig({
+  // The Root of the Agent's filesystem (Ephemeral in serverless)
+  rootDir: './.tgp',
+
+  // 1. BACKEND (GitOps)
+  // Essential for Serverless/Ephemeral environments.
+  // The Agent pulls state from here and pushes new tools here.
+  git: {
+    provider: 'github', // or 'gitlab', 'bitbucket'
+    repo: 'my-org/tgp-tools',
+    branch: 'main',
+    auth: {
+      // Why not in config? Because we read from ENV for security.
+      token: process.env.TGP_GITHUB_TOKEN,
+      user: 'tgp-bot[bot]',
+      email: 'tgp-bot@users.noreply.github.com'
+    },
+    // Strategy: 'direct' (push) or 'pr' (pull request)
+    writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
+  },
+
+  // 2. FILESYSTEM JAIL
+  fs: {
+    allowedDirs: ['./public/exports', './tmp'],
+    blockUpwardTraversal: true
+  },
+
+  // 3. RUNTIME
+  allowedImports: ['@tgp/std', 'zod', 'date-fns'],
+
+  // 4. NETWORKING
+  // Whitelist of URL prefixes the sandbox fetch can access.
+  // e.g. allowedFetchUrls: ['https://api.stripe.com', 'https://api.github.com']
+  allowedFetchUrls: []
+});
+`;
+````
+
 ## File: src/tgp.ts
 ````typescript
 import * as fs from 'node:fs';
@@ -2240,85 +2730,11 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 1.  List files to see what you have.
 2.  Read file content to understand the tool.
 3.  If missing, write_file to create a new tool.
-4.  Use check_tool to validate syntax.
-5.  Use exec_tool to run it.
+4.  If buggy, apply_diff to fix it (Search/Replace or Unified Diff).
+5.  Use check_tool to validate syntax.
+6.  Use exec_tool to run it.
 `;
   }
-}
-````
-
-## File: src/types.ts
-````typescript
-import { z } from 'zod';
-
-// --- Git Configuration Schema ---
-export const GitConfigSchema = z.object({
-  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
-  repo: z.string().min(1, "Repository name is required"),
-  branch: z.string().default('main'),
-  apiBaseUrl: z.string().url().default('https://api.github.com'),
-  auth: z.object({
-    token: z.string().min(1, "Git auth token is required"),
-    user: z.string().default('tgp-bot[bot]'),
-    email: z.string().email().default('tgp-bot@users.noreply.github.com'),
-  }),
-  writeStrategy: z.enum(['direct', 'pr']).default('direct'),
-});
-
-// --- Filesystem Jail Schema ---
-export const FSConfigSchema = z.object({
-  allowedDirs: z.array(z.string()).default(['./tmp']),
-  blockUpwardTraversal: z.boolean().default(true),
-});
-
-// --- Main TGP Configuration Schema ---
-export const TGPConfigSchema = z.object({
-  rootDir: z.string().default('./.tgp'),
-  git: GitConfigSchema.default({
-    provider: 'local',
-    repo: 'local',
-    auth: { token: 'local' },
-  }),
-  fs: FSConfigSchema.default({}),
-  allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
-  allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
-});
-
-// --- Inferred Static Types ---
-// We export these so the rest of the app relies on the Zod inference, 
-// ensuring types and validation never drift apart.
-export type GitConfig = z.infer<typeof GitConfigSchema>;
-export type FSConfig = z.infer<typeof FSConfigSchema>;
-export type TGPConfig = z.infer<typeof TGPConfigSchema>;
-
-/**
- * Defines the structure for a tool file persisted in the VFS.
- * This is what resides in ./.tgp/tools/
- */
-export const ToolSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  parameters: z.record(z.unknown()), // JsonSchema
-  code: z.string(), // The raw TypeScript source
-});
-
-export type ToolDefinition = z.infer<typeof ToolSchema>;
-
-export interface ToolMetadata {
-  name: string;
-  description: string;
-  path: string;
-}
-
-export interface RegistryState {
-  tools: Record<string, ToolMetadata>;
-}
-
-export interface Logger {
-  debug(message: string, ...args: any[]): void;
-  info(message: string, ...args: any[]): void;
-  warn(message: string, ...args: any[]): void;
-  error(message: string, ...args: any[]): void;
 }
 ````
 
@@ -2450,16 +2866,23 @@ describe('E2E Scenarios', () => {
     const toolName = 'tools/greet.ts';
     await tools.write_file.execute({ 
       path: toolName, 
-      content: `export default function(args: { name: string }) { return "hello " + args.name; }`
+      content: `
+export default function(args: { name: string }) {
+  return "hello " + args.name;
+}
+`
     });
 
     let res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
     expect(res.result).toBe('hello world');
 
-    await tools.patch_file.execute({
+    await tools.apply_diff.execute({
       path: toolName,
-      search: 'return "hello " + args.name;',
-      replace: 'return "greetings " + args.name;'
+      diff: `<<<<<<< SEARCH
+  return "hello " + args.name;
+=======
+  return "greetings " + args.name;
+>>>>>>> REPLACE`
     });
 
     res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
@@ -2678,110 +3101,6 @@ describe('E2E Scenarios', () => {
     expect(metaExists).toBe(true);
   });
 });
-````
-
-## File: src/cli/init.ts
-````typescript
-/* eslint-disable no-console */
-import fs from 'node:fs/promises';
-import path from 'node:path';
-
-export async function initCommand() {
-  const cwd = process.cwd();
-  console.log(`[TGP] Initializing in ${cwd}...`);
-
-  const configPath = path.join(cwd, 'tgp.config.ts');
-  const gitIgnorePath = path.join(cwd, '.gitignore');
-  const tgpDir = path.join(cwd, '.tgp');
-  const toolsDir = path.join(tgpDir, 'tools');
-  const binDir = path.join(tgpDir, 'bin');
-  const metaPath = path.join(tgpDir, 'meta.json');
-
-  // 1. Create tgp.config.ts
-  if (await exists(configPath)) {
-    console.log(`[TGP] tgp.config.ts already exists. Skipping.`);
-  } else {
-    await fs.writeFile(configPath, CONFIG_TEMPLATE.trim());
-    console.log(`[TGP] Created tgp.config.ts`);
-  }
-
-  // 2. Update .gitignore
-  if (await exists(gitIgnorePath)) {
-    const content = await fs.readFile(gitIgnorePath, 'utf-8');
-    if (!content.includes('.tgp')) {
-      await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n.tgp/meta.json\n');
-      console.log(`[TGP] Added .tgp to .gitignore`);
-    }
-  } else {
-    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n.tgp/meta.json\n');
-    console.log(`[TGP] Created .gitignore`);
-  }
-
-  // 3. Create .tgp directory (just to be nice)
-  await fs.mkdir(tgpDir, { recursive: true });
-
-  // 4. Scaffold Tools directory
-  await fs.mkdir(toolsDir, { recursive: true });
-  await fs.mkdir(binDir, { recursive: true });
-  console.log(`[TGP] Created .tgp/tools and .tgp/bin directories`);
-
-  // 5. Initialize Registry (meta.json)
-  if (!await exists(metaPath)) {
-    await fs.writeFile(metaPath, JSON.stringify({ tools: {} }, null, 2));
-    console.log(`[TGP] Created .tgp/meta.json`);
-  }
-
-  console.log(`[TGP] Initialization complete. Run 'npx tgp' to start hacking.`);
-}
-
-async function exists(p: string) {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const CONFIG_TEMPLATE = `
-import { defineTGPConfig } from 'tool-generation-protocol';
-
-export default defineTGPConfig({
-  // The Root of the Agent's filesystem (Ephemeral in serverless)
-  rootDir: './.tgp',
-
-  // 1. BACKEND (GitOps)
-  // Essential for Serverless/Ephemeral environments.
-  // The Agent pulls state from here and pushes new tools here.
-  git: {
-    provider: 'github', // or 'gitlab', 'bitbucket'
-    repo: 'my-org/tgp-tools',
-    branch: 'main',
-    auth: {
-      // Why not in config? Because we read from ENV for security.
-      token: process.env.TGP_GITHUB_TOKEN,
-      user: 'tgp-bot[bot]',
-      email: 'tgp-bot@users.noreply.github.com'
-    },
-    // Strategy: 'direct' (push) or 'pr' (pull request)
-    writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
-  },
-
-  // 2. FILESYSTEM JAIL
-  fs: {
-    allowedDirs: ['./public/exports', './tmp'],
-    blockUpwardTraversal: true
-  },
-
-  // 3. RUNTIME
-  allowedImports: ['@tgp/std', 'zod', 'date-fns'],
-
-  // 4. NETWORKING
-  // Whitelist of URL prefixes the sandbox fetch can access.
-  // e.g. allowedFetchUrls: ['https://api.stripe.com', 'https://api.github.com']
-  allowedFetchUrls: []
-});
-`;
 ````
 
 ## File: src/kernel/core.ts
@@ -3064,7 +3383,7 @@ The Agent is provided with a specific set of primitives to interact with the env
 | **`list_files`** | `(dir: string) => string[]` | Recursively list available tools or definitions. |
 | **`read_file`** | `(path: string) => string` | Read the content of an existing tool or schema. |
 | **`write_file`** | `(path: string, content: string) => void` | Create a new tool or overwrite a draft. |
-| **`patch_file`** | `(path: string, search: string, replace: string) => void` | Surgical search-and-replace for refactoring. |
+| **`apply_diff`** | `(path: string, diff: string) => void` | Apply a Unified Diff or Search/Replace block to a file. |
 | **`check_tool`** | `(path: string) => { valid: boolean, errors: string[] }` | Run the JIT compiler and linter. |
 | **`exec_tool`** | `(path: string, args: object) => any` | Execute a tool inside the secure Sandbox. |
 | **`exec_sql`**   | `(sql: string, params: object) => any` | Executes a raw SQL query against the host database. |
@@ -3103,7 +3422,7 @@ To ensure the ecosystem remains clean, the Agent must adhere to strict code qual
 If a tool fails during execution:
 1.  **Capture**: Agent reads STDERR.
 2.  **Diagnose**: Agent identifies the logic error or schema mismatch.
-3.  **Patch**: Agent uses `patch_file` to fix the code in place.
+3.  **Patch**: Agent uses `apply_diff` to fix the code in place.
 4.  **Verify**: Agent runs `check_tool`.
 
 ---
@@ -3996,12 +4315,13 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
     "tgp": "./bin/tgp.js"
   },
   "dependencies": {
+    "apply-multi-diff": "^0.1.4",
     "esbuild": "^0.19.12",
     "isolated-vm": "^6.0.2",
     "isomorphic-git": "^1.35.1",
+    "typescript": "^5.9.3",
     "zod": "^3.25.76",
-    "zod-to-json-schema": "^3.22.4",
-    "typescript": "^5.9.3"
+    "zod-to-json-schema": "^3.22.4"
   },
   "devDependencies": {
     "tsup": "^8.0.2",
