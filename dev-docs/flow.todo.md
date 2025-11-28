@@ -3,9 +3,21 @@ implement relaycode-core
 
 ===
 
-we need test cases that runs on docker containers to see wether the npm published tgp version has all passed tests. because I dont want to say "it works on my machine" when npm devs user submit issues 
+we need test cases that runs docker containers to see wether the npm published tgp version has all passed tests. because I dont want to say "it works on my machine" when npm devs user submit issues.
 
-=== 
+so my idea is;
+
+1. create the test cases that real use docker containers and exec bash
+2. inside the container, install the tgp npm version
+3. copy host test/ dir to the container
+4. make the copied test/ container import from published npm version 
+5. run test within container, if fail detected then host test fail with knowing what fails
+
+===
+
+prepare for npm publication, along with tsup, but url not available, already taken by https://www.npmjs.com/package/tgp
+
+=== DONE
 
 we need test cases to verify end to end typesafety like tgpTools from '@tgp/core' accepted by import { generateText } from 'ai';
 

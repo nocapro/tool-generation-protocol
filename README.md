@@ -170,7 +170,7 @@ Because TGP relies on Git, your tools are portable.
 
 ## 7.1 The Bootstrap
 ```bash
-npx tgp@latest init
+npx tool-generation-protocol@latest init
 ```
 
 ## 7.2 Configuration (`tgp.config.ts`)
@@ -178,7 +178,7 @@ npx tgp@latest init
 The configuration defines the Sandbox boundaries and the Git backend.
 
 ```typescript
-import { defineTGPConfig } from '@tgp/core';
+import { defineTGPConfig } from 'tool-generation-protocol';
 
 export default defineTGPConfig({
   // The Root of the Agent's filesystem (Ephemeral in serverless)
@@ -220,7 +220,7 @@ export default defineTGPConfig({
 
 ```typescript
 // src/app/api/agent/route.ts
-import { TGP, tgpTools, createSqlTools } from '@tgp/core';
+import { TGP, tgpTools, createSqlTools } from 'tool-generation-protocol';
 import { generateText } from 'ai';
 import { myDbExecutor } from '@/lib/db'; // Your DB connection
 

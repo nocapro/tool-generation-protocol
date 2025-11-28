@@ -60,7 +60,7 @@ async function exists(p: string) {
 }
 
 const CONFIG_TEMPLATE = `
-import { defineTGPConfig } from '@tgp/core';
+import { defineTGPConfig } from 'tool-generation-protocol';
 
 export default defineTGPConfig({
   // The Root of the Agent's filesystem (Ephemeral in serverless)

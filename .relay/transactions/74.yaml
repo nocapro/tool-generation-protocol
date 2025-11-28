@@ -1,0 +1,348 @@
+uuid: e4b2c1d3-8f5e-4a6b-c7d8-e9f0a1b2c3d4
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T10:44:20.766Z'
+gitCommitMsg: >-
+  fix: resolve eslint errors
+
+
+  - src/sandbox/bridge.ts: Suppress no-explicit-any for bridge object, remove
+  redundant null check for sandboxAPI - src/tools/validation.ts: Remove
+  redundant moduleSpecifier check, replace console.error with
+  kernel.logger.error
+promptSummary: >-
+  Fix linting errors in bridge.ts (any type, redundant boolean check) and
+  validation.ts (redundant object check, no-console).
+reasoning:
+  - >-
+    To fix the linting errors identified by `eslint`, I will modify
+    `src/sandbox/bridge.ts` to suppress the `any` type warning and remove the
+    redundant conditional check for `sandboxAPI`. I will also update
+    `src/tools/validation.ts` to remove the redundant `moduleSpecifier`
+    existence check and replace `console.error` with `kernel.logger.error`.
+  - '### Step 1: Fix `src/sandbox/bridge.ts`'
+  - >-
+    I will add an eslint disable comment for the `any` type on `tgpBridge` and
+    remove the `if (kernel.sandboxAPI)` check since `sandboxAPI` is defined as
+    mandatory in the `Kernel` interface.
+  - '### Step 2: Fix `src/tools/validation.ts`'
+  - >-
+    I will simplify the `moduleSpecifier` check (as it is non-nullable in
+    `ImportDeclaration`) and use the kernel logger instead of console.
+operations:
+  - type: write
+    path: src/sandbox/bridge.ts
+    content: |
+      <<<<<<< SEARCH
+        // Build the tgp bridge object with explicit handling of sandboxAPI functions
+        const tgpBridge: Record<string, any> = {
+          // --- Filesystem Bridge (Jailed) ---
+      =======
+        // Build the tgp bridge object with explicit handling of sandboxAPI functions
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const tgpBridge: Record<string, any> = {
+          // --- Filesystem Bridge (Jailed) ---
+      >>>>>>> REPLACE
+      <<<<<<< SEARCH
+        // Explicitly add sandboxAPI functions to preserve their function nature
+        if (kernel.sandboxAPI) {
+          for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
+            tgpBridge[key] = value;
+          }
+        }
+      =======
+        // Explicitly add sandboxAPI functions to preserve their function nature
+        for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
+          tgpBridge[key] = value;
+        }
+      >>>>>>> REPLACE
+    patchStrategy: search-replace
+  - type: write
+    path: src/tools/validation.ts
+    content: |
+      <<<<<<< SEARCH
+                  // [Safety] Restricted Imports
+                  if (ts.isImportDeclaration(node)) {
+                      if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+                          const pkg = node.moduleSpecifier.text;
+                          if (!allowedImports.includes(pkg)) {
+                               errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
+                          }
+                      }
+                  }
+      =======
+                  // [Safety] Restricted Imports
+                  if (ts.isImportDeclaration(node)) {
+                      if (ts.isStringLiteral(node.moduleSpecifier)) {
+                          const pkg = node.moduleSpecifier.text;
+                          if (!allowedImports.includes(pkg)) {
+                               errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
+                          }
+                      }
+                  }
+      >>>>>>> REPLACE
+      <<<<<<< SEARCH
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } catch (error: any) {
+                const msg = error.message ?? String(error);
+                console.error('[Validation Error]', msg);
+                return { valid: false, errors: [msg] };
+              }
+      =======
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } catch (error: any) {
+                const msg = error.message ?? String(error);
+                kernel.logger.error('[Validation Error]', msg);
+                return { valid: false, errors: [msg] };
+              }
+      >>>>>>> REPLACE
+    patchStrategy: search-replace
+snapshot:
+  src/sandbox/bridge.ts: >-
+    /* eslint-disable no-console */
+
+    import { Kernel } from '../kernel/core.js';
+
+    import * as path from 'path';
+
+    import { TGPConfig } from '../types.js';
+
+
+    export interface SandboxBridgeOptions {
+      kernel: {
+        vfs: Kernel['vfs'];
+        config: TGPConfig;
+        sandboxAPI: Kernel['sandboxAPI'];
+      };
+      onLog?: (message: string) => void;
+    }
+
+
+    /**
+     * Creates the Bridge Object exposed to the Sandbox.
+     * This maps secure Kernel methods to the Guest environment.
+     * 
+     * We expose a structured 'tgp' object to the guest.
+     */
+    export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions)
+    {
+      const { vfs, config } = kernel;
+      const { allowedDirs } = config.fs;
+      const { allowedFetchUrls } = config;
+
+      const isAllowedWrite = (target: string): boolean => {
+        // Normalize target to ensure clean comparison (remove leading ./, etc)
+        const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
+
+        return allowedDirs.some(dir => {
+          const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
+          // Check if target is inside the allowed dir
+          return normalizedTarget.startsWith(normalizedDir);
+        });
+      };
+
+      // Build the tgp bridge object with explicit handling of sandboxAPI functions
+      const tgpBridge: Record<string, any> = {
+        // --- Filesystem Bridge (Jailed) ---
+        read_file: async (path: string) => {
+          return vfs.readFile(path);
+        },
+
+        write_file: async (path: string, content: string) => {
+          if (!isAllowedWrite(path)) {
+            throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
+          }
+          return vfs.writeFile(path, content);
+        },
+
+        list_files: async (dir: string) => {
+          return vfs.listFiles(dir, false);
+        },
+
+        // --- Network Bridge (Allowed Only) ---
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        fetch: async (url: string, init?: any) => {
+          // Security: Enforce URL allow-list
+          if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
+            throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
+          }
+          const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
+          if (!isAllowed) {
+            throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
+          }
+
+          const response = await fetch(url, init);
+
+          // Return a serializable, safe subset of the Response object.
+          // The methods must be wrapped to be transferred correctly.
+          return {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            text: () => response.text(),
+            json: () => response.json(),
+          };
+        },
+
+        // --- Logger ---
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        log: (...args: any[]) => {
+          const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+          if (onLog) {
+              onLog(msg);
+          } else {
+              console.log('[TGP-TOOL]', msg);
+          }
+        },
+      };
+
+      // Explicitly add sandboxAPI functions to preserve their function nature
+      if (kernel.sandboxAPI) {
+        for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
+          tgpBridge[key] = value;
+        }
+      }
+
+      return {
+        tgp: tgpBridge
+      };
+    }
+  src/tools/validation.ts: |-
+    import { z } from 'zod';
+    import * as ts from 'typescript';
+    import { Kernel } from '../kernel/core.js';
+    import { AgentTool } from './types.js';
+
+    export const CheckToolParams = z.object({
+      path: z.string().describe('The relative path of the tool to validate'),
+    });
+
+    export function createValidationTools(kernel: Kernel) {
+      return {
+        check_tool: {
+          description: 'Run JIT compilation and AST-based static analysis on a tool.',
+          parameters: CheckToolParams,
+          inputSchema: CheckToolParams,
+          execute: async ({ path }) => {
+            const { allowedImports } = kernel.config;
+            try {
+              const code = await kernel.vfs.readFile(path);
+              
+              // 1. Parse AST
+              // We use ES2020 as target to match the sandbox environment
+              const sourceFile = ts.createSourceFile(
+                path,
+                code,
+                ts.ScriptTarget.ES2020,
+                true
+              );
+
+              const errors: string[] = [];
+
+              // 2. Recursive AST Visitor
+              const visit = (node: ts.Node) => {
+                // [Standard 3] Strict Typing: No 'any'
+                if (node.kind === ts.SyntaxKind.AnyKeyword) {
+                   errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+                }
+
+                // [Safety] Restricted Imports
+                if (ts.isImportDeclaration(node)) {
+                    if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+                        const pkg = node.moduleSpecifier.text;
+                        if (!allowedImports.includes(pkg)) {
+                             errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
+                        }
+                    }
+                }
+
+                // [Safety] No 'eval'
+                if (ts.isCallExpression(node)) {
+                    if (ts.isIdentifier(node.expression) && node.expression.text === 'eval') {
+                        errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+                    }
+                }
+
+                // [Safety] No 'new Function(...)'
+                if (ts.isNewExpression(node)) {
+                    if (ts.isIdentifier(node.expression) && node.expression.text === 'Function') {
+                        errors.push("Violation [Safety]: Dynamic code execution ('Function' constructor) is prohibited.");
+                    }
+                }
+
+                // [Standard 4] Stateless: No process global access (except process.env.NODE_ENV)
+                if (ts.isIdentifier(node) && node.text === 'process') {
+                    // Check context to see if allowed.
+                    // We allow strict access to `process.env.NODE_ENV`.
+                    // AST Structure: PropertyAccess(NODE_ENV) -> PropertyAccess(env) -> Identifier(process)
+                    
+                    let isAllowed = false;
+                    
+                    // Ensure parent is property access 'env'
+                    if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && node.parent.name.text === 'env') {
+                         // Ensure grandparent is property access 'NODE_ENV'
+                         if (ts.isPropertyAccessExpression(node.parent.parent) && node.parent.parent.expression === node.parent && node.parent.parent.name.text === 'NODE_ENV') {
+                             isAllowed = true;
+                         }
+                    }
+                    
+                    if (!isAllowed) {
+                         // We check if this identifier is being used as a property access base or standalone.
+                         // To avoid noise, we only report if it's the base of a property access OR used standalone.
+                         // If it's a property of something else (e.g. myObj.process), parent is PropertyAccess but expression is NOT node.
+                         if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
+                             // This is something.process - Allowed
+                         } else {
+                             errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+                         }
+                    }
+                }
+
+                // [Standard 1] No Magic Numbers
+                if (node.kind === ts.SyntaxKind.NumericLiteral) {
+                    const text = (node as ts.NumericLiteral).text;
+                    const val = Number(text); // Handle hex, etc.
+                    const allowed = [0, 1, 2, -1, 100, 1000];
+                    if (!isNaN(val) && !allowed.includes(val)) {
+                        // Filter out array indices? Hard to detect without type checker.
+                        // We enforce strictness: abstract data to args.
+                        errors.push(`Violation [Standard 1]: Found potential Magic Number '${(node as ts.NumericLiteral).text}'. Abstract logic from data.`);
+                    }
+                }
+
+                // [Standard 7] No Hardcoded Secrets
+                if (ts.isStringLiteral(node)) {
+                    const text = node.text;
+                    // Emails
+                    if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(text)) {
+                         errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+                    }
+                    // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+                    // Must be 24+ chars, alphanumeric mixed, no spaces.
+                    if (/[a-zA-Z0-9-]{24,}/.test(text) && !text.includes(' ')) {
+                         errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+                    }
+                }
+
+                ts.forEachChild(node, visit);
+              };
+
+              visit(sourceFile);
+
+              return { valid: errors.length === 0, errors };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } catch (error: any) {
+              const msg = error.message ?? String(error);
+              console.error('[Validation Error]', msg);
+              return { valid: false, errors: [msg] };
+            }
+          },
+        } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+      };
+    }
+approved: true
+linesAdded: 5
+linesRemoved: 6
+linesDifference: 11
+gitCommittedAt: null
+status: committed
+id: 74

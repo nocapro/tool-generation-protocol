@@ -38,7 +38,7 @@ export function createValidationTools(kernel: Kernel) {
 
             // [Safety] Restricted Imports
             if (ts.isImportDeclaration(node)) {
-                if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+                if (ts.isStringLiteral(node.moduleSpecifier)) {
                     const pkg = node.moduleSpecifier.text;
                     if (!allowedImports.includes(pkg)) {
                          errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
@@ -123,7 +123,7 @@ export function createValidationTools(kernel: Kernel) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (error: any) {
           const msg = error.message ?? String(error);
-          console.error('[Validation Error]', msg);
+          kernel.logger.error('[Validation Error]', msg);
           return { valid: false, errors: [msg] };
         }
       },

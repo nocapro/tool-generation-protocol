@@ -35,6 +35,7 @@ export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
   };
 
   // Build the tgp bridge object with explicit handling of sandboxAPI functions
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tgpBridge: Record<string, any> = {
     // --- Filesystem Bridge (Jailed) ---
     read_file: async (path: string) => {
@@ -90,10 +91,8 @@ export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
   };
 
   // Explicitly add sandboxAPI functions to preserve their function nature
-  if (kernel.sandboxAPI) {
-    for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
-      tgpBridge[key] = value;
-    }
+  for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
+    tgpBridge[key] = value;
   }
 
   return {

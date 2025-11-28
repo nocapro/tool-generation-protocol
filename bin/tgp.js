@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { cli } from '../dist/cli/index.js';
+import { cli } from '../dist/cli.js';
 
 cli().catch((err) => {
   console.error('TGP CLI Error:', err);
