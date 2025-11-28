@@ -1,6 +1,6 @@
 /* eslint-disable no-console */
-import * as fs from 'fs/promises';
-import * as path from 'path';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 
 export async function initCommand() {
   const cwd = process.cwd();
