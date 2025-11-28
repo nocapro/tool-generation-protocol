@@ -181,8 +181,9 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 1.  List files to see what you have.
 2.  Read file content to understand the tool.
 3.  If missing, write_file to create a new tool.
-4.  Use check_tool to validate syntax.
-5.  Use exec_tool to run it.
+4.  If buggy, apply_diff to fix it (Search/Replace or Unified Diff).
+5.  Use check_tool to validate syntax.
+6.  Use exec_tool to run it.
 `;
   }
 }

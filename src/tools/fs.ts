@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { applyStandardDiff, applySearchReplace } from 'apply-multi-diff';
 import { Kernel } from '../kernel/core.js';
 import { AgentTool } from './types.js';
 
@@ -15,10 +16,11 @@ export const WriteFileParams = z.object({
   content: z.string().describe('The full content of the file'),
 });
 
-export const PatchFileParams = z.object({
-  path: z.string().describe('The relative path to the file to patch'),
-  search: z.string().describe('The exact string content to find'),
-  replace: z.string().describe('The string content to replace it with'),
+export const ApplyDiffParams = z.object({
+  path: z.string().describe('The relative path to the file to modify'),
+  diff: z.string().describe('The patch content. Either a standard Unified Diff or a Search/Replace block (<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE).'),
+  start_line: z.number().optional().describe('The 1-based line number to start searching from (for Search/Replace disambiguation).'),
+  end_line: z.number().optional().describe('The 1-based line number to stop searching at (for Search/Replace disambiguation).'),
 });
 
 export function createFsTools(kernel: Kernel) {
@@ -58,21 +60,27 @@ export function createFsTools(kernel: Kernel) {
       },
     } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
 
-    patch_file: {
-      description: 'Surgical search-and-replace for refactoring code.',
-      parameters: PatchFileParams,
-      inputSchema: PatchFileParams,
-      execute: async ({ path, search, replace }) => {
+    apply_diff: {
+      description: 'Apply a patch to a file using either Unified Diff format or Search/Replace blocks.',
+      parameters: ApplyDiffParams,
+      inputSchema: ApplyDiffParams,
+      execute: async ({ path, diff, start_line, end_line }) => {
         const content = await kernel.vfs.readFile(path);
+        
+        let result;
 
-        if (!content.includes(search)) {
-          throw new Error(`Patch failed: Search text not found in '${path}'. Please read the file again to ensure you have the exact content.`);
+        // Use Search-Replace strategy if the marker is present, otherwise fallback to Standard Diff
+        if (diff.includes('<<<<<<< SEARCH')) {
+          result = applySearchReplace(content, diff, { start_line, end_line });
+        } else {
+          result = applyStandardDiff(content, diff);
         }
 
-        // We replace the first occurrence to be surgical.
-        // If the agent needs global replace, it can do so in a loop or we can expand this tool later.
-        const newContent = content.replace(search, replace);
+        if (!result.success) {
+          throw new Error(`Failed to apply diff to '${path}': ${result.error?.message ?? 'Unknown error'}`);
+        }
 
+        const newContent = result.content;
         await kernel.vfs.writeFile(path, newContent);
 
         // Update registry in case descriptions changed
@@ -82,6 +90,6 @@ export function createFsTools(kernel: Kernel) {
 
         return { success: true, path, persisted: true };
       },
-    } as AgentTool<typeof PatchFileParams, { success: boolean; path: string }>,
+    } as AgentTool<typeof ApplyDiffParams, { success: boolean; path: string }>,
   };
 }
