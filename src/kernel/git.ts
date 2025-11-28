@@ -2,6 +2,7 @@
 import * as git from 'isomorphic-git';
 import { TGPConfig, Logger } from '../types.js';
 import * as path from 'path';
+import { spawn } from 'child_process';
 
 /**
  * The Git Interface required by the Kernel.
@@ -91,6 +92,78 @@ class NotImplementedAdapter implements GitPlatformAdapter {
   }
 }
 
+// --- Local Git Implementation (Shell-based) ---
+// Used for E2E testing and Air-gapped environments
+async function execGit(args: string[], cwd: string, logger: Logger): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', args, { cwd, stdio: 'pipe' });
+    let output = '';
+    proc.stdout.on('data', d => output += d.toString());
+    proc.stderr.on('data', d => output += d.toString());
+    
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Git command failed: git ${args.join(' ')} in ${cwd}\nOutput: ${output}`));
+    });
+  });
+}
+
+function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
+  const dir = config.rootDir;
+  const { repo, branch } = config.git;
+
+  return {
+    async hydrate() {
+      const fs = await import('node:fs/promises');
+      const gitDirExists = await fs.stat(path.join(dir, '.git')).then(() => true).catch(() => false);
+      
+      if (!gitDirExists) {
+        logger.info(`[Local] Cloning ${repo} into ${dir}...`);
+        await fs.mkdir(path.dirname(dir), { recursive: true });
+        // Clone needs to happen in parent dir
+        // We assume 'repo' is an absolute path to a bare repo
+        await execGit(['clone', repo, path.basename(dir)], path.dirname(dir), logger);
+        
+        // Ensure we are on correct branch
+        try {
+            await execGit(['checkout', branch], dir, logger);
+        } catch {
+            logger.warn(`[Local] Failed to checkout ${branch}, assuming default.`);
+        }
+      } else {
+        logger.info(`[Local] Pulling latest from ${repo}...`);
+        await execGit(['pull', 'origin', branch], dir, logger);
+      }
+    },
+
+    async persist(message: string, files: string[]) {
+      if (files.length === 0) return;
+      logger.info(`[Local] Persisting ${files.length} files...`);
+      
+      for (const f of files) {
+        await execGit(['add', f], dir, logger);
+      }
+      
+      try {
+        await execGit(['commit', '-m', message], dir, logger);
+      } catch(e) {
+         // Commit might fail if no changes
+         logger.warn(`[Local] Commit failed (empty?):`, String(e));
+         return;
+      }
+
+      try {
+          await execGit(['push', 'origin', branch], dir, logger);
+      } catch (e) {
+          // Handle non-fast-forward by pulling first (simple auto-merge)
+          logger.warn(`[Local] Push failed. Attempting rebase...`);
+          await execGit(['pull', '--rebase', 'origin', branch], dir, logger);
+          await execGit(['push', 'origin', branch], dir, logger);
+      }
+    }
+  };
+}
+
 /**
  * Factory to create the Git Backend based on configuration.
  */
@@ -98,6 +171,10 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
   const dir = config.rootDir;
   const { repo, auth, branch, writeStrategy, apiBaseUrl, provider } = config.git;
   const { fs, http } = deps;
+
+  if (provider === 'local') {
+    return createLocalGitBackend(config, logger);
+  }
 
   // Configuration for isomorphic-git
   const gitOpts = {

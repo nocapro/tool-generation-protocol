@@ -1,0 +1,138 @@
+uuid: 4a2b9d0c-1e6f-47a3-b8c2-0a1f3e7d9c5b
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T02:37:38.360Z'
+gitCommitMsg: >-
+  config: include test files in tsconfig and eslint
+
+  Configures the build system to correctly handle files in the 'test/'
+  directory. This includes adding necessary Vitest globals to ESLint.
+promptSummary: Added the test directory to tsconfig and eslint configurations.
+reasoning:
+  - >-
+    I need to update `tsconfig.json` to include the `test/` directory for
+    compilation/type checking and `eslint.config.js` to define test-specific
+    globals (like `describe`, `it`, `expect`) and apply standard TypeScript
+    rules to test files.
+  - '### 1. Update `tsconfig.json`'
+  - I will add `test/**/*` to the `include` array in `tsconfig.json`.
+  - '### 2. Update `eslint.config.js`'
+  - >-
+    I will update the primary configuration block to include `test/**/*.ts`
+    files and define the necessary Vitest globals (`describe`, `it`, `expect`,
+    etc.) as readonly globals.
+operations:
+  - type: write
+    path: tsconfig.json
+    content: |
+      --- tsconfig.json
+      +++ tsconfig.json
+      @@ -13,5 +13,5 @@
+           "rootDir": "./src",
+           "declaration": true
+         },
+      -  "include": ["src/**/*"]
+      +  "include": ["src/**/*", "test/**/*"]
+       }
+    patchStrategy: standard-diff
+  - type: write
+    path: eslint.config.js
+    content: |
+      --- eslint.config.js
+      +++ eslint.config.js
+      @@ -4,7 +4,7 @@
+       
+       export default [
+         {
+      -    files: ['src/**/*.ts'],
+      +    files: ['src/**/*.ts', 'test/**/*.ts'],
+           languageOptions: {
+             parser: typescriptParser,
+             parserOptions: {
+      @@ -19,6 +19,11 @@
+               __dirname: 'readonly',
+               __filename: 'readonly',
+               global: 'readonly',
+      +        describe: 'readonly',
+      +        it: 'readonly',
+      +        expect: 'readonly',
+      +        beforeEach: 'readonly',
+      +        afterEach: 'readonly',
+             },
+           },
+           plugins: {
+    patchStrategy: standard-diff
+snapshot:
+  tsconfig.json: |-
+    {
+      "compilerOptions": {
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "strict": true,
+        "noImplicitAny": true,
+        "strictNullChecks": true,
+        "strictFunctionTypes": true,
+        "noImplicitThis": true,
+        "noImplicitReturns": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "declaration": true
+      },
+      "include": ["src/**/*"]
+    }
+  eslint.config.js: |-
+    import typescriptESLint from '@typescript-eslint/eslint-plugin';
+    import typescriptParser from '@typescript-eslint/parser';
+
+    export default [
+      {
+        files: ['src/**/*.ts'],
+        languageOptions: {
+          parser: typescriptParser,
+          parserOptions: {
+            ecmaVersion: 2022,
+            sourceType: 'module',
+            project: './tsconfig.json',
+          },
+          globals: {
+            console: 'readonly',
+            process: 'readonly',
+            Buffer: 'readonly',
+            __dirname: 'readonly',
+            __filename: 'readonly',
+            global: 'readonly',
+          },
+        },
+        plugins: {
+          '@typescript-eslint': typescriptESLint,
+        },
+        rules: {
+          '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+          '@typescript-eslint/no-explicit-any': 'warn',
+          '@typescript-eslint/no-non-null-assertion': 'warn',
+          '@typescript-eslint/no-empty-function': 'error',
+          '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+          '@typescript-eslint/prefer-as-const': 'error',
+          '@typescript-eslint/prefer-nullish-coalescing': 'error',
+          '@typescript-eslint/prefer-optional-chain': 'error',
+          '@typescript-eslint/strict-boolean-expressions': 'error',
+          'no-console': 'warn',
+          'no-debugger': 'error',
+          'no-unused-expressions': 'error',
+          'prefer-const': 'error',
+          'no-var': 'error',
+        },
+      },
+      {
+        ignores: ['dist/', 'node_modules/', '*.js'],
+      },
+    ];
+approved: true
+linesAdded: 7
+linesRemoved: 2
+linesDifference: 9
+gitCommittedAt: null
+status: committed
+id: 44

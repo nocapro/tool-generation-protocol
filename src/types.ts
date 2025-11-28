@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 // --- Git Configuration Schema ---
 export const GitConfigSchema = z.object({
-  provider: z.enum(['github', 'gitlab', 'bitbucket']),
+  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
   repo: z.string().min(1, "Repository name is required"),
   branch: z.string().default('main'),
   apiBaseUrl: z.string().url().default('https://api.github.com'),

