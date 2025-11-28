@@ -18,9 +18,13 @@ import { spawn, execSync } from 'node:child_process';
 
 const tempDirs: string[] = [];
 
+// Create workspaces inside /app/test_workspaces to ensure they are within the project tree
+// where node_modules are installed (/app/node_modules). This fixes module resolution.
+const WORKSPACE_ROOT = '/app/test_workspaces';
+
 export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
-  const tmpDir = os.tmpdir();
-  const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
+  await fs.mkdir(WORKSPACE_ROOT, { recursive: true });
+  const dir = await fs.mkdtemp(path.join(WORKSPACE_ROOT, prefix));
   tempDirs.push(dir);
   return dir;
 }
@@ -75,6 +79,7 @@ export default defineTGPConfig({
 export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
     return new Promise(async (resolve) => {
         // OVERRIDE: Use bunx tgp to execute the installed binary
+        // Since we are running inside /app/test_workspaces, this should find local node_modules
         const proc = spawn('bunx', ['tgp', ...args], {
             cwd,
             env: { ...process.env, NODE_ENV: 'test' }
