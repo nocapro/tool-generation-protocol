@@ -39,12 +39,13 @@
     "tgp": "./bin/tgp.js"
   },
   "dependencies": {
+    "apply-multi-diff": "^0.1.4",
     "esbuild": "^0.19.12",
     "isolated-vm": "^6.0.2",
     "isomorphic-git": "^1.35.1",
+    "typescript": "^5.9.3",
     "zod": "^3.25.76",
-    "zod-to-json-schema": "^3.22.4",
-    "typescript": "^5.9.3"
+    "zod-to-json-schema": "^3.22.4"
   },
   "devDependencies": {
     "tsup": "^8.0.2",

@@ -124,16 +124,23 @@ describe('E2E Scenarios', () => {
     const toolName = 'tools/greet.ts';
     await tools.write_file.execute({ 
       path: toolName, 
-      content: `export default function(args: { name: string }) { return "hello " + args.name; }`
+      content: `
+export default function(args: { name: string }) {
+  return "hello " + args.name;
+}
+`
     });
 
     let res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
     expect(res.result).toBe('hello world');
 
-    await tools.patch_file.execute({
+    await tools.apply_diff.execute({
       path: toolName,
-      search: 'return "hello " + args.name;',
-      replace: 'return "greetings " + args.name;'
+      diff: `<<<<<<< SEARCH
+  return "hello " + args.name;
+=======
+  return "greetings " + args.name;
+>>>>>>> REPLACE`
     });
 
     res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });

@@ -1,0 +1,284 @@
+uuid: 4f128c7d-94c6-4b2e-83d1-949f2256b7c0
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T14:05:59.667Z'
+gitCommitMsg: >-
+  feat: replace patch_file with robust apply_diff tool
+
+  Introduces `apply-multi-diff` dependency to support both unified diffs and 
+  search/replace blocks with fuzzy matching.
+promptSummary: >-
+  Implement the new apply_diff tool using apply-multi-diff and remove the old
+  patch_file tool.
+reasoning:
+  - 'Step 1: Add `apply-multi-diff` to `package.json`.'
+  - 'Step 2: Replace `patch_file` with `apply_diff` in `src/tools/fs.ts`.'
+operations:
+  - type: write
+    path: package.json
+    content: |
+      --- package.json
+      +++ package.json
+      @@ -32,4 +32,5 @@
+         "dependencies": {
+           "esbuild": "^0.19.12",
+      +    "apply-multi-diff": "^1.0.0",
+           "isolated-vm": "^6.0.2",
+           "isomorphic-git": "^1.35.1",
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tools/fs.ts
+    content: |-
+      import { z } from 'zod';
+      import { applyStandardDiff, applySearchReplace } from 'apply-multi-diff';
+      import { Kernel } from '../kernel/core.js';
+      import { AgentTool } from './types.js';
+
+      export const ListFilesParams = z.object({
+        dir: z.string().describe('The relative directory path to list (e.g., "tools" or "tools/analytics")'),
+      });
+
+      export const ReadFileParams = z.object({
+        path: z.string().describe('The relative path to the file to read'),
+      });
+
+      export const WriteFileParams = z.object({
+        path: z.string().describe('The relative path where the file should be written'),
+        content: z.string().describe('The full content of the file'),
+      });
+
+      export const ApplyDiffParams = z.object({
+        path: z.string().describe('The relative path to the file to modify'),
+        diff: z.string().describe('The patch content. Either a standard Unified Diff or a Search/Replace block (<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE).'),
+        start_line: z.number().optional().describe('The 1-based line number to start searching from (for Search/Replace disambiguation).'),
+        end_line: z.number().optional().describe('The 1-based line number to stop searching at (for Search/Replace disambiguation).'),
+      });
+
+      export function createFsTools(kernel: Kernel) {
+        return {
+          list_files: {
+            description: 'Recursively list available tools or definitions in the VFS.',
+            parameters: ListFilesParams,
+            inputSchema: ListFilesParams,
+            execute: async ({ dir }) => {
+              return kernel.vfs.listFiles(dir, true);
+            },
+          } as AgentTool<typeof ListFilesParams, string[]>,
+
+          read_file: {
+            description: 'Read the content of an existing tool or file.',
+            parameters: ReadFileParams,
+            inputSchema: ReadFileParams,
+            execute: async ({ path }) => {
+              return kernel.vfs.readFile(path);
+            },
+          } as AgentTool<typeof ReadFileParams, string>,
+
+          write_file: {
+            description: 'Create a new tool or overwrite a draft. Ensures parent directories exist.',
+            parameters: WriteFileParams,
+            inputSchema: WriteFileParams,
+            execute: async ({ path, content }) => {
+              await kernel.vfs.writeFile(path, content);
+
+              // Register the new tool in the Registry (updates meta.json)
+              await kernel.registry.register(path, content);
+
+              // Persist to Git (Tool + meta.json)
+              await kernel.git.persist(`Forge: ${path}`, [path]);
+
+              return { success: true, path, persisted: true };
+            },
+          } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
+
+          apply_diff: {
+            description: 'Apply a patch to a file using either Unified Diff format or Search/Replace blocks.',
+            parameters: ApplyDiffParams,
+            inputSchema: ApplyDiffParams,
+            execute: async ({ path, diff, start_line, end_line }) => {
+              const content = await kernel.vfs.readFile(path);
+              
+              let result;
+
+              // Use Search-Replace strategy if the marker is present, otherwise fallback to Standard Diff
+              if (diff.includes('<<<<<<< SEARCH')) {
+                result = applySearchReplace(content, diff, { start_line, end_line });
+              } else {
+                result = applyStandardDiff(content, diff);
+              }
+
+              if (!result.success) {
+                throw new Error(`Failed to apply diff to '${path}': ${result.error?.message ?? 'Unknown error'}`);
+              }
+
+              const newContent = result.content;
+              await kernel.vfs.writeFile(path, newContent);
+
+              // Update registry in case descriptions changed
+              await kernel.registry.register(path, newContent);
+
+              await kernel.git.persist(`Refactor: ${path}`, [path]);
+
+              return { success: true, path, persisted: true };
+            },
+          } as AgentTool<typeof ApplyDiffParams, { success: boolean; path: string }>,
+        };
+      }
+    patchStrategy: replace
+snapshot:
+  package.json: |-
+    {
+      "name": "tool-generation-protocol",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.cjs",
+      "module": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "exports": {
+        ".": {
+          "import": "./dist/index.js",
+          "require": "./dist/index.cjs",
+          "types": "./dist/index.d.ts"
+        }
+      },
+      "files": [
+        "dist",
+        "bin",
+        "README.md"
+      ],
+      "scripts": {
+        "build": "tsup",
+        "dev": "tsx src/cli/index.ts",
+        "lint": "eslint src/**/*.ts",
+        "lint:fix": "eslint src/**/*.ts --fix",
+        "pretest": "npm run build",
+        "test": "bun test test/",
+        "tgp": "node bin/tgp.js"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "bin": {
+        "tgp": "./bin/tgp.js"
+      },
+      "dependencies": {
+        "esbuild": "^0.19.12",
+        "isolated-vm": "^6.0.2",
+        "isomorphic-git": "^1.35.1",
+        "zod": "^3.25.76",
+        "zod-to-json-schema": "^3.22.4",
+        "typescript": "^5.9.3"
+      },
+      "devDependencies": {
+        "tsup": "^8.0.2",
+        "ai": "5.0.104",
+        "@types/node": "^20.19.25",
+        "@types/better-sqlite3": "^7.6.9",
+        "@typescript-eslint/eslint-plugin": "^8.48.0",
+        "@typescript-eslint/parser": "^8.48.0",
+        "better-sqlite3": "^9.4.3",
+        "eslint": "^9.39.1",
+        "tsx": "^4.16.2",
+        "bun-types": "^1.1.12"
+      }
+    }
+  src/tools/fs.ts: |-
+    import { z } from 'zod';
+    import { Kernel } from '../kernel/core.js';
+    import { AgentTool } from './types.js';
+
+    export const ListFilesParams = z.object({
+      dir: z.string().describe('The relative directory path to list (e.g., "tools" or "tools/analytics")'),
+    });
+
+    export const ReadFileParams = z.object({
+      path: z.string().describe('The relative path to the file to read'),
+    });
+
+    export const WriteFileParams = z.object({
+      path: z.string().describe('The relative path where the file should be written'),
+      content: z.string().describe('The full content of the file'),
+    });
+
+    export const PatchFileParams = z.object({
+      path: z.string().describe('The relative path to the file to patch'),
+      search: z.string().describe('The exact string content to find'),
+      replace: z.string().describe('The string content to replace it with'),
+    });
+
+    export function createFsTools(kernel: Kernel) {
+      return {
+        list_files: {
+          description: 'Recursively list available tools or definitions in the VFS.',
+          parameters: ListFilesParams,
+          inputSchema: ListFilesParams,
+          execute: async ({ dir }) => {
+            return kernel.vfs.listFiles(dir, true);
+          },
+        } as AgentTool<typeof ListFilesParams, string[]>,
+
+        read_file: {
+          description: 'Read the content of an existing tool or file.',
+          parameters: ReadFileParams,
+          inputSchema: ReadFileParams,
+          execute: async ({ path }) => {
+            return kernel.vfs.readFile(path);
+          },
+        } as AgentTool<typeof ReadFileParams, string>,
+
+        write_file: {
+          description: 'Create a new tool or overwrite a draft. Ensures parent directories exist.',
+          parameters: WriteFileParams,
+          inputSchema: WriteFileParams,
+          execute: async ({ path, content }) => {
+            await kernel.vfs.writeFile(path, content);
+
+            // Register the new tool in the Registry (updates meta.json)
+            await kernel.registry.register(path, content);
+
+            // Persist to Git (Tool + meta.json)
+            await kernel.git.persist(`Forge: ${path}`, [path]);
+
+            return { success: true, path, persisted: true };
+          },
+        } as AgentTool<typeof WriteFileParams, { success: boolean; path: string }>,
+
+        patch_file: {
+          description: 'Surgical search-and-replace for refactoring code.',
+          parameters: PatchFileParams,
+          inputSchema: PatchFileParams,
+          execute: async ({ path, search, replace }) => {
+            const content = await kernel.vfs.readFile(path);
+
+            if (!content.includes(search)) {
+              throw new Error(`Patch failed: Search text not found in '${path}'. Please read the file again to ensure you have the exact content.`);
+            }
+
+            // We replace the first occurrence to be surgical.
+            // If the agent needs global replace, it can do so in a loop or we can expand this tool later.
+            const newContent = content.replace(search, replace);
+
+            await kernel.vfs.writeFile(path, newContent);
+
+            // Update registry in case descriptions changed
+            await kernel.registry.register(path, newContent);
+
+            await kernel.git.persist(`Refactor: ${path}`, [path]);
+
+            return { success: true, path, persisted: true };
+          },
+        } as AgentTool<typeof PatchFileParams, { success: boolean; path: string }>,
+      };
+    }
+approved: true
+linesAdded: 24
+linesRemoved: 15
+linesDifference: 39
+gitCommittedAt: null
+status: committed
+id: 78

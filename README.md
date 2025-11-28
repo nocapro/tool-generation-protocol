@@ -78,7 +78,7 @@ The Agent is provided with a specific set of primitives to interact with the env
 | **`list_files`** | `(dir: string) => string[]` | Recursively list available tools or definitions. |
 | **`read_file`** | `(path: string) => string` | Read the content of an existing tool or schema. |
 | **`write_file`** | `(path: string, content: string) => void` | Create a new tool or overwrite a draft. |
-| **`patch_file`** | `(path: string, search: string, replace: string) => void` | Surgical search-and-replace for refactoring. |
+| **`apply_diff`** | `(path: string, diff: string) => void` | Apply a Unified Diff or Search/Replace block to a file. |
 | **`check_tool`** | `(path: string) => { valid: boolean, errors: string[] }` | Run the JIT compiler and linter. |
 | **`exec_tool`** | `(path: string, args: object) => any` | Execute a tool inside the secure Sandbox. |
 | **`exec_sql`**   | `(sql: string, params: object) => any` | Executes a raw SQL query against the host database. |
@@ -117,7 +117,7 @@ To ensure the ecosystem remains clean, the Agent must adhere to strict code qual
 If a tool fails during execution:
 1.  **Capture**: Agent reads STDERR.
 2.  **Diagnose**: Agent identifies the logic error or schema mismatch.
-3.  **Patch**: Agent uses `patch_file` to fix the code in place.
+3.  **Patch**: Agent uses `apply_diff` to fix the code in place.
 4.  **Verify**: Agent runs `check_tool`.
 
 ---
