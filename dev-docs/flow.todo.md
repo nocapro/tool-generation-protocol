@@ -13,7 +13,7 @@ so my idea is;
 4. make the copied test/ container import from published npm version 
 5. run test within container, if fail detected then host test fail with knowing what fails
 
-===
+=== DONE
 
 prepare for npm publication, along with tsup, but url not available, already taken by https://www.npmjs.com/package/tgp
 
@@ -22,7 +22,6 @@ prepare for npm publication, along with tsup, but url not available, already tak
 we need test cases to verify end to end typesafety like tgpTools from '@tgp/core' accepted by import { generateText } from 'ai';
 
 and many cases
-
 
 ===
 
