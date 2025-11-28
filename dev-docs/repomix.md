@@ -35,6 +35,10 @@ test/
   e2e/
     scenarios.test.ts
     utils.ts
+  integration/
+    bridge.test.ts
+    gitops.test.ts
+    sql.test.ts
 test-docs/
   e2e.test-plan.md
   integration.test-plan.md
@@ -46,6 +50,355 @@ tsconfig.json
 ```
 
 # Files
+
+## File: test/integration/bridge.test.ts
+````typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools } from '../../src/tools/index.js';
+
+describe('Integration: Kernel <-> Sandbox Bridge', () => {
+  let tempDir: string;
+  let remoteRepo: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('tgp-int-bridge-');
+    remoteRepo = await createTempDir('tgp-remote-');
+    await initBareRepo(remoteRepo);
+  });
+
+  afterEach(async () => {
+    await cleanupDir(tempDir);
+    await cleanupDir(remoteRepo);
+  });
+
+  it('Host Filesystem Access: Tool can read files allowed by config', async () => {
+    // 1. Setup
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    // 2. Create a data file in the "Host" VFS (using kernel.vfs directly to simulate existing state)
+    const dataPath = 'data.json';
+    const dataContent = JSON.stringify({ secret: 42 });
+    await kernel.vfs.writeFile(dataPath, dataContent);
+
+    // 3. Create a tool that reads it using tgp.read_file
+    const toolName = 'tools/reader.ts';
+    await tools.write_file.execute({
+      path: toolName,
+      content: `
+        export default async function() {
+          const content = await tgp.read_file('data.json');
+          return JSON.parse(content);
+        }
+      `
+    });
+
+    // 4. Execute
+    const result = await tools.exec_tool.execute({ path: toolName, args: {} });
+    
+    expect(result.success).toBe(true);
+    expect(result.result).toEqual({ secret: 42 });
+  });
+
+  it('Recursive Tool Execution: Tools can import other tools', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    // 1. Create a Library Tool (Dependency)
+    // Note: The VFS resolver looks for .ts extensions
+    await tools.write_file.execute({
+      path: 'tools/lib/math.ts',
+      content: `
+        export function double(n: number) { return n * 2; }
+        export const PI = 3.14;
+      `
+    });
+
+    // 2. Create Main Tool (Consumer)
+    // Uses 'require' shim injected by sandbox
+    await tools.write_file.execute({
+      path: 'tools/calc.ts',
+      content: `
+        const { double, PI } = require('./lib/math');
+        
+        export default function(args: { val: number }) {
+          return double(args.val) + PI;
+        }
+      `
+    });
+
+    // 3. Execute
+    const result = await tools.exec_tool.execute({ path: 'tools/calc.ts', args: { val: 10 } });
+
+    expect(result.success).toBe(true);
+    expect(result.result).toBe(23.14); // (10 * 2) + 3.14
+  });
+});
+````
+
+## File: test/integration/gitops.test.ts
+````typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { execSync } from 'child_process';
+import { createTempDir, initBareRepo, createTgpConfig, cleanupDir } from '../e2e/utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools } from '../../src/tools/index.js';
+
+describe('Integration: GitOps & Persistence', () => {
+  let tempDir: string;
+  let remoteRepo: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('tgp-int-git-');
+    remoteRepo = await createTempDir('tgp-remote-');
+    await initBareRepo(remoteRepo);
+  });
+
+  afterEach(async () => {
+    await cleanupDir(tempDir);
+    await cleanupDir(remoteRepo);
+  });
+
+  it('Hydration: Should clone existing tools from remote on boot', async () => {
+    // 1. Setup Remote with a tool manually
+    const cloneDir = await createTempDir('tgp-setup-');
+    execSync(`git clone ${remoteRepo} .`, { cwd: cloneDir, stdio: 'ignore' });
+    
+    const toolContent = 'export default () => "hydrated"';
+    const toolRelPath = 'tools/hydrated.ts';
+    await fs.mkdir(path.join(cloneDir, 'tools'), { recursive: true });
+    await fs.writeFile(path.join(cloneDir, toolRelPath), toolContent);
+    
+    execSync('git add .', { cwd: cloneDir, stdio: 'ignore' });
+    execSync('git commit -m "Add tool"', { cwd: cloneDir, stdio: 'ignore' });
+    execSync('git push origin main', { cwd: cloneDir, stdio: 'ignore' });
+    
+    await cleanupDir(cloneDir);
+
+    // 2. Boot Kernel in fresh dir
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    
+    // Assert file doesn't exist yet
+    const localToolPath = path.join(tempDir, toolRelPath); // Note: .tgp root is inside tempDir based on utils logic, actually config sets rootDir
+    // wait, createTgpConfig sets rootDir to tempDir/.tgp
+    const tgpRoot = path.join(tempDir, '.tgp');
+    const localFile = path.join(tgpRoot, toolRelPath);
+
+    expect(await fs.access(localFile).then(() => true).catch(() => false)).toBe(false);
+
+    await kernel.boot();
+
+    // 3. Verify Hydration
+    expect(await fs.access(localFile).then(() => true).catch(() => false)).toBe(true);
+    const content = await fs.readFile(localFile, 'utf-8');
+    expect(content).toBe(toolContent);
+  });
+
+  it('Fabrication: Should persist new tools to remote', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+
+    const tools = tgpTools(kernel);
+    const newToolPath = 'tools/fabrication.ts';
+    const msg = 'Forge: tools/fabrication.ts';
+
+    // 1. Write Tool (triggers persist)
+    await tools.write_file.execute({
+      path: newToolPath,
+      content: 'export default "new"'
+    });
+
+    // 2. Verify Remote
+    const verifyDir = await createTempDir('tgp-verify-');
+    execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+    
+    const exists = await fs.access(path.join(verifyDir, newToolPath)).then(() => true).catch(() => false);
+    expect(exists).toBe(true);
+
+    // Verify Commit Message
+    const lastCommit = execSync('git log -1 --pretty=%B', { cwd: verifyDir }).toString().trim();
+    expect(lastCommit).toBe(msg);
+
+    await cleanupDir(verifyDir);
+  });
+
+  it('Concurrency: Should handle simultaneous pushes', async () => {
+    // Setup two agents
+    const dirA = await createTempDir('tgp-agent-a-');
+    const dirB = await createTempDir('tgp-agent-b-');
+
+    const kernelA = new TGP({ configFile: await createTgpConfig(dirA, remoteRepo) });
+    const kernelB = new TGP({ configFile: await createTgpConfig(dirB, remoteRepo) });
+
+    await kernelA.boot();
+    await kernelB.boot();
+
+    const toolsA = tgpTools(kernelA);
+    const toolsB = tgpTools(kernelB);
+
+    // Trigger race condition
+    // A writes, B writes different file. Both sync.
+    // The git backend should handle the non-fast-forward on the slower one by pulling/merging.
+    await Promise.all([
+      toolsA.write_file.execute({ path: 'tools/A.ts', content: 'export const a = 1;' }),
+      toolsB.write_file.execute({ path: 'tools/B.ts', content: 'export const b = 2;' })
+    ]);
+
+    // Verify Remote has both
+    const verifyDir = await createTempDir('tgp-verify-race-');
+    execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+    
+    const hasA = await fs.access(path.join(verifyDir, 'tools/A.ts')).then(() => true).catch(() => false);
+    const hasB = await fs.access(path.join(verifyDir, 'tools/B.ts')).then(() => true).catch(() => false);
+
+    expect(hasA).toBe(true);
+    expect(hasB).toBe(true);
+
+    await cleanupDir(dirA);
+    await cleanupDir(dirB);
+    await cleanupDir(verifyDir);
+  });
+});
+````
+
+## File: test/integration/sql.test.ts
+````typescript
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import Database from 'better-sqlite3';
+import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools, createSqlTools } from '../../src/tools/index.js';
+
+describe('Integration: SQL Adapter (Real SQLite)', () => {
+  let tempDir: string;
+  let remoteRepo: string;
+  let db: Database.Database;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('tgp-int-sql-');
+    remoteRepo = await createTempDir('tgp-remote-');
+    await initBareRepo(remoteRepo);
+    
+    // Setup Real SQLite DB (In-memory for speed/isolation)
+    db = new Database(':memory:');
+    db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');
+    db.exec("INSERT INTO users (name) VALUES ('Alice')");
+    db.exec("INSERT INTO users (name) VALUES ('Bob')");
+  });
+
+  afterEach(async () => {
+    db.close();
+    await cleanupDir(tempDir);
+    await cleanupDir(remoteRepo);
+  });
+
+  it('Query Execution: Tool can query real database', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    
+    // Executor that bridges TGP -> Real DB
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const executor = async (sql: string, params: any[]) => {
+      const stmt = db.prepare(sql);
+      if (sql.trim().toLowerCase().startsWith('select')) {
+        return stmt.all(params);
+      }
+      return stmt.run(params);
+    };
+
+    const kernel = new TGP({ 
+      configFile: configPath,
+      sandboxAPI: { exec_sql: executor } // Inject for internal usage if needed
+    });
+    await kernel.boot();
+
+    // Compose tools
+    const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+    const toolName = 'tools/get_users.ts';
+    await tools.write_file.execute({
+      path: toolName,
+      content: `
+        export default async function() {
+          return await tgp.exec_sql('SELECT name FROM users ORDER BY name', []);
+        }
+      `
+    });
+
+    const res = await tools.exec_tool.execute({ path: toolName, args: {} });
+    
+    expect(res.success).toBe(true);
+    expect(res.result).toEqual([{ name: 'Alice' }, { name: 'Bob' }]);
+  });
+
+  it('Transaction Rollback: Host can rollback if tool throws', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    
+    // Executor
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const executor = async (sql: string, params: any[]) => {
+      return db.prepare(sql).run(params);
+    };
+
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+    // Create a buggy tool that writes then crashes
+    const buggyTool = 'tools/buggy_insert.ts';
+    await tools.write_file.execute({
+      path: buggyTool,
+      content: `
+        export default async function() {
+           // 1. Write
+           await tgp.exec_sql("INSERT INTO users (name) VALUES ('Charlie')", []);
+           // 2. Crash
+           throw new Error('Logic Bomb');
+        }
+      `
+    });
+
+    // Emulate Host Application Transaction Wrapper
+    // Since better-sqlite3 is synchronous, we manage transaction via raw SQL commands
+    // surrounding the async tool execution.
+    
+    db.exec('BEGIN');
+    let errorCaught = false;
+    
+    try {
+      const res = await tools.exec_tool.execute({ path: buggyTool, args: {} });
+      if (!res.success) {
+        throw new Error(res.error);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      errorCaught = true;
+      db.exec('ROLLBACK');
+    }
+
+    expect(errorCaught).toBe(true);
+
+    // Verify 'Charlie' was NOT added
+    const rows = db.prepare('SELECT * FROM users WHERE name = ?').all('Charlie');
+    expect(rows.length).toBe(0);
+    
+    // Verify existing data remains
+    const count = db.prepare('SELECT count(*) as c FROM users').get() as { c: number };
+    expect(count.c).toBe(2);
+  });
+});
+````
 
 ## File: bin/tgp.js
 ````javascript
@@ -1156,6 +1509,125 @@ describe('E2E Scenarios', () => {
     expect(res.error).toContain('Database Error');
   });
 
+  it('Scenario 9: Tool Composition (Orchestrator)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    // 1. Create the Library Tool (The Dependency)
+    const libPath = 'tools/lib/multiplier.ts';
+    await tools.write_file.execute({
+      path: libPath,
+      content: `
+        export default function multiply(a: number, b: number) {
+          return a * b;
+        }
+      `
+    });
+
+    // 2. Create the Consumer Tool (The Orchestrator)
+    const consumerPath = 'tools/calc.ts';
+    // Note: We use require() because the sandbox environment uses CommonJS shim for inter-tool dependencies.
+    await tools.write_file.execute({
+      path: consumerPath,
+      content: `
+        const multiplier = require('./lib/multiplier').default;
+
+        export default function calculate(args: { a: number, b: number }) {
+          // Logic: (a * b) + 100
+          const product = multiplier(args.a, args.b);
+          return product + 100;
+        }
+      `
+    });
+
+    // 3. Execute
+    const res = await tools.exec_tool.execute({ 
+      path: consumerPath, 
+      args: { a: 5, b: 5 } 
+    });
+
+    expect(res.success).toBe(true);
+    expect(res.result).toBe(125); // (5 * 5) + 100
+  });
+
+  it('Scenario 10: Registry Integrity (Meta.json)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    const docTool = 'tools/docs/roi.ts';
+    const description = 'Calculates the Return on Investment based on cost and revenue.';
+    
+    // Write tool with JSDoc
+    await tools.write_file.execute({
+      path: docTool,
+      content: `
+        /**
+         * ${description}
+         */
+        export default function roi(args: { cost: number, revenue: number }) {
+          return (args.revenue - args.cost) / args.cost;
+        }
+      `
+    });
+
+    // Verify meta.json in the VFS backing store (on disk)
+    // Note: The VFS root is at .tgp inside the tempDir
+    const metaPath = path.join(tempDir, '.tgp/meta.json');
+    const metaContent = await fs.readFile(metaPath, 'utf-8');
+    const meta = JSON.parse(metaContent);
+
+    expect(meta.tools[docTool]).toBeDefined();
+    expect(meta.tools[docTool].description).toBe(description);
+  });
+
+  it('Scenario 11: Standards Enforcement (Linter)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    // Test 1: Magic Number
+    const magicTool = 'tools/bad/magic.ts';
+    await tools.write_file.execute({
+      path: magicTool,
+      content: `export default function(args: { x: number }) { return args.x * 9999; }`
+    });
+
+    let check = await tools.check_tool.execute({ path: magicTool });
+    expect(check.valid).toBe(false);
+    expect(check.errors.some(e => e.includes('Magic Number'))).toBe(true);
+
+    // Test 2: Hardcoded Secret
+    const secretTool = 'tools/bad/secret.ts';
+    await tools.write_file.execute({
+      path: secretTool,
+      content: `
+        export default function() { 
+          const apiKey = "sk-live-1234567890abcdef12345678"; 
+          return apiKey;
+        }
+      `
+    });
+
+    check = await tools.check_tool.execute({ path: secretTool });
+    expect(check.valid).toBe(false);
+    expect(check.errors.some(e => e.includes('Secret'))).toBe(true);
+
+    // Test 3: Valid Tool (Control)
+    const validTool = 'tools/good/clean.ts';
+    await tools.write_file.execute({
+      path: validTool,
+      content: `export default function(args: { factor: number }) { return args.factor * 100; }` // 100 is allowed
+    });
+
+    check = await tools.check_tool.execute({ path: validTool });
+    expect(check.valid).toBe(true);
+  });
+
   // Note: Scenario 7 (SIGTERM) is skipped as the CLI currently does not have a long-running 'serve' mode to test against.
 
   it('Scenario 8: CLI Bootstrap', async () => {
@@ -1171,6 +1643,70 @@ describe('E2E Scenarios', () => {
     expect(metaExists).toBe(true);
   });
 });
+````
+
+## File: tsconfig.json
+````json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "noImplicitThis": true,
+    "noImplicitReturns": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist",
+    "declaration": true
+  },
+  "include": ["src/**/*", "test/**/*"]
+}
+````
+
+## File: src/tools/exec.ts
+````typescript
+import { z } from 'zod';
+import { Kernel } from '../kernel/core.js';
+import { executeTool } from '../sandbox/execute.js';
+import { AgentTool } from './types.js';
+
+export const ExecToolParams = z.object({
+  path: z.string().describe('The relative path of the tool to execute'),
+  args: z.record(z.any()).describe('The arguments to pass to the tool'),
+});
+
+export function createExecTools(kernel: Kernel) {
+  return {
+    exec_tool: {
+      description: 'Execute a tool inside the secure Sandbox. Returns { result, logs, error }.',
+      parameters: ExecToolParams,
+      execute: async ({ path, args }) => {
+        // Security: Ensure args are serializable (no functions, no circular refs)
+        // This prevents the agent from trying to pass internal objects to the guest.
+        try {
+          JSON.stringify(args);
+        } catch {
+          throw new Error("Arguments must be serializable JSON.");
+        }
+
+        const code = await kernel.vfs.readFile(path);
+        
+        // The sandbox takes care of safety, timeout, and memory limits
+        const { result, logs, error } = await executeTool(kernel, code, args, path);
+        
+        if (error !== undefined) {
+           return { success: false, error, logs };
+        }
+        return { success: true, result, logs };
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as AgentTool<typeof ExecToolParams, any>,
+  };
+}
 ````
 
 ## File: test/e2e/utils.ts
@@ -1317,211 +1853,6 @@ process.on('exit', () => {
         try { execSync(`rm -rf ${d}`); } catch {}
     });
 });
-````
-
-## File: tsconfig.json
-````json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "noImplicitAny": true,
-    "strictNullChecks": true,
-    "strictFunctionTypes": true,
-    "noImplicitThis": true,
-    "noImplicitReturns": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "outDir": "./dist",
-    "declaration": true
-  },
-  "include": ["src/**/*", "test/**/*"]
-}
-````
-
-## File: src/tools/exec.ts
-````typescript
-import { z } from 'zod';
-import { Kernel } from '../kernel/core.js';
-import { executeTool } from '../sandbox/execute.js';
-import { AgentTool } from './types.js';
-
-export const ExecToolParams = z.object({
-  path: z.string().describe('The relative path of the tool to execute'),
-  args: z.record(z.any()).describe('The arguments to pass to the tool'),
-});
-
-export function createExecTools(kernel: Kernel) {
-  return {
-    exec_tool: {
-      description: 'Execute a tool inside the secure Sandbox. Returns { result, logs, error }.',
-      parameters: ExecToolParams,
-      execute: async ({ path, args }) => {
-        // Security: Ensure args are serializable (no functions, no circular refs)
-        // This prevents the agent from trying to pass internal objects to the guest.
-        try {
-          JSON.stringify(args);
-        } catch {
-          throw new Error("Arguments must be serializable JSON.");
-        }
-
-        const code = await kernel.vfs.readFile(path);
-        
-        // The sandbox takes care of safety, timeout, and memory limits
-        const { result, logs, error } = await executeTool(kernel, code, args, path);
-        
-        if (error !== undefined) {
-           return { success: false, error, logs };
-        }
-        return { success: true, result, logs };
-      },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as AgentTool<typeof ExecToolParams, any>,
-  };
-}
-````
-
-## File: src/sandbox/isolate.ts
-````typescript
-import type * as IVM from 'isolated-vm';
-import { transform } from 'esbuild';
-import * as vm from 'node:vm';
-
-/**
- * Configuration for the V8 Sandbox.
- */
-export interface SandboxOptions {
-  memoryLimitMb?: number; // Default 128MB
-  timeoutMs?: number;     // Default 5000ms
-}
-
-export interface Sandbox {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
-  dispose: () => void;
-}
-
-/**
- * Creates a secure V8 Isolate.
- * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
- */
-export function createSandbox(opts: SandboxOptions = {}): Sandbox {
-  const memoryLimit = opts.memoryLimitMb ?? 128;
-  const timeout = opts.timeoutMs ?? 5000;
-
-  let isolate: IVM.Isolate | undefined;
-  let useFallback = false;
-
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async compileAndRun(tsCode: string, context: Record<string, any>) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let ivm: any;
-      try {
-        // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
-        ivm = (await import('isolated-vm')).default;
-      } catch {
-        useFallback = true;
-      }
-
-      // 1. JIT Compile (TypeScript -> JavaScript)
-      // We use esbuild for speed.
-      const transformed = await transform(tsCode, {
-        loader: 'ts',
-        format: 'cjs', // CommonJS ensures simple execution in V8
-        target: 'es2020',
-      });
-
-      const jsCode = transformed.code;
-
-      if (useFallback) {
-         // --- Node.js VM Fallback ---
-         const sandboxContext = vm.createContext({ ...context });
-         // Setup global self-reference
-         sandboxContext.global = sandboxContext;
-         
-         try {
-             const script = new vm.Script(jsCode);
-             return script.runInContext(sandboxContext, { timeout });
-         } catch (e) {
-             throw e;
-         }
-      }
-
-      // Initialize isolate if not already created (reuse across executions)
-      const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
-      // Update state
-      isolate = currentIsolate;
-
-      // 2. Create a fresh Context for this execution
-      // We use currentIsolate which is guaranteed to be defined
-      const ivmContext = await currentIsolate.createContext();
-
-      try {
-        // 3. Bridge the Global Scope (Host -> Guest)
-        const jail = ivmContext.global;
-        
-        // Inject the 'tgp' global object which holds our bridge
-        await jail.set('global', jail.derefInto()); // standard polyfill
-
-        // Inject Context
-        for (const [key, value] of Object.entries(context)) {
-            // Special handling for the 'tgp' namespace object
-            if (key === 'tgp' && typeof value === 'object' && value !== null) {
-                // Initialize the namespace in the guest
-                const initScript = await currentIsolate.compileScript('global.tgp = {}');
-                await initScript.run(ivmContext);
-                const tgpHandle = await jail.get('tgp');
-                
-                // Populate the namespace
-                for (const [subKey, subValue] of Object.entries(value)) {
-                    if (typeof subValue === 'function') {
-                       // Functions must be passed by Reference
-                       await tgpHandle.set(subKey, new ivm.Reference(subValue));
-                    } else {
-                       // Values are copied
-                       await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
-                    }
-                }
-            } 
-            // Handle top-level functions (like __tgp_load_module)
-            else if (typeof value === 'function') {
-              await jail.set(key, new ivm.Reference(value));
-            } 
-            // Handle standard values
-            else {
-              await jail.set(key, new ivm.ExternalCopy(value).copyInto());
-            }
-        }
-
-        // 4. Compile the Script inside the Isolate
-        const script = await currentIsolate.compileScript(jsCode);
-
-        // 5. Execute
-        const result = await script.run(ivmContext, { timeout });
-        
-        // 6. Return result (Unwrap from IVM)
-        if (typeof result === 'object' && result !== null && 'copy' in result) {
-            // If it's a reference, try to copy it out, otherwise return as is
-            return result.copy();
-        }
-        return result;
-
-      } finally {
-        // Cleanup the context to free memory immediately
-        ivmContext.release();
-      }
-    },
-
-    dispose() {
-      if (isolate && !isolate.isDisposed) {
-        isolate.dispose();
-      }
-    }
-  };
-}
 ````
 
 ## File: src/tools/validation.ts
@@ -1879,6 +2210,147 @@ export function createRegistry(vfs: VFSAdapter): Registry {
 
     async sync() {
       await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+    }
+  };
+}
+````
+
+## File: src/sandbox/isolate.ts
+````typescript
+import type * as IVM from 'isolated-vm';
+import { transform } from 'esbuild';
+import * as vm from 'node:vm';
+
+/**
+ * Configuration for the V8 Sandbox.
+ */
+export interface SandboxOptions {
+  memoryLimitMb?: number; // Default 128MB
+  timeoutMs?: number;     // Default 5000ms
+}
+
+export interface Sandbox {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+  dispose: () => void;
+}
+
+/**
+ * Creates a secure V8 Isolate.
+ * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
+ */
+export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+  const memoryLimit = opts.memoryLimitMb ?? 128;
+  const timeout = opts.timeoutMs ?? 5000;
+
+  let isolate: IVM.Isolate | undefined;
+  let useFallback = false;
+
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async compileAndRun(tsCode: string, context: Record<string, any>) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let ivm: any;
+      try {
+        // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+        ivm = (await import('isolated-vm')).default;
+      } catch {
+        useFallback = true;
+      }
+
+      // 1. JIT Compile (TypeScript -> JavaScript)
+      // We use esbuild for speed.
+      const transformed = await transform(tsCode, {
+        loader: 'ts',
+        format: 'cjs', // CommonJS ensures simple execution in V8
+        target: 'es2020',
+      });
+
+      const jsCode = transformed.code;
+
+      if (useFallback) {
+         // --- Node.js VM Fallback ---
+         const sandboxContext = vm.createContext({ ...context });
+         // Setup global self-reference
+         sandboxContext.global = sandboxContext;
+         
+         try {
+             const script = new vm.Script(jsCode);
+             return script.runInContext(sandboxContext, { timeout });
+         } catch (e) {
+             throw e;
+         }
+      }
+
+      // Initialize isolate if not already created (reuse across executions)
+      const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
+      // Update state
+      isolate = currentIsolate;
+
+      // 2. Create a fresh Context for this execution
+      // We use currentIsolate which is guaranteed to be defined
+      const ivmContext = await currentIsolate.createContext();
+
+      try {
+        // 3. Bridge the Global Scope (Host -> Guest)
+        const jail = ivmContext.global;
+        
+        // Inject the 'tgp' global object which holds our bridge
+        await jail.set('global', jail.derefInto()); // standard polyfill
+
+        // Inject Context
+        for (const [key, value] of Object.entries(context)) {
+            // Special handling for the 'tgp' namespace object
+            if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                // Initialize the namespace in the guest
+                const initScript = await currentIsolate.compileScript('global.tgp = {}');
+                await initScript.run(ivmContext);
+                const tgpHandle = await jail.get('tgp');
+                
+                // Populate the namespace
+                for (const [subKey, subValue] of Object.entries(value)) {
+                    if (typeof subValue === 'function') {
+                       // Functions must be passed by Reference
+                       await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                    } else {
+                       // Values are copied
+                       await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                    }
+                }
+            } 
+            // Handle top-level functions (like __tgp_load_module)
+            else if (typeof value === 'function') {
+              await jail.set(key, new ivm.Reference(value));
+            } 
+            // Handle standard values
+            else {
+              await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+            }
+        }
+
+        // 4. Compile the Script inside the Isolate
+        const script = await currentIsolate.compileScript(jsCode);
+
+        // 5. Execute
+        const result = await script.run(ivmContext, { timeout });
+        
+        // 6. Return result (Unwrap from IVM)
+        if (typeof result === 'object' && result !== null && 'copy' in result) {
+            // If it's a reference, try to copy it out, otherwise return as is
+            return result.copy();
+        }
+        return result;
+
+      } finally {
+        // Cleanup the context to free memory immediately
+        ivmContext.release();
+      }
+    },
+
+    dispose() {
+      if (isolate && !isolate.isDisposed) {
+        isolate.dispose();
+      }
     }
   };
 }
@@ -2289,8 +2761,10 @@ export interface Logger {
   },
   "devDependencies": {
     "@types/node": "^20.19.25",
+    "@types/better-sqlite3": "^7.6.9",
     "@typescript-eslint/eslint-plugin": "^8.48.0",
     "@typescript-eslint/parser": "^8.48.0",
+    "better-sqlite3": "^9.4.3",
     "eslint": "^9.39.1",
     "tsx": "^4.16.2",
     "vitest": "^1.6.0"

@@ -1,3 +1,11 @@
+===
+
+is the test/e2e/ cases already verify expectations of readme.md
+
+execute all parts in single trx. also make sure to follow 5 test rules while also doing fixes without bandaids fake fixing... should has architectural paradigm
+
+===
+
 make sure to follow 5 test rules while also doing fixes without bandaids fake fixing... should has architectural paradigm 
 
 ===

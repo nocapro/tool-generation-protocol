@@ -1,0 +1,470 @@
+uuid: 18b6c8a2-3f1d-4e9b-9a7c-5b2d1e0f3a8d
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T07:26:26.852Z'
+gitCommitMsg: 'test: implement integration test suite with real Git and SQLite dependencies'
+promptSummary: >-
+  Implement the Integration Test Suite (GitOps, Bridge, SQL) using real
+  dependencies (Git, SQLite).
+reasoning:
+  - Here is the step-by-step implementation of the integration test suite.
+  - '### Step 1: Add Testing Dependencies'
+  - >-
+    We add `better-sqlite3` to `package.json` to support the Real SQLite
+    requirement for the SQL integration tests.
+  - '### Step 2: Implement GitOps Integration Tests'
+  - >-
+    This test suite verifies the core Git interactions: Hydration
+    (cloning/pulling on boot), Fabrication (committing/pushing tools), and
+    Concurrency (handling race conditions between agents).
+  - '### Step 3: Implement Bridge Integration Tests'
+  - >-
+    This suite validates the `src/sandbox/bridge.ts` functionality, specifically
+    verifying that the sandbox can access the host filesystem (within allowed
+    directories) and that the internal module resolution (`require` shim) works
+    for tool composition.
+  - '### Step 4: Implement SQL Integration Tests'
+  - >-
+    This suite uses `better-sqlite3` to verify real database interactions. It
+    ensures that the TGP architecture correctly propagates errors from the
+    sandbox, allowing the host application to rollback transactions (Atomicity).
+operations:
+  - type: write
+    path: package.json
+    content: |
+      --- package.json
+      +++ package.json
+      @@ -34,3 +34,5 @@
+         "devDependencies": {
+           "@types/node": "^20.19.25",
+      +    "@types/better-sqlite3": "^7.6.9",
+           "@typescript-eslint/eslint-plugin": "^8.48.0",
+           "@typescript-eslint/parser": "^8.48.0",
+      +    "better-sqlite3": "^9.4.3",
+           "eslint": "^9.39.1",
+    patchStrategy: standard-diff
+  - type: write
+    path: test/integration/gitops.test.ts
+    content: >-
+      import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+      import * as fs from 'fs/promises';
+
+      import * as path from 'path';
+
+      import { execSync } from 'child_process';
+
+      import { createTempDir, initBareRepo, createTgpConfig, cleanupDir } from
+      '../e2e/utils.js';
+
+      import { TGP } from '../../src/tgp.js';
+
+      import { tgpTools } from '../../src/tools/index.js';
+
+
+      describe('Integration: GitOps & Persistence', () => {
+        let tempDir: string;
+        let remoteRepo: string;
+
+        beforeEach(async () => {
+          tempDir = await createTempDir('tgp-int-git-');
+          remoteRepo = await createTempDir('tgp-remote-');
+          await initBareRepo(remoteRepo);
+        });
+
+        afterEach(async () => {
+          await cleanupDir(tempDir);
+          await cleanupDir(remoteRepo);
+        });
+
+        it('Hydration: Should clone existing tools from remote on boot', async () => {
+          // 1. Setup Remote with a tool manually
+          const cloneDir = await createTempDir('tgp-setup-');
+          execSync(`git clone ${remoteRepo} .`, { cwd: cloneDir, stdio: 'ignore' });
+          
+          const toolContent = 'export default () => "hydrated"';
+          const toolRelPath = 'tools/hydrated.ts';
+          await fs.mkdir(path.join(cloneDir, 'tools'), { recursive: true });
+          await fs.writeFile(path.join(cloneDir, toolRelPath), toolContent);
+          
+          execSync('git add .', { cwd: cloneDir, stdio: 'ignore' });
+          execSync('git commit -m "Add tool"', { cwd: cloneDir, stdio: 'ignore' });
+          execSync('git push origin main', { cwd: cloneDir, stdio: 'ignore' });
+          
+          await cleanupDir(cloneDir);
+
+          // 2. Boot Kernel in fresh dir
+          const configPath = await createTgpConfig(tempDir, remoteRepo);
+          const kernel = new TGP({ configFile: configPath });
+          
+          // Assert file doesn't exist yet
+          const localToolPath = path.join(tempDir, toolRelPath); // Note: .tgp root is inside tempDir based on utils logic, actually config sets rootDir
+          // wait, createTgpConfig sets rootDir to tempDir/.tgp
+          const tgpRoot = path.join(tempDir, '.tgp');
+          const localFile = path.join(tgpRoot, toolRelPath);
+
+          expect(await fs.access(localFile).then(() => true).catch(() => false)).toBe(false);
+
+          await kernel.boot();
+
+          // 3. Verify Hydration
+          expect(await fs.access(localFile).then(() => true).catch(() => false)).toBe(true);
+          const content = await fs.readFile(localFile, 'utf-8');
+          expect(content).toBe(toolContent);
+        });
+
+        it('Fabrication: Should persist new tools to remote', async () => {
+          const configPath = await createTgpConfig(tempDir, remoteRepo);
+          const kernel = new TGP({ configFile: configPath });
+          await kernel.boot();
+
+          const tools = tgpTools(kernel);
+          const newToolPath = 'tools/fabrication.ts';
+          const msg = 'Forge: tools/fabrication.ts';
+
+          // 1. Write Tool (triggers persist)
+          await tools.write_file.execute({
+            path: newToolPath,
+            content: 'export default "new"'
+          });
+
+          // 2. Verify Remote
+          const verifyDir = await createTempDir('tgp-verify-');
+          execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+          
+          const exists = await fs.access(path.join(verifyDir, newToolPath)).then(() => true).catch(() => false);
+          expect(exists).toBe(true);
+
+          // Verify Commit Message
+          const lastCommit = execSync('git log -1 --pretty=%B', { cwd: verifyDir }).toString().trim();
+          expect(lastCommit).toBe(msg);
+
+          await cleanupDir(verifyDir);
+        });
+
+        it('Concurrency: Should handle simultaneous pushes', async () => {
+          // Setup two agents
+          const dirA = await createTempDir('tgp-agent-a-');
+          const dirB = await createTempDir('tgp-agent-b-');
+
+          const kernelA = new TGP({ configFile: await createTgpConfig(dirA, remoteRepo) });
+          const kernelB = new TGP({ configFile: await createTgpConfig(dirB, remoteRepo) });
+
+          await kernelA.boot();
+          await kernelB.boot();
+
+          const toolsA = tgpTools(kernelA);
+          const toolsB = tgpTools(kernelB);
+
+          // Trigger race condition
+          // A writes, B writes different file. Both sync.
+          // The git backend should handle the non-fast-forward on the slower one by pulling/merging.
+          await Promise.all([
+            toolsA.write_file.execute({ path: 'tools/A.ts', content: 'export const a = 1;' }),
+            toolsB.write_file.execute({ path: 'tools/B.ts', content: 'export const b = 2;' })
+          ]);
+
+          // Verify Remote has both
+          const verifyDir = await createTempDir('tgp-verify-race-');
+          execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+          
+          const hasA = await fs.access(path.join(verifyDir, 'tools/A.ts')).then(() => true).catch(() => false);
+          const hasB = await fs.access(path.join(verifyDir, 'tools/B.ts')).then(() => true).catch(() => false);
+
+          expect(hasA).toBe(true);
+          expect(hasB).toBe(true);
+
+          await cleanupDir(dirA);
+          await cleanupDir(dirB);
+          await cleanupDir(verifyDir);
+        });
+      });
+    patchStrategy: replace
+  - type: write
+    path: test/integration/bridge.test.ts
+    content: >-
+      import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+      import * as fs from 'fs/promises';
+
+      import * as path from 'path';
+
+      import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from
+      '../e2e/utils.js';
+
+      import { TGP } from '../../src/tgp.js';
+
+      import { tgpTools } from '../../src/tools/index.js';
+
+
+      describe('Integration: Kernel <-> Sandbox Bridge', () => {
+        let tempDir: string;
+        let remoteRepo: string;
+
+        beforeEach(async () => {
+          tempDir = await createTempDir('tgp-int-bridge-');
+          remoteRepo = await createTempDir('tgp-remote-');
+          await initBareRepo(remoteRepo);
+        });
+
+        afterEach(async () => {
+          await cleanupDir(tempDir);
+          await cleanupDir(remoteRepo);
+        });
+
+        it('Host Filesystem Access: Tool can read files allowed by config', async () => {
+          // 1. Setup
+          const configPath = await createTgpConfig(tempDir, remoteRepo);
+          const kernel = new TGP({ configFile: configPath });
+          await kernel.boot();
+          const tools = tgpTools(kernel);
+
+          // 2. Create a data file in the "Host" VFS (using kernel.vfs directly to simulate existing state)
+          const dataPath = 'data.json';
+          const dataContent = JSON.stringify({ secret: 42 });
+          await kernel.vfs.writeFile(dataPath, dataContent);
+
+          // 3. Create a tool that reads it using tgp.read_file
+          const toolName = 'tools/reader.ts';
+          await tools.write_file.execute({
+            path: toolName,
+            content: `
+              export default async function() {
+                const content = await tgp.read_file('data.json');
+                return JSON.parse(content);
+              }
+            `
+          });
+
+          // 4. Execute
+          const result = await tools.exec_tool.execute({ path: toolName, args: {} });
+          
+          expect(result.success).toBe(true);
+          expect(result.result).toEqual({ secret: 42 });
+        });
+
+        it('Recursive Tool Execution: Tools can import other tools', async () => {
+          const configPath = await createTgpConfig(tempDir, remoteRepo);
+          const kernel = new TGP({ configFile: configPath });
+          await kernel.boot();
+          const tools = tgpTools(kernel);
+
+          // 1. Create a Library Tool (Dependency)
+          // Note: The VFS resolver looks for .ts extensions
+          await tools.write_file.execute({
+            path: 'tools/lib/math.ts',
+            content: `
+              export function double(n: number) { return n * 2; }
+              export const PI = 3.14;
+            `
+          });
+
+          // 2. Create Main Tool (Consumer)
+          // Uses 'require' shim injected by sandbox
+          await tools.write_file.execute({
+            path: 'tools/calc.ts',
+            content: `
+              const { double, PI } = require('./lib/math');
+              
+              export default function(args: { val: number }) {
+                return double(args.val) + PI;
+              }
+            `
+          });
+
+          // 3. Execute
+          const result = await tools.exec_tool.execute({ path: 'tools/calc.ts', args: { val: 10 } });
+
+          expect(result.success).toBe(true);
+          expect(result.result).toBe(23.14); // (10 * 2) + 3.14
+        });
+      });
+    patchStrategy: replace
+  - type: write
+    path: test/integration/sql.test.ts
+    content: >-
+      import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+      import Database from 'better-sqlite3';
+
+      import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from
+      '../e2e/utils.js';
+
+      import { TGP } from '../../src/tgp.js';
+
+      import { tgpTools, createSqlTools } from '../../src/tools/index.js';
+
+
+      describe('Integration: SQL Adapter (Real SQLite)', () => {
+        let tempDir: string;
+        let remoteRepo: string;
+        let db: Database.Database;
+
+        beforeEach(async () => {
+          tempDir = await createTempDir('tgp-int-sql-');
+          remoteRepo = await createTempDir('tgp-remote-');
+          await initBareRepo(remoteRepo);
+          
+          // Setup Real SQLite DB (In-memory for speed/isolation)
+          db = new Database(':memory:');
+          db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');
+          db.exec("INSERT INTO users (name) VALUES ('Alice')");
+          db.exec("INSERT INTO users (name) VALUES ('Bob')");
+        });
+
+        afterEach(async () => {
+          db.close();
+          await cleanupDir(tempDir);
+          await cleanupDir(remoteRepo);
+        });
+
+        it('Query Execution: Tool can query real database', async () => {
+          const configPath = await createTgpConfig(tempDir, remoteRepo);
+          
+          // Executor that bridges TGP -> Real DB
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const executor = async (sql: string, params: any[]) => {
+            const stmt = db.prepare(sql);
+            if (sql.trim().toLowerCase().startsWith('select')) {
+              return stmt.all(params);
+            }
+            return stmt.run(params);
+          };
+
+          const kernel = new TGP({ 
+            configFile: configPath,
+            sandboxAPI: { exec_sql: executor } // Inject for internal usage if needed
+          });
+          await kernel.boot();
+
+          // Compose tools
+          const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+          const toolName = 'tools/get_users.ts';
+          await tools.write_file.execute({
+            path: toolName,
+            content: `
+              export default async function() {
+                return await tgp.exec_sql('SELECT name FROM users ORDER BY name', []);
+              }
+            `
+          });
+
+          const res = await tools.exec_tool.execute({ path: toolName, args: {} });
+          
+          expect(res.success).toBe(true);
+          expect(res.result).toEqual([{ name: 'Alice' }, { name: 'Bob' }]);
+        });
+
+        it('Transaction Rollback: Host can rollback if tool throws', async () => {
+          const configPath = await createTgpConfig(tempDir, remoteRepo);
+          
+          // Executor
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const executor = async (sql: string, params: any[]) => {
+            return db.prepare(sql).run(params);
+          };
+
+          const kernel = new TGP({ configFile: configPath });
+          await kernel.boot();
+          const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+          // Create a buggy tool that writes then crashes
+          const buggyTool = 'tools/buggy_insert.ts';
+          await tools.write_file.execute({
+            path: buggyTool,
+            content: `
+              export default async function() {
+                 // 1. Write
+                 await tgp.exec_sql("INSERT INTO users (name) VALUES ('Charlie')", []);
+                 // 2. Crash
+                 throw new Error('Logic Bomb');
+              }
+            `
+          });
+
+          // Emulate Host Application Transaction Wrapper
+          // Since better-sqlite3 is synchronous, we manage transaction via raw SQL commands
+          // surrounding the async tool execution.
+          
+          db.exec('BEGIN');
+          let errorCaught = false;
+          
+          try {
+            const res = await tools.exec_tool.execute({ path: buggyTool, args: {} });
+            if (!res.success) {
+              throw new Error(res.error);
+            }
+            db.exec('COMMIT');
+          } catch (e) {
+            errorCaught = true;
+            db.exec('ROLLBACK');
+          }
+
+          expect(errorCaught).toBe(true);
+
+          // Verify 'Charlie' was NOT added
+          const rows = db.prepare('SELECT * FROM users WHERE name = ?').all('Charlie');
+          expect(rows.length).toBe(0);
+          
+          // Verify existing data remains
+          const count = db.prepare('SELECT count(*) as c FROM users').get() as { c: number };
+          expect(count.c).toBe(2);
+        });
+      });
+    patchStrategy: replace
+snapshot:
+  test/integration/gitops.test.ts: null
+  test/integration/bridge.test.ts: null
+  test/integration/sql.test.ts: null
+  package.json: |-
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/src/index.js",
+      "types": "dist/src/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "dev": "tsx src/cli/index.ts",
+        "lint": "eslint src/**/*.ts",
+        "lint:fix": "eslint src/**/*.ts --fix",
+        "pretest": "npm run build",
+        "test": "vitest run --passWithNoTests",
+        "tgp": "node bin/tgp.js"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "bin": {
+        "tgp": "./bin/tgp.js"
+      },
+      "dependencies": {
+        "esbuild": "^0.19.12",
+        "isolated-vm": "^6.0.2",
+        "isomorphic-git": "^1.35.1",
+        "zod": "^3.25.76",
+        "zod-to-json-schema": "^3.22.4",
+        "typescript": "^5.9.3"
+      },
+      "devDependencies": {
+        "@types/node": "^20.19.25",
+        "@typescript-eslint/eslint-plugin": "^8.48.0",
+        "@typescript-eslint/parser": "^8.48.0",
+        "eslint": "^9.39.1",
+        "tsx": "^4.16.2",
+        "vitest": "^1.6.0"
+      }
+    }
+approved: true
+linesAdded: 339
+linesRemoved: 0
+linesDifference: 339
+gitCommittedAt: null
+status: committed
+id: 58
