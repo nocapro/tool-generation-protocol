@@ -6,12 +6,12 @@ import { ToolSet } from './tools/types.js';
  * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
  * 
  * @param tools The TGP ToolSet (from tgpTools(kernel))
- * @returns An object compatible with the `tools` parameter of `generateText`
+ * @returns An object structurally compatible with the `tools` parameter of `generateText`.
  */
 export function formatTools(tools: ToolSet) {
-  // Vercel AI SDK Core accepts tools as an object where keys are names
-  // and values have { description, parameters, execute }.
-  // TGP tools already match this signature largely, but we ensure strict typing here.
+  // TGP's AgentTool interface is designed to be structurally compatible 
+  // with Vercel AI SDK's CoreTool interface. 
+  // We return identity here, but explicit validation/adapter logic can be added if interfaces diverge.
   return tools;
 }
 

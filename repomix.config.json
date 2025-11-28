@@ -40,7 +40,7 @@
       ".gitignore",
       "tsconfig.tsbuildinfo",
 //	"test/",
-//	"test-docs/"
+	"test-docs/"
 //        "test/e2e/",
 //	"src"
     ]

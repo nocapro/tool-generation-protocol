@@ -34,6 +34,7 @@
     "typescript": "^5.9.3"
   },
   "devDependencies": {
+    "ai": "5.0.104",
     "@types/node": "^20.19.25",
     "@types/better-sqlite3": "^7.6.9",
     "@typescript-eslint/eslint-plugin": "^8.48.0",
