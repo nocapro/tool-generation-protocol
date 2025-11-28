@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
 import { TGP } from '../../src/tgp.js';
 import { tgpTools, createSqlTools } from '../../src/tools/index.js';

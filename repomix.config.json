@@ -25,6 +25,8 @@
   "include": [
 //"README.md",
 //"test-docs/"
+"test/",
+"test-docs/e2e.test-plan.md"
 ],
   "ignore": {
     "useGitignore": true,
@@ -37,7 +39,9 @@
       "LICENSE",
       ".gitignore",
       "tsconfig.tsbuildinfo",
-        "test/e2e/"
+//	"test/"
+//        "test/e2e/",
+//	"src"
     ]
   },
   "security": {

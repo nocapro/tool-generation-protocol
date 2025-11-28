@@ -6,6 +6,7 @@
     "strict": true,
     "noImplicitAny": true,
     "strictNullChecks": true,
+    "types": ["bun-types", "node"],
     "strictFunctionTypes": true,
     "noImplicitThis": true,
     "noImplicitReturns": true,
