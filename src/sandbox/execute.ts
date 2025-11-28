@@ -98,7 +98,7 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
       // 2. Resolve Local Modules (VFS)
       const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
 
-      if (!resolvedPath) {
+      if (resolvedPath === null) {
         throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
       }
 

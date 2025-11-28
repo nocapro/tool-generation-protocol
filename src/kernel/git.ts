@@ -95,6 +95,7 @@ class NotImplementedAdapter implements GitPlatformAdapter {
 // --- Local Git Implementation (Shell-based) ---
 // Used for E2E testing and Air-gapped environments
 async function execGit(args: string[], cwd: string, logger: Logger): Promise<void> {
+  logger.debug(`[Local] Executing: git ${args.join(' ')} in ${cwd}`);
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, { cwd, stdio: 'pipe' });
     let output = '';
@@ -154,7 +155,7 @@ function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
 
       try {
           await execGit(['push', 'origin', branch], dir, logger);
-      } catch (e) {
+      } catch (_e) {
           // Handle non-fast-forward by pulling first (simple auto-merge)
           logger.warn(`[Local] Push failed. Attempting rebase...`);
           await execGit(['pull', '--rebase', 'origin', branch], dir, logger);

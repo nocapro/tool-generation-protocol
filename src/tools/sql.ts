@@ -23,7 +23,7 @@ export function createSqlTools(executor: DBExecutor): ToolSet {
       description: 'Executes a raw SQL query against the database. Returns an array of rows.',
       parameters: ExecSqlParams,
       execute: async ({ sql, params }) => {
-        return executor(sql, params || []);
+        return executor(sql, params ?? []);
       },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as AgentTool<typeof ExecSqlParams, any[]>,
