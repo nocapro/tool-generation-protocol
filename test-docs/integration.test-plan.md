@@ -1,8 +1,11 @@
 # Integration Test Plan (Real Implementation)
 
 **Rules:**
-1.  **Git**: Use local "bare" repositories to simulate remotes.
-2.  **Database**: Use local SQLite file or ephemeral Docker container for SQL tests.
+1.  **No Mock, No Spy**: Tests use real Git binaries, real SQLite drivers, and real V8 isolates.
+2.  **Real Implementation**: Verification involves checking the actual effects on the filesystem, git history, and database state.
+3.  **Isolated**: Each test runs in a unique, ephemeral directory (`/tmp/tgp-integration-${uuid}`).
+4.  **Idempotent**: Tests can be re-run without manual cleanup.
+5.  **Clean on SIGTERM**: Test harness cleans up temp files if interrupted.
 
 ## 1. GitOps & Persistence
 **Target**: `src/kernel/git.ts`

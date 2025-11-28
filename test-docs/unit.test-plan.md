@@ -1,9 +1,11 @@
 # Unit Test Plan (Real Implementation)
 
 **Rules:**
-1.  **No Mocks**: Use real file systems, real V8 isolates.
-2.  **Isolation**: Each test suite creates a unique temporary directory (`/tmp/tgp-test-{uuid}`).
-3.  **Cleanup**: Register `process.on('SIGTERM')` handlers to wipe temp dirs.
+1.  **No Mock, No Spy**: Use real file systems (node:fs), real V8 isolates (isolated-vm).
+2.  **Real Implementation**: Verify logic by observing real output/exceptions.
+3.  **Isolated**: Each test suite creates a unique temporary directory (`/tmp/tgp-unit-${uuid}`).
+4.  **Idempotent**: No shared global state between tests.
+5.  **Clean on SIGTERM**: Register `process.on('SIGTERM')` handlers to wipe temp dirs.
 
 ## 1. VFS (Virtual Filesystem) - Node Adapter
 **Target**: `src/vfs/node.ts`
