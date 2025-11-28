@@ -40,7 +40,7 @@ export function createValidationTools(kernel: Kernel) {
                 if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
                     const pkg = node.moduleSpecifier.text;
                     if (!allowedImports.includes(pkg)) {
-                         errors.push(`Violation [Safety]: Import of '${pkg}' is not allowed.`);
+                         errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
                     }
                 }
             }
@@ -95,7 +95,7 @@ export function createValidationTools(kernel: Kernel) {
                 if (!isNaN(val) && !allowed.includes(val)) {
                     // Filter out array indices? Hard to detect without type checker.
                     // We enforce strictness: abstract data to args.
-                    errors.push(`Violation [Standard 1]: Found potential magic number '${node.text}'. Abstract logic from data.`);
+                    errors.push(`Violation [Standard 1]: Found potential Magic Number '${node.text}'. Abstract logic from data.`);
                 }
             }
 
