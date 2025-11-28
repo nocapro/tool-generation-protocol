@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 // ESM Polyfills
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../../');
 
 // Track temp dirs for cleanup
 const tempDirs: string[] = [];
@@ -36,23 +37,25 @@ export async function cleanupDir(dir: string): Promise<void> {
 export async function initBareRepo(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
   execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
-  // Set default branch to main
+  // Set default branch to main to avoid 'master' vs 'main' confusion
   execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
 }
 
 /**
- * Generates a tgp.config.js file in the test directory pointing to the local bare repo.
- * Uses .js to avoid compilation dependencies and uses absolute paths for isolation.
+ * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
+ * We use an absolute path for rootDir to ensure tests don't pollute the project root.
  */
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.js'): Promise<string> {
-    // We use an absolute path for rootDir to ensure tests don't pollute the project root
-    // regardless of where the process CWD is.
+export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
     const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
     const remotePath = remoteRepo.split(path.sep).join('/');
     const allowedDir = workDir.split(path.sep).join('/');
 
+    const configModulePath = path.join(projectRoot, 'src/config.ts').split(path.sep).join('/');
+
     const configContent = `
-export default {
+import { defineTGPConfig } from '${configModulePath}';
+
+export default defineTGPConfig({
   rootDir: '${rootDir}',
   git: {
     provider: 'local',
@@ -65,7 +68,7 @@ export default {
     blockUpwardTraversal: false
   },
   allowedImports: ['zod', 'date-fns']
-};
+});
 `;
     const configPath = path.join(workDir, fileName);
     await fs.writeFile(configPath, configContent);
@@ -77,7 +80,11 @@ export default {
  */
 export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
     return new Promise((resolve) => {
+        // Points to the source bin wrapper, which imports from dist/
+        // Note: 'npm run build' must be run before testing CLI if using the bin script directly.
+        // For development tests, we might want to run with tsx, but here we test the "production" bin behavior logic.
         const tgpBin = path.resolve(__dirname, '../../bin/tgp.js');
+        
         const proc = spawn('node', [tgpBin, ...args], {
             cwd,
             env: { ...process.env, NODE_ENV: 'test' }
@@ -97,7 +104,6 @@ export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string
 
 // Cleanup hook
 process.on('exit', () => {
-    // Sync cleanup on exit is limited, but we try best effort
     tempDirs.forEach(d => {
         try { execSync(`rm -rf ${d}`); } catch {}
     });

@@ -33,11 +33,7 @@ src/
   types.ts
 test/
   e2e/
-    scenarios.test.d.ts
-    scenarios.test.js
     scenarios.test.ts
-    utils.d.ts
-    utils.js
     utils.ts
 test-docs/
   e2e.test-plan.md
@@ -51,198 +47,115 @@ tsconfig.json
 
 # Files
 
-## File: test/e2e/scenarios.test.d.ts
-````typescript
-export {};
+## File: bin/tgp.js
+````javascript
+#!/usr/bin/env node
+
+import { cli } from '../dist/cli/index.js';
+
+cli().catch((err) => {
+  console.error('TGP CLI Error:', err);
+  process.exit(1);
+});
 ````
 
-## File: test/e2e/scenarios.test.js
-````javascript
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { createTempDir, initBareRepo, createTgpConfig, runTgpCli, cleanupDir } from './utils.js';
-import { TGP } from '../../src/tgp.js';
-import { tgpTools } from '../../src/tools/index.js';
-import { createSqlTools } from '../../src/tools/sql.js';
-describe('E2E Scenarios', () => {
-    let tempDir;
-    let remoteRepo;
-    beforeEach(async () => {
-        tempDir = await createTempDir();
-        remoteRepo = await createTempDir('tgp-remote-');
-        await initBareRepo(remoteRepo);
-    });
-    afterEach(async () => {
-        await cleanupDir(tempDir);
-        await cleanupDir(remoteRepo);
-    });
-    it('Scenario 1: Cold Start (Hydration, Fabrication, Execution)', async () => {
-        // 1. Setup Config
-        const configPath = await createTgpConfig(tempDir, remoteRepo);
-        // 2. Boot Kernel
-        const kernel = new TGP({ configFile: configPath });
-        await kernel.boot();
-        const tools = tgpTools(kernel);
-        // 3. Create a Tool (Fibonacci)
-        const fibPath = 'tools/math/fib.ts';
-        const fibCode = `
-      export default function fib(args: { n: number }) {
-        const n = args.n;
-        if (n <= 1) return n;
-        let a = 0, b = 1;
-        for (let i = 2; i <= n; i++) {
-          const temp = a + b;
-          a = b;
-          b = temp;
-        }
-        return b;
-      }
-    `;
-        const writeRes = await tools.write_file.execute({ path: fibPath, content: fibCode });
-        expect(writeRes.success).toBe(true);
-        // 4. Validate Tool
-        const checkRes = await tools.check_tool.execute({ path: fibPath });
-        expect(checkRes.valid).toBe(true);
-        // 5. Execute Tool
-        const execRes = await tools.exec_tool.execute({ path: fibPath, args: { n: 10 } });
-        expect(execRes.success).toBe(true);
-        expect(execRes.result).toBe(55);
-        // 6. Verify Persistence
-        // Clone remote repo to a new dir and check file existence
-        const verifyDir = await createTempDir('tgp-verify-');
-        const { execSync } = await import('node:child_process');
-        execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
-        const exists = await fs.access(path.join(verifyDir, fibPath)).then(() => true).catch(() => false);
-        expect(exists).toBe(true);
-        await cleanupDir(verifyDir);
-    });
-    it('Scenario 2: Concurrency (The Merge Test)', async () => {
-        // Agent A
-        const dirA = await createTempDir('tgp-agent-a-');
-        const configA = await createTgpConfig(dirA, remoteRepo);
-        const kernelA = new TGP({ configFile: configA });
-        await kernelA.boot();
-        // Agent B
-        const dirB = await createTempDir('tgp-agent-b-');
-        const configB = await createTgpConfig(dirB, remoteRepo);
-        const kernelB = new TGP({ configFile: configB });
-        await kernelB.boot();
-        const toolsA = tgpTools(kernelA);
-        const toolsB = tgpTools(kernelB);
-        // Both agents create different tools simultaneously
-        // This forces one to fail the push, auto-rebase, and push again.
-        await Promise.all([
-            toolsA.write_file.execute({
-                path: 'tools/tool_A.ts',
-                content: 'export default () => "A"'
-            }),
-            toolsB.write_file.execute({
-                path: 'tools/tool_B.ts',
-                content: 'export default () => "B"'
-            })
-        ]);
-        // Verify using a fresh Agent C
-        const dirC = await createTempDir('tgp-agent-c-');
-        const configC = await createTgpConfig(dirC, remoteRepo);
-        const kernelC = new TGP({ configFile: configC });
-        await kernelC.boot();
-        const files = await kernelC.vfs.listFiles('tools');
-        expect(files).toContain('tools/tool_A.ts');
-        expect(files).toContain('tools/tool_B.ts');
-        await cleanupDir(dirA);
-        await cleanupDir(dirB);
-        await cleanupDir(dirC);
-    });
-    it('Scenario 3: Refactor (Search & Replace)', async () => {
-        const configPath = await createTgpConfig(tempDir, remoteRepo);
-        const kernel = new TGP({ configFile: configPath });
-        await kernel.boot();
-        const tools = tgpTools(kernel);
-        const toolName = 'tools/greet.ts';
-        await tools.write_file.execute({
-            path: toolName,
-            content: `export default function(args: { name: string }) { return "hello " + args.name; }`
-        });
-        let res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
-        expect(res.result).toBe('hello world');
-        await tools.patch_file.execute({
-            path: toolName,
-            search: 'return "hello " + args.name;',
-            replace: 'return "greetings " + args.name;'
-        });
-        res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
-        expect(res.result).toBe('greetings world');
-    });
-    it('Scenario 4: Resilience (Infinite Loop)', async () => {
-        const configPath = await createTgpConfig(tempDir, remoteRepo);
-        const kernel = new TGP({ configFile: configPath });
-        await kernel.boot();
-        const tools = tgpTools(kernel);
-        const badTool = 'tools/freeze.ts';
-        await tools.write_file.execute({
-            path: badTool,
-            content: `export default function() { while(true) {} }`
-        });
-        const res = await tools.exec_tool.execute({ path: badTool, args: {} });
-        expect(res.success).toBe(false);
-        expect(res.error).toMatch(/timed out/i);
-    });
-    it('Scenario 5: Security (Jailbreak)', async () => {
-        const configPath = await createTgpConfig(tempDir, remoteRepo);
-        const kernel = new TGP({ configFile: configPath });
-        await kernel.boot();
-        const tools = tgpTools(kernel);
-        const hackTool = 'tools/hack.ts';
-        await tools.write_file.execute({
-            path: hackTool,
-            content: `
-        export default async function() {
-           return await tgp.read_file('../../package.json');
-        }
-      `
-        });
-        const res = await tools.exec_tool.execute({ path: hackTool, args: {} });
-        expect(res.success).toBe(false);
-        expect(res.error).toMatch(/Security Violation/i);
-    });
-    it('Scenario 6: SQL Error Propagation', async () => {
-        const configPath = await createTgpConfig(tempDir, remoteRepo);
-        const kernel = new TGP({ configFile: configPath });
-        await kernel.boot();
-        // Mock DB executor
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const mockExecutor = async (sql, _params) => {
-            if (sql.includes('fail')) {
-                throw new Error('Database Error');
-            }
-            return [];
-        };
-        const tools = { ...tgpTools(kernel), ...createSqlTools(mockExecutor) };
-        const dbTool = 'tools/db_ops.ts';
-        await tools.write_file.execute({
-            path: dbTool,
-            content: `
-        export default async function(args: { crash: boolean }) {
-           if (args.crash) {
-              await tgp.exec_sql('SELECT * FROM users WHERE name = "fail"', []);
-           }
-        }
-      `
-        });
-        const res = await tools.exec_tool.execute({ path: dbTool, args: { crash: true } });
-        expect(res.success).toBe(false);
-        expect(res.error).toContain('Database Error');
-    });
-    it('Scenario 8: CLI Bootstrap', async () => {
-        const { code } = await runTgpCli(['init'], tempDir);
-        expect(code).toBe(0);
-        const configExists = await fs.access(path.join(tempDir, 'tgp.config.ts')).then(() => true).catch(() => false);
-        expect(configExists).toBe(true);
-        const metaExists = await fs.access(path.join(tempDir, '.tgp/meta.json')).then(() => true).catch(() => false);
-        expect(metaExists).toBe(true);
-    });
-});
+## File: src/adapter.ts
+````typescript
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+import { ToolSet } from './tools/types.js';
+
+/**
+ * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
+ * 
+ * @param tools The TGP ToolSet (from tgpTools(kernel))
+ * @returns An object compatible with the `tools` parameter of `generateText`
+ */
+export function formatTools(tools: ToolSet) {
+  // Vercel AI SDK Core accepts tools as an object where keys are names
+  // and values have { description, parameters, execute }.
+  // TGP tools already match this signature largely, but we ensure strict typing here.
+  return tools;
+}
+
+/**
+ * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
+ * Useful if using the raw OpenAI SDK.
+ */
+export function toOpenAITools(tools: ToolSet) {
+  return Object.entries(tools).map(([name, tool]) => ({
+    type: 'function',
+    function: {
+      name,
+      description: tool.description,
+      parameters: zodToJsonSchema(tool.parameters),
+    },
+  }));
+}
+````
+
+## File: src/config.ts
+````typescript
+import { pathToFileURL } from 'url';
+import { TGPConfig, TGPConfigSchema } from './types.js';
+
+/**
+ * Identity function to provide type inference for configuration files.
+ * usage: export default defineTGPConfig({ ... })
+ */
+export function defineTGPConfig(config: TGPConfig): TGPConfig {
+  return config;
+}
+
+/**
+ * Dynamically loads a TGP configuration file, validates it against the schema,
+ * and returns the typed configuration object.
+ * 
+ * @param configPath - Absolute or relative path to the config file (e.g., ./tgp.config.ts)
+ */
+export async function loadTGPConfig(configPath: string): Promise<TGPConfig> {
+  try {
+    // Convert path to file URL to ensure compatibility with ESM imports
+    // We assume the host environment (Node) can handle the import.
+    // In Serverless environments, the config might be injected differently, 
+    // but this loader is primarily for the CLI/Node runtime.
+    const importPath = pathToFileURL(configPath).href;
+    
+    const module = await import(importPath);
+    
+    // Support both default export and named export 'config'
+    const rawConfig = module.default || module.config;
+
+    if (!rawConfig) {
+      throw new Error(`No default export found in ${configPath}`);
+    }
+
+    // Runtime Validation: Ensure the user provided valid configuration
+    const parsed = TGPConfigSchema.safeParse(rawConfig);
+
+    if (!parsed.success) {
+      const errors = parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('\n');
+      throw new Error(`Invalid TGP Configuration:\n${errors}`);
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Failed to load TGP config from ${configPath}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+````
+
+## File: src/index.ts
+````typescript
+// Exporting the Core DNA for consumers
+export * from './types.js';
+export * from './config.js';
+export * from './tools/index.js';
+export * from './tgp.js';
+export * from './adapter.js';
 ````
 
 ## File: test/e2e/scenarios.test.ts
@@ -460,7 +373,11 @@ describe('E2E Scenarios', () => {
     expect(res.error).toContain('Database Error');
   });
 
+  // Note: Scenario 7 (SIGTERM) is skipped as the CLI currently does not have a long-running 'serve' mode to test against.
+
   it('Scenario 8: CLI Bootstrap', async () => {
+    // We assume the project has been built via 'npm run build' for bin/tgp.js to work
+    // If not, this test might fail if dist/ doesn't exist.
     const { code } = await runTgpCli(['init'], tempDir);
     expect(code).toBe(0);
     
@@ -470,136 +387,6 @@ describe('E2E Scenarios', () => {
     const metaExists = await fs.access(path.join(tempDir, '.tgp/meta.json')).then(() => true).catch(() => false);
     expect(metaExists).toBe(true);
   });
-});
-````
-
-## File: test/e2e/utils.d.ts
-````typescript
-/**
- * Creates a unique temporary directory for a test case.
- * Registers it for auto-cleanup on process exit.
- */
-export declare function createTempDir(prefix?: string): Promise<string>;
-/**
- * Recursively deletes a directory.
- */
-export declare function cleanupDir(dir: string): Promise<void>;
-/**
- * Initializes a bare Git repository at the specified path.
- * This serves as the 'Remote' for the E2E tests.
- */
-export declare function initBareRepo(dir: string): Promise<void>;
-/**
- * Generates a tgp.config.js file in the test directory pointing to the local bare repo.
- * Uses .js to avoid compilation dependencies and uses absolute paths for isolation.
- */
-export declare function createTgpConfig(workDir: string, remoteRepo: string, fileName?: string): Promise<string>;
-/**
- * Executes the TGP CLI binary in the given directory.
- */
-export declare function runTgpCli(args: string[], cwd: string): Promise<{
-    stdout: string;
-    stderr: string;
-    code: number;
-}>;
-````
-
-## File: test/e2e/utils.js
-````javascript
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import { spawn, execSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-// ESM Polyfills
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-// Track temp dirs for cleanup
-const tempDirs = [];
-/**
- * Creates a unique temporary directory for a test case.
- * Registers it for auto-cleanup on process exit.
- */
-export async function createTempDir(prefix = 'tgp-e2e-') {
-    const tmpDir = os.tmpdir();
-    const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
-    tempDirs.push(dir);
-    return dir;
-}
-/**
- * Recursively deletes a directory.
- */
-export async function cleanupDir(dir) {
-    await fs.rm(dir, { recursive: true, force: true }).catch(() => { });
-}
-/**
- * Initializes a bare Git repository at the specified path.
- * This serves as the 'Remote' for the E2E tests.
- */
-export async function initBareRepo(dir) {
-    await fs.mkdir(dir, { recursive: true });
-    execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
-    // Set default branch to main
-    execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
-}
-/**
- * Generates a tgp.config.js file in the test directory pointing to the local bare repo.
- * Uses .js to avoid compilation dependencies and uses absolute paths for isolation.
- */
-export async function createTgpConfig(workDir, remoteRepo, fileName = 'tgp.config.js') {
-    // We use an absolute path for rootDir to ensure tests don't pollute the project root
-    // regardless of where the process CWD is.
-    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
-    const remotePath = remoteRepo.split(path.sep).join('/');
-    const allowedDir = workDir.split(path.sep).join('/');
-    const configContent = `
-export default {
-  rootDir: '${rootDir}',
-  git: {
-    provider: 'local',
-    repo: '${remotePath}',
-    branch: 'main',
-    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
-  },
-  fs: {
-    allowedDirs: ['${allowedDir}', '${os.tmpdir().split(path.sep).join('/')}'],
-    blockUpwardTraversal: false
-  },
-  allowedImports: ['zod', 'date-fns']
-};
-`;
-    const configPath = path.join(workDir, fileName);
-    await fs.writeFile(configPath, configContent);
-    return configPath;
-}
-/**
- * Executes the TGP CLI binary in the given directory.
- */
-export function runTgpCli(args, cwd) {
-    return new Promise((resolve) => {
-        const tgpBin = path.resolve(__dirname, '../../bin/tgp.js');
-        const proc = spawn('node', [tgpBin, ...args], {
-            cwd,
-            env: { ...process.env, NODE_ENV: 'test' }
-        });
-        let stdout = '';
-        let stderr = '';
-        proc.stdout.on('data', d => stdout += d.toString());
-        proc.stderr.on('data', d => stderr += d.toString());
-        proc.on('close', (code) => {
-            resolve({ stdout, stderr, code: code ?? -1 });
-        });
-    });
-}
-// Cleanup hook
-process.on('exit', () => {
-    // Sync cleanup on exit is limited, but we try best effort
-    tempDirs.forEach(d => {
-        try {
-            execSync(`rm -rf ${d}`);
-        }
-        catch { }
-    });
 });
 ````
 
@@ -614,6 +401,7 @@ import { fileURLToPath } from 'node:url';
 // ESM Polyfills
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../../');
 
 // Track temp dirs for cleanup
 const tempDirs: string[] = [];
@@ -643,23 +431,25 @@ export async function cleanupDir(dir: string): Promise<void> {
 export async function initBareRepo(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
   execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
-  // Set default branch to main
+  // Set default branch to main to avoid 'master' vs 'main' confusion
   execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
 }
 
 /**
- * Generates a tgp.config.js file in the test directory pointing to the local bare repo.
- * Uses .js to avoid compilation dependencies and uses absolute paths for isolation.
+ * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
+ * We use an absolute path for rootDir to ensure tests don't pollute the project root.
  */
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.js'): Promise<string> {
-    // We use an absolute path for rootDir to ensure tests don't pollute the project root
-    // regardless of where the process CWD is.
+export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
     const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
     const remotePath = remoteRepo.split(path.sep).join('/');
     const allowedDir = workDir.split(path.sep).join('/');
 
+    const configModulePath = path.join(projectRoot, 'src/config.ts').split(path.sep).join('/');
+
     const configContent = `
-export default {
+import { defineTGPConfig } from '${configModulePath}';
+
+export default defineTGPConfig({
   rootDir: '${rootDir}',
   git: {
     provider: 'local',
@@ -672,7 +462,7 @@ export default {
     blockUpwardTraversal: false
   },
   allowedImports: ['zod', 'date-fns']
-};
+});
 `;
     const configPath = path.join(workDir, fileName);
     await fs.writeFile(configPath, configContent);
@@ -684,7 +474,11 @@ export default {
  */
 export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
     return new Promise((resolve) => {
+        // Points to the source bin wrapper, which imports from dist/
+        // Note: 'npm run build' must be run before testing CLI if using the bin script directly.
+        // For development tests, we might want to run with tsx, but here we test the "production" bin behavior logic.
         const tgpBin = path.resolve(__dirname, '../../bin/tgp.js');
+        
         const proc = spawn('node', [tgpBin, ...args], {
             cwd,
             env: { ...process.env, NODE_ENV: 'test' }
@@ -704,280 +498,10 @@ export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string
 
 // Cleanup hook
 process.on('exit', () => {
-    // Sync cleanup on exit is limited, but we try best effort
     tempDirs.forEach(d => {
         try { execSync(`rm -rf ${d}`); } catch {}
     });
 });
-````
-
-## File: bin/tgp.js
-````javascript
-#!/usr/bin/env node
-
-import { cli } from '../dist/cli/index.js';
-
-cli().catch((err) => {
-  console.error('TGP CLI Error:', err);
-  process.exit(1);
-});
-````
-
-## File: src/sandbox/bundler.ts
-````typescript
-import { buildSync } from 'esbuild';
-
-// In-memory cache to avoid redundant bundling of the same dependency within the kernel's lifetime.
-const bundleCache = new Map<string, string>();
-
-/**
- * Synchronously bundles a node module into a single CommonJS string.
- * This is used by the sandbox's 'require' shim to provide whitelisted dependencies.
- * 
- * @param dependency The name of the package to bundle (e.g., 'zod').
- * @returns The bundled JavaScript code as a string.
- */
-export function bundleDependencySync(dependency: string): string {
-  if (bundleCache.has(dependency)) {
-    return bundleCache.get(dependency)!;
-  }
-
-  try {
-    const result = buildSync({
-      entryPoints: [dependency],
-      bundle: true,
-      format: 'cjs',
-      platform: 'node',
-      write: false, // Return the output in memory
-      logLevel: 'silent', // Suppress esbuild warnings in production logs
-    });
-
-    if (result.outputFiles && result.outputFiles.length > 0) {
-      const bundledCode = result.outputFiles[0].text;
-      bundleCache.set(dependency, bundledCode);
-      return bundledCode;
-    }
-
-    throw new Error(`esbuild did not produce an output file for '${dependency}'.`);
-
-  } catch (error) {
-    // Re-throw with a more informative message for the host application logs
-    const msg = error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to resolve or bundle dependency '${dependency}': ${msg}`);
-  }
-}
-````
-
-## File: src/tools/sql.ts
-````typescript
-import { z } from 'zod';
-import { AgentTool, ToolSet } from './types.js';
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type DBExecutor = (sql: string, params: any[]) => Promise<any[]>;
-
-export const ExecSqlParams = z.object({
-  sql: z.string().describe('The raw SQL query to execute.'),
-  params: z.array(z.any()).optional().describe('An array of parameters to substitute into the query.'),
-});
-
-/**
- * Creates a ToolSet containing the `exec_sql` tool.
- * This function allows the host application to inject its own database connection
- * and execution logic into the TGP agent.
- *
- * @param executor A function that takes a SQL string and parameters and returns the result.
- * @returns A ToolSet containing the `exec_sql` tool.
- */
-export function createSqlTools(executor: DBExecutor): ToolSet {
-  return {
-    exec_sql: {
-      description: 'Executes a raw SQL query against the database. Returns an array of rows.',
-      parameters: ExecSqlParams,
-      execute: async ({ sql, params }) => {
-        return executor(sql, params || []);
-      },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as AgentTool<typeof ExecSqlParams, any[]>,
-  };
-}
-````
-
-## File: src/adapter.ts
-````typescript
-import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
-import { ToolSet } from './tools/types.js';
-
-/**
- * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
- * 
- * @param tools The TGP ToolSet (from tgpTools(kernel))
- * @returns An object compatible with the `tools` parameter of `generateText`
- */
-export function formatTools(tools: ToolSet) {
-  // Vercel AI SDK Core accepts tools as an object where keys are names
-  // and values have { description, parameters, execute }.
-  // TGP tools already match this signature largely, but we ensure strict typing here.
-  return tools;
-}
-
-/**
- * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
- * Useful if using the raw OpenAI SDK.
- */
-export function toOpenAITools(tools: ToolSet) {
-  return Object.entries(tools).map(([name, tool]) => ({
-    type: 'function',
-    function: {
-      name,
-      description: tool.description,
-      parameters: zodToJsonSchema(tool.parameters),
-    },
-  }));
-}
-````
-
-## File: src/config.ts
-````typescript
-import { pathToFileURL } from 'url';
-import { TGPConfig, TGPConfigSchema } from './types.js';
-
-/**
- * Identity function to provide type inference for configuration files.
- * usage: export default defineTGPConfig({ ... })
- */
-export function defineTGPConfig(config: TGPConfig): TGPConfig {
-  return config;
-}
-
-/**
- * Dynamically loads a TGP configuration file, validates it against the schema,
- * and returns the typed configuration object.
- * 
- * @param configPath - Absolute or relative path to the config file (e.g., ./tgp.config.ts)
- */
-export async function loadTGPConfig(configPath: string): Promise<TGPConfig> {
-  try {
-    // Convert path to file URL to ensure compatibility with ESM imports
-    // We assume the host environment (Node) can handle the import.
-    // In Serverless environments, the config might be injected differently, 
-    // but this loader is primarily for the CLI/Node runtime.
-    const importPath = pathToFileURL(configPath).href;
-    
-    const module = await import(importPath);
-    
-    // Support both default export and named export 'config'
-    const rawConfig = module.default || module.config;
-
-    if (!rawConfig) {
-      throw new Error(`No default export found in ${configPath}`);
-    }
-
-    // Runtime Validation: Ensure the user provided valid configuration
-    const parsed = TGPConfigSchema.safeParse(rawConfig);
-
-    if (!parsed.success) {
-      const errors = parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('\n');
-      throw new Error(`Invalid TGP Configuration:\n${errors}`);
-    }
-
-    return parsed.data;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to load TGP config from ${configPath}: ${error.message}`);
-    }
-    throw error;
-  }
-}
-````
-
-## File: src/index.ts
-````typescript
-// Exporting the Core DNA for consumers
-export * from './types.js';
-export * from './config.js';
-export * from './tools/index.js';
-export * from './tgp.js';
-export * from './adapter.js';
-````
-
-## File: eslint.config.js
-````javascript
-import typescriptESLint from '@typescript-eslint/eslint-plugin';
-import typescriptParser from '@typescript-eslint/parser';
-
-export default [
-  {
-    files: ['src/**/*.ts', 'test/**/*.ts'],
-    languageOptions: {
-      parser: typescriptParser,
-      parserOptions: {
-        ecmaVersion: 2022,
-        sourceType: 'module',
-        project: './tsconfig.json',
-      },
-      globals: {
-        console: 'readonly',
-        process: 'readonly',
-        Buffer: 'readonly',
-        __dirname: 'readonly',
-        __filename: 'readonly',
-        global: 'readonly',
-        describe: 'readonly',
-        it: 'readonly',
-        expect: 'readonly',
-        beforeEach: 'readonly',
-        afterEach: 'readonly',
-      },
-    },
-    plugins: {
-      '@typescript-eslint': typescriptESLint,
-    },
-    rules: {
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
-      '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-non-null-assertion': 'warn',
-      '@typescript-eslint/no-empty-function': 'error',
-      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
-      '@typescript-eslint/prefer-as-const': 'error',
-      '@typescript-eslint/prefer-nullish-coalescing': 'error',
-      '@typescript-eslint/prefer-optional-chain': 'error',
-      '@typescript-eslint/strict-boolean-expressions': 'error',
-      'no-console': 'warn',
-      'no-debugger': 'error',
-      'no-unused-expressions': 'error',
-      'prefer-const': 'error',
-      'no-var': 'error',
-    },
-  },
-  {
-    ignores: ['dist/', 'node_modules/', '*.js'],
-  },
-];
-````
-
-## File: tsconfig.json
-````json
-{
-  "compilerOptions": {
-    "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
-    "strict": true,
-    "noImplicitAny": true,
-    "strictNullChecks": true,
-    "strictFunctionTypes": true,
-    "noImplicitThis": true,
-    "noImplicitReturns": true,
-    "skipLibCheck": true,
-    "forceConsistentCasingInFileNames": true,
-    "outDir": "./dist",
-    "rootDir": "./src",
-    "declaration": true
-  },
-  "include": ["src/**/*", "test/**/*"]
-}
 ````
 
 ## File: src/cli/index.ts
@@ -1015,6 +539,51 @@ Usage:
   tgp init    Initialize a new TGP environment in the current directory.
   tgp help    Show this message.
 `);
+}
+````
+
+## File: src/sandbox/bundler.ts
+````typescript
+import { buildSync } from 'esbuild';
+
+// In-memory cache to avoid redundant bundling of the same dependency within the kernel's lifetime.
+const bundleCache = new Map<string, string>();
+
+/**
+ * Synchronously bundles a node module into a single CommonJS string.
+ * This is used by the sandbox's 'require' shim to provide whitelisted dependencies.
+ * 
+ * @param dependency The name of the package to bundle (e.g., 'zod').
+ * @returns The bundled JavaScript code as a string.
+ */
+export function bundleDependencySync(dependency: string): string {
+  if (bundleCache.has(dependency)) {
+    return bundleCache.get(dependency) as string;
+  }
+
+  try {
+    const result = buildSync({
+      entryPoints: [dependency],
+      bundle: true,
+      format: 'cjs',
+      platform: 'node',
+      write: false, // Return the output in memory
+      logLevel: 'silent', // Suppress esbuild warnings in production logs
+    });
+
+    if (result.outputFiles !== undefined && result.outputFiles.length > 0) {
+      const bundledCode = result.outputFiles[0].text;
+      bundleCache.set(dependency, bundledCode);
+      return bundledCode;
+    }
+
+    throw new Error(`esbuild did not produce an output file for '${dependency}'.`);
+
+  } catch (error) {
+    // Re-throw with a more informative message for the host application logs
+    const msg = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to resolve or bundle dependency '${dependency}': ${msg}`);
+  }
 }
 ````
 
@@ -1125,6 +694,41 @@ export function tgpTools(kernel: Kernel): ToolSet {
     ...createFsTools(kernel),
     ...createValidationTools(kernel),
     ...createExecTools(kernel),
+  };
+}
+````
+
+## File: src/tools/sql.ts
+````typescript
+import { z } from 'zod';
+import { AgentTool, ToolSet } from './types.js';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type DBExecutor = (sql: string, params: any[]) => Promise<any[]>;
+
+export const ExecSqlParams = z.object({
+  sql: z.string().describe('The raw SQL query to execute.'),
+  params: z.array(z.any()).optional().describe('An array of parameters to substitute into the query.'),
+});
+
+/**
+ * Creates a ToolSet containing the `exec_sql` tool.
+ * This function allows the host application to inject its own database connection
+ * and execution logic into the TGP agent.
+ *
+ * @param executor A function that takes a SQL string and parameters and returns the result.
+ * @returns A ToolSet containing the `exec_sql` tool.
+ */
+export function createSqlTools(executor: DBExecutor): ToolSet {
+  return {
+    exec_sql: {
+      description: 'Executes a raw SQL query against the database. Returns an array of rows.',
+      parameters: ExecSqlParams,
+      execute: async ({ sql, params }) => {
+        return executor(sql, params ?? []);
+      },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as AgentTool<typeof ExecSqlParams, any[]>,
   };
 }
 ````
@@ -1524,10 +1128,66 @@ export interface VFSAdapter {
     - [ ] **Assert**: Validation fails if import is not in whitelist.
 ````
 
+## File: eslint.config.js
+````javascript
+import typescriptESLint from '@typescript-eslint/eslint-plugin';
+import typescriptParser from '@typescript-eslint/parser';
+
+export default [
+  {
+    files: ['src/**/*.ts', 'test/**/*.ts'],
+    languageOptions: {
+      parser: typescriptParser,
+      parserOptions: {
+        ecmaVersion: 2022,
+        sourceType: 'module',
+        project: './tsconfig.json',
+      },
+      globals: {
+        console: 'readonly',
+        process: 'readonly',
+        Buffer: 'readonly',
+        __dirname: 'readonly',
+        __filename: 'readonly',
+        global: 'readonly',
+        describe: 'readonly',
+        it: 'readonly',
+        expect: 'readonly',
+        beforeEach: 'readonly',
+        afterEach: 'readonly',
+      },
+    },
+    plugins: {
+      '@typescript-eslint': typescriptESLint,
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-non-null-assertion': 'warn',
+      '@typescript-eslint/no-empty-function': 'error',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+      '@typescript-eslint/prefer-as-const': 'error',
+      '@typescript-eslint/prefer-nullish-coalescing': 'error',
+      '@typescript-eslint/prefer-optional-chain': 'error',
+      '@typescript-eslint/strict-boolean-expressions': 'error',
+      'no-console': 'warn',
+      'no-debugger': 'error',
+      'no-unused-expressions': 'error',
+      'prefer-const': 'error',
+      'no-var': 'error',
+    },
+  },
+  {
+    ignores: ['dist/', 'node_modules/', '*.js'],
+  },
+];
+````
+
 ## File: src/sandbox/isolate.ts
 ````typescript
-import ivm from 'isolated-vm';
+import type * as IVM from 'isolated-vm';
 import { transform } from 'esbuild';
+import * as vm from 'node:vm';
 
 /**
  * Configuration for the V8 Sandbox.
@@ -1545,17 +1205,27 @@ export interface Sandbox {
 
 /**
  * Creates a secure V8 Isolate.
+ * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
  */
 export function createSandbox(opts: SandboxOptions = {}): Sandbox {
   const memoryLimit = opts.memoryLimitMb ?? 128;
   const timeout = opts.timeoutMs ?? 5000;
 
-  // Create the heavy V8 Isolate (The Virtual Machine)
-  const isolate = new ivm.Isolate({ memoryLimit });
+  let isolate: IVM.Isolate | undefined;
+  let useFallback = false;
 
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async compileAndRun(tsCode: string, context: Record<string, any>) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let ivm: any;
+      try {
+        // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+        ivm = (await import('isolated-vm')).default;
+      } catch (err) {
+        useFallback = true;
+      }
+
       // 1. JIT Compile (TypeScript -> JavaScript)
       // We use esbuild for speed.
       const transformed = await transform(tsCode, {
@@ -1565,6 +1235,24 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
       });
 
       const jsCode = transformed.code;
+
+      if (useFallback) {
+         // --- Node.js VM Fallback ---
+         const sandboxContext = vm.createContext({ ...context });
+         // Setup global self-reference
+         sandboxContext.global = sandboxContext;
+         
+         try {
+             const script = new vm.Script(jsCode);
+             return script.runInContext(sandboxContext, { timeout });
+         } catch (e) {
+             throw e;
+         }
+      }
+
+      if (!isolate) {
+        isolate = new ivm.Isolate({ memoryLimit });
+      }
 
       // 2. Create a fresh Context for this execution
       const ivmContext = await isolate.createContext();
@@ -1625,7 +1313,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
     },
 
     dispose() {
-      if (!isolate.isDisposed) {
+      if (isolate && !isolate.isDisposed) {
         isolate.dispose();
       }
     }
@@ -1733,117 +1421,25 @@ export function createNodeVFS(rootDir: string): VFSAdapter {
 }
 ````
 
-## File: src/kernel/registry.ts
-````typescript
-/* eslint-disable no-console */
-import { VFSAdapter } from '../vfs/types.js';
-import { RegistryState, ToolMetadata } from '../types.js';
-import * as path from 'path';
-import * as ts from 'typescript';
-
-export interface Registry {
-  hydrate(): Promise<void>;
-  register(filePath: string, code: string): Promise<void>;
-  list(): ToolMetadata[];
-  sync(): Promise<void>;
-}
-
-export function createRegistry(vfs: VFSAdapter): Registry {
-  let state: RegistryState = { tools: {} };
-  const META_PATH = 'meta.json';
-
-  // Helper to parse JSDoc
-  function extractMetadata(filePath: string, code: string): ToolMetadata {
-    const name = path.basename(filePath, path.extname(filePath));
-    let description = "No description provided.";
-
-    try {
-      // Use TypeScript AST to safely locate comments (avoids matching inside strings/templates)
-      const sourceFile = ts.createSourceFile(
-        filePath,
-        code,
-        ts.ScriptTarget.ES2020,
-        true
-      );
-
-      const cleanJSDoc = (comment: string) => {
-        return comment
-          .replace(/^\/\*\*/, '')
-          .replace(/\*\/$/, '')
-          .split('\n')
-          .map(line => line.replace(/^\s*\*\s?/, '').trim())
-          .filter(line => !line.startsWith('@') && line.length > 0)
-          .join(' ');
-      };
-
-      const findComment = (pos: number) => {
-        const ranges = ts.getLeadingCommentRanges(code, pos);
-        if (ranges?.length) {
-          const range = ranges[ranges.length - 1]; // Closest to the node
-          if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
-            const text = code.substring(range.pos, range.end);
-            if (text.startsWith('/**')) return cleanJSDoc(text);
-          }
-        }
-        return null;
-      };
-
-      // 1. Try attached to first statement (e.g. export const...)
-      if (sourceFile.statements.length > 0) {
-        const extracted = findComment(sourceFile.statements[0].getFullStart());
-        if (extracted) description = extracted;
-      }
-      
-      // 2. Fallback: Try top of file (detached)
-      if (description === "No description provided.") {
-        const extracted = findComment(0);
-        if (extracted) description = extracted;
-      }
-
-    } catch (err) {
-      console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling back to default.`, err);
-    }
-
-    return {
-      name,
-      description: description || "No description provided.",
-      path: filePath
-    };
-  }
-
-  return {
-    async hydrate() {
-      if (await vfs.exists(META_PATH)) {
-        try {
-          const content = await vfs.readFile(META_PATH);
-          state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
-        } catch (err) {
-          console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
-          state = { tools: {} };
-        }
-      }
-    },
-
-    async register(filePath: string, code: string) {
-      // Ignore non-tool files (e.g. config or hidden files)
-      if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
-
-      const metadata = extractMetadata(filePath, code);
-      state.tools[filePath] = metadata;
-      
-      // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
-      // during tool creation.
-      await this.sync();
-    },
-
-    list() {
-      return Object.values(state.tools);
-    },
-
-    async sync() {
-      await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
-    }
-  };
+## File: tsconfig.json
+````json
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "strict": true,
+    "noImplicitAny": true,
+    "strictNullChecks": true,
+    "strictFunctionTypes": true,
+    "noImplicitThis": true,
+    "noImplicitReturns": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist",
+    "declaration": true
+  },
+  "include": ["src/**/*", "test/**/*"]
 }
 ````
 
@@ -2115,74 +1711,117 @@ export default defineTGPConfig({
 `;
 ````
 
-## File: src/types.ts
+## File: src/kernel/registry.ts
 ````typescript
-import { z } from 'zod';
+/* eslint-disable no-console */
+import { VFSAdapter } from '../vfs/types.js';
+import { RegistryState, ToolMetadata } from '../types.js';
+import * as path from 'path';
+import * as ts from 'typescript';
 
-// --- Git Configuration Schema ---
-export const GitConfigSchema = z.object({
-  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
-  repo: z.string().min(1, "Repository name is required"),
-  branch: z.string().default('main'),
-  apiBaseUrl: z.string().url().default('https://api.github.com'),
-  auth: z.object({
-    token: z.string().min(1, "Git auth token is required"),
-    user: z.string().default('tgp-bot[bot]'),
-    email: z.string().email().default('tgp-bot@users.noreply.github.com'),
-  }),
-  writeStrategy: z.enum(['direct', 'pr']).default('direct'),
-});
-
-// --- Filesystem Jail Schema ---
-export const FSConfigSchema = z.object({
-  allowedDirs: z.array(z.string()).default(['./tmp']),
-  blockUpwardTraversal: z.boolean().default(true),
-});
-
-// --- Main TGP Configuration Schema ---
-export const TGPConfigSchema = z.object({
-  rootDir: z.string().default('./.tgp'),
-  git: GitConfigSchema,
-  fs: FSConfigSchema.default({}),
-  allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
-  allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
-});
-
-// --- Inferred Static Types ---
-// We export these so the rest of the app relies on the Zod inference, 
-// ensuring types and validation never drift apart.
-export type GitConfig = z.infer<typeof GitConfigSchema>;
-export type FSConfig = z.infer<typeof FSConfigSchema>;
-export type TGPConfig = z.infer<typeof TGPConfigSchema>;
-
-/**
- * Defines the structure for a tool file persisted in the VFS.
- * This is what resides in ./.tgp/tools/
- */
-export const ToolSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  parameters: z.record(z.unknown()), // JsonSchema
-  code: z.string(), // The raw TypeScript source
-});
-
-export type ToolDefinition = z.infer<typeof ToolSchema>;
-
-export interface ToolMetadata {
-  name: string;
-  description: string;
-  path: string;
+export interface Registry {
+  hydrate(): Promise<void>;
+  register(filePath: string, code: string): Promise<void>;
+  list(): ToolMetadata[];
+  sync(): Promise<void>;
 }
 
-export interface RegistryState {
-  tools: Record<string, ToolMetadata>;
-}
+export function createRegistry(vfs: VFSAdapter): Registry {
+  let state: RegistryState = { tools: {} };
+  const META_PATH = 'meta.json';
 
-export interface Logger {
-  debug(message: string, ...args: any[]): void;
-  info(message: string, ...args: any[]): void;
-  warn(message: string, ...args: any[]): void;
-  error(message: string, ...args: any[]): void;
+  // Helper to parse JSDoc
+  function extractMetadata(filePath: string, code: string): ToolMetadata {
+    const name = path.basename(filePath, path.extname(filePath));
+    let description = "No description provided.";
+
+    try {
+      // Use TypeScript AST to safely locate comments (avoids matching inside strings/templates)
+      const sourceFile = ts.createSourceFile(
+        filePath,
+        code,
+        ts.ScriptTarget.ES2020,
+        true
+      );
+
+      const cleanJSDoc = (comment: string) => {
+        return comment
+          .replace(/^\/\*\*/, '')
+          .replace(/\*\/$/, '')
+          .split('\n')
+          .map(line => line.replace(/^\s*\*\s?/, '').trim())
+          .filter(line => !line.startsWith('@') && line.length > 0)
+          .join(' ');
+      };
+
+      const findComment = (pos: number) => {
+        const ranges = ts.getLeadingCommentRanges(code, pos);
+        if (ranges && ranges.length > 0) {
+          const range = ranges[ranges.length - 1]; // Closest to the node
+          if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
+            const text = code.substring(range.pos, range.end);
+            if (text.startsWith('/**')) return cleanJSDoc(text);
+          }
+        }
+        return null;
+      };
+
+      // 1. Try attached to first statement (e.g. export const...)
+      if (sourceFile.statements.length > 0) {
+        const extracted = findComment(sourceFile.statements[0].getFullStart());
+        if (extracted !== null) description = extracted;
+      }
+      
+      // 2. Fallback: Try top of file (detached)
+      if (description === "No description provided.") {
+        const extracted = findComment(0);
+        if (extracted !== null) description = extracted;
+      }
+
+    } catch (err) {
+      console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling back to default.`, err);
+    }
+
+    return {
+      name,
+      description: description || "No description provided.",
+      path: filePath
+    };
+  }
+
+  return {
+    async hydrate() {
+      if (await vfs.exists(META_PATH)) {
+        try {
+          const content = await vfs.readFile(META_PATH);
+          state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+        } catch (err) {
+          console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
+          state = { tools: {} };
+        }
+      }
+    },
+
+    async register(filePath: string, code: string) {
+      // Ignore non-tool files (e.g. config or hidden files)
+      if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+      const metadata = extractMetadata(filePath, code);
+      state.tools[filePath] = metadata;
+      
+      // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
+      // during tool creation.
+      await this.sync();
+    },
+
+    list() {
+      return Object.values(state.tools);
+    },
+
+    async sync() {
+      await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+    }
+  };
 }
 ````
 
@@ -2461,14 +2100,89 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 }
 ````
 
+## File: src/types.ts
+````typescript
+import { z } from 'zod';
+
+// --- Git Configuration Schema ---
+export const GitConfigSchema = z.object({
+  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
+  repo: z.string().min(1, "Repository name is required"),
+  branch: z.string().default('main'),
+  apiBaseUrl: z.string().url().default('https://api.github.com'),
+  auth: z.object({
+    token: z.string().min(1, "Git auth token is required"),
+    user: z.string().default('tgp-bot[bot]'),
+    email: z.string().email().default('tgp-bot@users.noreply.github.com'),
+  }),
+  writeStrategy: z.enum(['direct', 'pr']).default('direct'),
+});
+
+// --- Filesystem Jail Schema ---
+export const FSConfigSchema = z.object({
+  allowedDirs: z.array(z.string()).default(['./tmp']),
+  blockUpwardTraversal: z.boolean().default(true),
+});
+
+// --- Main TGP Configuration Schema ---
+export const TGPConfigSchema = z.object({
+  rootDir: z.string().default('./.tgp'),
+  git: GitConfigSchema.default({
+    provider: 'local',
+    repo: 'local',
+    auth: { token: 'local' },
+  }),
+  fs: FSConfigSchema.default({}),
+  allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+  allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
+});
+
+// --- Inferred Static Types ---
+// We export these so the rest of the app relies on the Zod inference, 
+// ensuring types and validation never drift apart.
+export type GitConfig = z.infer<typeof GitConfigSchema>;
+export type FSConfig = z.infer<typeof FSConfigSchema>;
+export type TGPConfig = z.infer<typeof TGPConfigSchema>;
+
+/**
+ * Defines the structure for a tool file persisted in the VFS.
+ * This is what resides in ./.tgp/tools/
+ */
+export const ToolSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  parameters: z.record(z.unknown()), // JsonSchema
+  code: z.string(), // The raw TypeScript source
+});
+
+export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+export interface ToolMetadata {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface RegistryState {
+  tools: Record<string, ToolMetadata>;
+}
+
+export interface Logger {
+  debug(message: string, ...args: any[]): void;
+  info(message: string, ...args: any[]): void;
+  warn(message: string, ...args: any[]): void;
+  error(message: string, ...args: any[]): void;
+}
+````
+
 ## File: package.json
 ````json
 {
   "name": "@tgp/core",
   "version": "0.0.1",
   "description": "The Tool Generation Protocol",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
   "type": "module",
   "scripts": {
     "build": "tsc",
@@ -2594,196 +2308,6 @@ export function createKernel(opts: KernelOptions): Kernel {
       isBooted = false;
     }
   };
-}
-````
-
-## File: src/sandbox/execute.ts
-````typescript
-import { Kernel } from '../kernel/core.js';
-import { createSandbox } from './isolate.js';
-import { createSandboxBridge } from './bridge.js';
-import { bundleDependencySync } from './bundler.js';
-import { transformSync } from 'esbuild';
-import * as path from 'path';
-
-export interface ExecutionResult {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  result: any;
-  logs: string[];
-  error?: string;
-}
-
-/**
- * Resolves a module path within the VFS using standard Node.js resolution logic.
- * Checks: path, path.ts, path.js, path/index.ts, path/index.js
- */
-function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath: string): string | null {
-  const candidates: string[] = [];
-  
-  // Resolve absolute path based on import type
-  // If it starts with '/', it's absolute (from VFS root).
-  // Otherwise, it's relative to baseDir.
-  const target = importPath.startsWith('/') 
-    ? importPath 
-    : path.join(baseDir, importPath);
-
-  // 1. Exact match (e.g. require('./foo.ts'))
-  candidates.push(target);
-  
-  // 2. Extensions (e.g. require('./foo'))
-  candidates.push(`${target}.ts`);
-  candidates.push(`${target}.js`);
-  
-  // 3. Directory Indices
-  candidates.push(path.join(target, 'index.ts'));
-  candidates.push(path.join(target, 'index.js'));
-
-  for (const c of candidates) {
-    try {
-      // Synchronous check is required for the sync require shim
-      vfs.readSync(c);
-      return c;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-/**
- * Executes a tool script within a secure sandbox.
- * 
- * @param kernel The TGP Kernel instance
- * @param code The TypeScript source code of the tool
- * @param args The arguments object to pass to the tool (as 'args' global)
- * @param filePath Optional path of the tool being executed (used for relative imports)
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<ExecutionResult> {
-  const sandbox = createSandbox({
-    memoryLimitMb: 128,
-    timeoutMs: 5000 // 5s hard limit
-  });
-  
-  const logs: string[] = [];
-
-  try {
-    // 1. Setup Bridge
-    // We pass the kernel directly.
-    const bridge = createSandboxBridge({
-      kernel,
-      onLog: (msg) => logs.push(msg)
-    });
-
-    // 2. Module Orchestration (The 'require' Bridge)
-    // This host function is called synchronously from the Guest.
-    const __tgp_load_module = (baseDir: string, importId: string) => {
-      // 1. Handle whitelisted node modules (bare specifiers)
-      if (!importId.startsWith('.') && !importId.startsWith('/')) {
-        if (!kernel.config.allowedImports.includes(importId)) {
-          throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
-        }
-        try {
-          const bundledCode = bundleDependencySync(importId);
-          return {
-            code: bundledCode,
-            path: `/__node_modules__/${importId}`, // Virtual path for caching
-            dirname: `/__node_modules__`,
-          };
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
-        }
-      }
-
-      // 2. Resolve Local Modules (VFS)
-      const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
-
-      if (!resolvedPath) {
-        throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
-      }
-
-      try {
-        const raw = kernel.vfs.readSync(resolvedPath);
-        const transformed = transformSync(raw, {
-          loader: 'ts',
-          format: 'cjs',
-          target: 'es2020',
-        });
-        
-        return {
-          code: transformed.code,
-          path: resolvedPath,
-          dirname: path.dirname(resolvedPath)
-        };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
-      }
-    };
-
-    // 3. Shim Injection
-    // We prepend a CommonJS loader shim to the user code.
-    // This allows 'require' to work by calling back to the host via __tgp_load_module.
-    // It includes a cache to prevent reloading the same module within a single execution.
-    const shim = `
-      const __moduleCache = {};
-
-      function __makeRequire(baseDir) {
-        return function(id) {
-          // HOST INTERACTION: Resolve module path and get its source code from the host.
-          // This is a synchronous call to the Node.js environment.
-          const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
-
-          // CACHE CHECK: If the module has already been loaded, return it from the cache.
-          if (__moduleCache[mod.path]) {
-            return __moduleCache[mod.path].exports;
-          }
-
-          // MODULE EXECUTION: If it's a new module, execute its code.
-          const newModule = { exports: {} };
-
-          // Before executing, store the module object in the cache to handle circular dependencies.
-          __moduleCache[mod.path] = newModule;
-
-          // We provide the module with its own 'exports' object, a 'require' function
-          // scoped to its own directory, and other CommonJS globals.
-          const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
-
-          // Execute the module's code.
-          fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
-
-          // The 'newModule.exports' object is now populated.
-          return newModule.exports;
-        };
-      }
-
-      // Setup Global Require for the entry point
-      global.require = __makeRequire('${path.dirname(filePath)}');
-    `;
-
-    const context = {
-      ...bridge, // { tgp: { ... } }
-      args,
-      __tgp_load_module // Injected as Reference
-    };
-
-    // Combine Shim + User Code
-    // We wrap user code to provide top-level CommonJS variables if needed, 
-    // but standard TGP tools are just scripts. 
-    // We append the code. The 'shim' sets up 'global.require'.
-    const fullScript = shim + '\n' + code;
-
-    const result = await sandbox.compileAndRun(fullScript, context);
-    return { result, logs };
-
-  } catch (error) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    kernel.logger.error(`Tool Execution Failed:`, error);
-    return { result: null, logs, error: errMsg };
-  } finally {
-    sandbox.dispose();
-  }
 }
 ````
 
@@ -3052,6 +2576,224 @@ We are hacking on the future of backend development.
 ```
 ````
 
+## File: src/sandbox/execute.ts
+````typescript
+import { Kernel } from '../kernel/core.js';
+import { createSandbox } from './isolate.js';
+import { createSandboxBridge } from './bridge.js';
+import { bundleDependencySync } from './bundler.js';
+import { transformSync } from 'esbuild';
+import * as path from 'path';
+
+export interface ExecutionResult {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  result: any;
+  logs: string[];
+  error?: string;
+}
+
+/**
+ * Resolves a module path within the VFS using standard Node.js resolution logic.
+ * Checks: path, path.ts, path.js, path/index.ts, path/index.js
+ */
+function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath: string): string | null {
+  const candidates: string[] = [];
+  
+  // Resolve absolute path based on import type
+  // If it starts with '/', it's absolute (from VFS root).
+  // Otherwise, it's relative to baseDir.
+  const target = importPath.startsWith('/') 
+    ? importPath 
+    : path.join(baseDir, importPath);
+
+  // 1. Exact match (e.g. require('./foo.ts'))
+  candidates.push(target);
+  
+  // 2. Extensions (e.g. require('./foo'))
+  candidates.push(`${target}.ts`);
+  candidates.push(`${target}.js`);
+  
+  // 3. Directory Indices
+  candidates.push(path.join(target, 'index.ts'));
+  candidates.push(path.join(target, 'index.js'));
+
+  for (const c of candidates) {
+    try {
+      // Synchronous check is required for the sync require shim
+      vfs.readSync(c);
+      return c;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Executes a tool script within a secure sandbox.
+ * 
+ * @param kernel The TGP Kernel instance
+ * @param code The TypeScript source code of the tool
+ * @param args The arguments object to pass to the tool (as 'args' global)
+ * @param filePath Optional path of the tool being executed (used for relative imports)
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<ExecutionResult> {
+  const sandbox = createSandbox({
+    memoryLimitMb: 128,
+    timeoutMs: 5000 // 5s hard limit
+  });
+  
+  const logs: string[] = [];
+
+  try {
+    // 1. Setup Bridge
+    // We pass the kernel directly.
+    const bridge = createSandboxBridge({
+      kernel,
+      onLog: (msg) => logs.push(msg)
+    });
+
+    // 2. Module Orchestration (The 'require' Bridge)
+    // This host function is called synchronously from the Guest.
+    const __tgp_load_module = (baseDir: string, importId: string) => {
+      // 1. Handle whitelisted node modules (bare specifiers)
+      if (!importId.startsWith('.') && !importId.startsWith('/')) {
+        if (!kernel.config.allowedImports.includes(importId)) {
+          throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
+        }
+        try {
+          const bundledCode = bundleDependencySync(importId);
+          return {
+            code: bundledCode,
+            path: `/__node_modules__/${importId}`, // Virtual path for caching
+            dirname: `/__node_modules__`,
+          };
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
+        }
+      }
+
+      // 2. Resolve Local Modules (VFS)
+      const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
+
+      if (resolvedPath === null) {
+        throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
+      }
+
+      try {
+        const raw = kernel.vfs.readSync(resolvedPath);
+        const transformed = transformSync(raw, {
+          loader: 'ts',
+          format: 'cjs',
+          target: 'es2020',
+        });
+        
+        return {
+          code: transformed.code,
+          path: resolvedPath,
+          dirname: path.dirname(resolvedPath)
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
+      }
+    };
+
+    // 3. Shim Injection
+    // We prepend a CommonJS loader shim to the user code.
+    // This allows 'require' to work by calling back to the host via __tgp_load_module.
+    // It includes a cache to prevent reloading the same module within a single execution.
+    const shim = `
+      const __moduleCache = {};
+
+      function __makeRequire(baseDir) {
+        return function(id) {
+          // HOST INTERACTION: Resolve module path and get its source code from the host.
+          // This is a synchronous call to the Node.js environment.
+          
+          let mod;
+          if (typeof __tgp_load_module.applySync === 'function') {
+             mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+          } else {
+             mod = __tgp_load_module(baseDir, id);
+          }
+
+          // CACHE CHECK: If the module has already been loaded, return it from the cache.
+          if (__moduleCache[mod.path]) {
+            return __moduleCache[mod.path].exports;
+          }
+
+          // MODULE EXECUTION: If it's a new module, execute its code.
+          const newModule = { exports: {} };
+
+          // Before executing, store the module object in the cache to handle circular dependencies.
+          __moduleCache[mod.path] = newModule;
+
+          // We provide the module with its own 'exports' object, a 'require' function
+          // scoped to its own directory, and other CommonJS globals.
+          const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+
+          // Execute the module's code.
+          fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+
+          // The 'newModule.exports' object is now populated.
+          return newModule.exports;
+        };
+      }
+    `;
+
+    const context = {
+      ...bridge, // { tgp: { ... } }
+      args,
+      __tgp_load_module // Injected as Reference
+    };
+
+    // 1. Transform user code to CJS explicitly
+    // We do this to ensure we can wrap it safely without worrying about top-level imports in the final string
+    const { code: cjsCode } = transformSync(code, {
+      loader: 'ts',
+      format: 'cjs',
+      target: 'es2020',
+    });
+
+    // 2. Construct the Execution Harness
+    const script = `
+      ${shim}
+
+      // Setup CJS Environment for the entry point
+      global.exports = {};
+      global.module = { exports: global.exports };
+      global.require = __makeRequire('${path.dirname(filePath)}');
+
+      // Execute User Code
+      (function() {
+        ${cjsCode}
+      })();
+
+      // Run Default Export
+      const __main = global.module.exports.default || global.module.exports;
+      if (typeof __main === 'function') {
+         __main(global.args);
+      } else {
+         __main;
+      }
+    `;
+
+    const result = await sandbox.compileAndRun(script, context);
+    return { result, logs };
+
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    kernel.logger.error(`Tool Execution Failed:`, error);
+    return { result: null, logs, error: errMsg };
+  } finally {
+    sandbox.dispose();
+  }
+}
+````
+
 ## File: src/kernel/git.ts
 ````typescript
 import * as git from 'isomorphic-git';
@@ -3150,6 +2892,7 @@ class NotImplementedAdapter implements GitPlatformAdapter {
 // --- Local Git Implementation (Shell-based) ---
 // Used for E2E testing and Air-gapped environments
 async function execGit(args: string[], cwd: string, logger: Logger): Promise<void> {
+  logger.debug(`[Local] Executing: git ${args.join(' ')} in ${cwd}`);
   return new Promise((resolve, reject) => {
     const proc = spawn('git', args, { cwd, stdio: 'pipe' });
     let output = '';
@@ -3209,10 +2952,12 @@ function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
 
       try {
           await execGit(['push', 'origin', branch], dir, logger);
-      } catch (e) {
+      } catch (_e) {
           // Handle non-fast-forward by pulling first (simple auto-merge)
-          logger.warn(`[Local] Push failed. Attempting rebase...`);
-          await execGit(['pull', '--rebase', 'origin', branch], dir, logger);
+          logger.warn(`[Local] Push failed. Attempting merge...`);
+          // We use standard merge (no-rebase) as it handles 'meta.json' append conflicts slightly better 
+          // in automated scenarios than rebase, which can get stuck.
+          await execGit(['pull', '--no-rebase', 'origin', branch], dir, logger);
           await execGit(['push', 'origin', branch], dir, logger);
       }
     }

@@ -23,7 +23,11 @@ export const FSConfigSchema = z.object({
 // --- Main TGP Configuration Schema ---
 export const TGPConfigSchema = z.object({
   rootDir: z.string().default('./.tgp'),
-  git: GitConfigSchema,
+  git: GitConfigSchema.default({
+    provider: 'local',
+    repo: 'local',
+    auth: { token: 'local' },
+  }),
   fs: FSConfigSchema.default({}),
   allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
   allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),

@@ -132,7 +132,13 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
         return function(id) {
           // HOST INTERACTION: Resolve module path and get its source code from the host.
           // This is a synchronous call to the Node.js environment.
-          const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+          
+          let mod;
+          if (typeof __tgp_load_module.applySync === 'function') {
+             mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+          } else {
+             mod = __tgp_load_module(baseDir, id);
+          }
 
           // CACHE CHECK: If the module has already been loaded, return it from the cache.
           if (__moduleCache[mod.path]) {
@@ -156,9 +162,6 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
           return newModule.exports;
         };
       }
-
-      // Setup Global Require for the entry point
-      global.require = __makeRequire('${path.dirname(filePath)}');
     `;
 
     const context = {
@@ -167,13 +170,38 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
       __tgp_load_module // Injected as Reference
     };
 
-    // Combine Shim + User Code
-    // We wrap user code to provide top-level CommonJS variables if needed, 
-    // but standard TGP tools are just scripts. 
-    // We append the code. The 'shim' sets up 'global.require'.
-    const fullScript = shim + '\n' + code;
+    // 1. Transform user code to CJS explicitly
+    // We do this to ensure we can wrap it safely without worrying about top-level imports in the final string
+    const { code: cjsCode } = transformSync(code, {
+      loader: 'ts',
+      format: 'cjs',
+      target: 'es2020',
+    });
 
-    const result = await sandbox.compileAndRun(fullScript, context);
+    // 2. Construct the Execution Harness
+    const script = `
+      ${shim}
+
+      // Setup CJS Environment for the entry point
+      global.exports = {};
+      global.module = { exports: global.exports };
+      global.require = __makeRequire('${path.dirname(filePath)}');
+
+      // Execute User Code
+      (function() {
+        ${cjsCode}
+      })();
+
+      // Run Default Export
+      const __main = global.module.exports.default || global.module.exports;
+      if (typeof __main === 'function') {
+         __main(global.args);
+      } else {
+         __main;
+      }
+    `;
+
+    const result = await sandbox.compileAndRun(script, context);
     return { result, logs };
 
   } catch (error) {
