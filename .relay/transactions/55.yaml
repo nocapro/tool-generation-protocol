@@ -1,0 +1,191 @@
+uuid: c8896172-23f4-42b4-8255-a4e930985c5b
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T06:50:36.462Z'
+gitCommitMsg: >-
+  fix: Resolve implicit 'any' error in isolate.ts compilation
+
+  Refactored a promise chain into explicit async/await calls to satisfy strict
+  TypeScript 'noImplicitAny' rules. This fixes the build failure that was
+  causing the CLI binary to crash during E2E tests.
+promptSummary: >-
+  Fix TypeScript compilation error in isolate.ts to restore build and fix
+  Scenario 8.
+reasoning:
+  - >-
+    The build logs indicate a TypeScript compilation error in
+    `src/sandbox/isolate.ts` where a promise callback parameter has an implicit
+    'any' type. This causes the build (`tsc`) to exit with code 1. Consequently,
+    the `dist/` directory is either missing or stale, which causes the CLI
+    binary (`bin/tgp.js`) to fail when executed by `Scenario 8`, resulting in an
+    exit code of 1 instead of 0.
+  - >-
+    I will fix the TypeScript error by refactoring the Promise chain into
+    explicit `await` statements. This resolves the type inference issue, allows
+    the build to succeed, and ensures the CLI works correctly for the E2E test.
+operations:
+  - type: write
+    path: src/sandbox/isolate.ts
+    content: >
+      --- src/sandbox/isolate.ts
+
+      +++ src/sandbox/isolate.ts
+
+      @@ -85,7 +85,8 @@
+                   if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                       // Initialize the namespace in the guest
+      -                await currentIsolate.compileScript('global.tgp =
+      {}').then(s => s.run(ivmContext));
+
+      +                const initScript = await
+      currentIsolate.compileScript('global.tgp = {}');
+
+      +                await initScript.run(ivmContext);
+                       const tgpHandle = await jail.get('tgp');
+                       
+                       // Populate the namespace
+    patchStrategy: standard-diff
+snapshot:
+  src/sandbox/isolate.ts: |-
+    import type * as IVM from 'isolated-vm';
+    import { transform } from 'esbuild';
+    import * as vm from 'node:vm';
+
+    /**
+     * Configuration for the V8 Sandbox.
+     */
+    export interface SandboxOptions {
+      memoryLimitMb?: number; // Default 128MB
+      timeoutMs?: number;     // Default 5000ms
+    }
+
+    export interface Sandbox {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+      dispose: () => void;
+    }
+
+    /**
+     * Creates a secure V8 Isolate.
+     * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
+     */
+    export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+      const memoryLimit = opts.memoryLimitMb ?? 128;
+      const timeout = opts.timeoutMs ?? 5000;
+
+      let isolate: IVM.Isolate | undefined;
+      let useFallback = false;
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async compileAndRun(tsCode: string, context: Record<string, any>) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let ivm: any;
+          try {
+            // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+            ivm = (await import('isolated-vm')).default;
+          } catch {
+            useFallback = true;
+          }
+
+          // 1. JIT Compile (TypeScript -> JavaScript)
+          // We use esbuild for speed.
+          const transformed = await transform(tsCode, {
+            loader: 'ts',
+            format: 'cjs', // CommonJS ensures simple execution in V8
+            target: 'es2020',
+          });
+
+          const jsCode = transformed.code;
+
+          if (useFallback) {
+             // --- Node.js VM Fallback ---
+             const sandboxContext = vm.createContext({ ...context });
+             // Setup global self-reference
+             sandboxContext.global = sandboxContext;
+             
+             try {
+                 const script = new vm.Script(jsCode);
+                 return script.runInContext(sandboxContext, { timeout });
+             } catch (e) {
+                 throw e;
+             }
+          }
+
+          // Initialize isolate if not already created (reuse across executions)
+          const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
+          // Update state
+          isolate = currentIsolate;
+
+          // 2. Create a fresh Context for this execution
+          // We use currentIsolate which is guaranteed to be defined
+          const ivmContext = await currentIsolate.createContext();
+
+          try {
+            // 3. Bridge the Global Scope (Host -> Guest)
+            const jail = ivmContext.global;
+            
+            // Inject the 'tgp' global object which holds our bridge
+            await jail.set('global', jail.derefInto()); // standard polyfill
+
+            // Inject Context
+            for (const [key, value] of Object.entries(context)) {
+                // Special handling for the 'tgp' namespace object
+                if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                    // Initialize the namespace in the guest
+                    await currentIsolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
+                    const tgpHandle = await jail.get('tgp');
+                    
+                    // Populate the namespace
+                    for (const [subKey, subValue] of Object.entries(value)) {
+                        if (typeof subValue === 'function') {
+                           // Functions must be passed by Reference
+                           await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                        } else {
+                           // Values are copied
+                           await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                        }
+                    }
+                } 
+                // Handle top-level functions (like __tgp_load_module)
+                else if (typeof value === 'function') {
+                  await jail.set(key, new ivm.Reference(value));
+                } 
+                // Handle standard values
+                else {
+                  await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                }
+            }
+
+            // 4. Compile the Script inside the Isolate
+            const script = await currentIsolate.compileScript(jsCode);
+
+            // 5. Execute
+            const result = await script.run(ivmContext, { timeout });
+            
+            // 6. Return result (Unwrap from IVM)
+            if (typeof result === 'object' && result !== null && 'copy' in result) {
+                // If it's a reference, try to copy it out, otherwise return as is
+                return result.copy();
+            }
+            return result;
+
+          } finally {
+            // Cleanup the context to free memory immediately
+            ivmContext.release();
+          }
+        },
+
+        dispose() {
+          if (isolate && !isolate.isDisposed) {
+            isolate.dispose();
+          }
+        }
+      };
+    }
+approved: true
+linesAdded: 2
+linesRemoved: 1
+linesDifference: 3
+gitCommittedAt: null
+status: committed
+id: 55
