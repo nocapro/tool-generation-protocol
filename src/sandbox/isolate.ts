@@ -84,7 +84,8 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
             // Special handling for the 'tgp' namespace object
             if (key === 'tgp' && typeof value === 'object' && value !== null) {
                 // Initialize the namespace in the guest
-                await currentIsolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
+                const initScript = await currentIsolate.compileScript('global.tgp = {}');
+                await initScript.run(ivmContext);
                 const tgpHandle = await jail.get('tgp');
                 
                 // Populate the namespace

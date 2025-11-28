@@ -115,7 +115,7 @@ export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string
         // Points to the source bin wrapper, which imports from dist/
         // Note: 'npm run build' must be run before testing CLI if using the bin script directly.
         // For development tests, we might want to run with tsx, but here we test the "production" bin behavior logic.
-        const tgpBin = path.resolve(__dirname, '../../bin/tgp.js');
+        const tgpBin = path.join(projectRoot, 'bin/tgp.js');
         
         const proc = spawn('node', [tgpBin, ...args], {
             cwd,
