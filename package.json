@@ -27,7 +27,6 @@
     "esbuild": "^0.19.12",
     "isolated-vm": "^6.0.2",
     "isomorphic-git": "^1.35.1",
-    "memfs": "^4.51.0",
     "zod": "^3.25.76",
     "zod-to-json-schema": "^3.22.4"
   },

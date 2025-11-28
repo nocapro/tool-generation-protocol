@@ -1,0 +1,1785 @@
+uuid: c6e22c4f-c579-4560-91a5-3a71b1e95e7c
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T01:24:45.005Z'
+gitCommitMsg: >-
+  feat: Harden codebase for production readiness
+
+  This commit implements several key features to move TGP from a prototype to a
+  production-ready system:
+
+  - GitOps: The 'pr' git strategy now automatically creates a pull request
+    on GitHub after pushing a new tool branch, completing the autonomous
+    code review workflow.
+  - Sandbox: The tool execution sandbox now properly caches required modules
+    within a single run, improving performance and supporting circular
+    dependencies.
+  - Dependencies: Removed the unused 'memfs' package. - Docs: Updated the README
+  to clarify that database backends must be
+    injected by the host application, reflecting the actual architecture.
+  - API: Refactored the DBBackend interface into the shared types for
+    easier implementation by consumers.
+promptSummary: >-
+  The user wants to make the codebase production-ready by implementing stubs,
+  removing unused code, and clarifying documentation.
+reasoning:
+  - >-
+    This multi-part update addresses key areas to move the TGP codebase from a
+    prototype to a production-ready state. It implements a true GitOps workflow
+    for pull requests, optimizes the tool execution sandbox with module caching,
+    removes unused dependencies, and clarifies the database integration pattern
+    in the documentation.
+  - '### Part 1: True GitOps (Pull Request Automation)'
+  - >-
+    First, I'll update the Git configuration to include the API endpoint and
+    then implement the pull request creation logic within the `prStrategy`. This
+    makes the "gatekeeper" mode fully autonomous, allowing the agent to not only
+    push a feature branch but also open a PR for review.
+  - '### Part 2: Sandbox Optimization and Cleanup'
+  - >-
+    I will replace the placeholder `require` shim with a robust implementation
+    that correctly caches modules within a single tool execution, preventing
+    redundant compilations and improving performance. I've also added support
+    for circular dependencies, which is standard for CommonJS environments.
+    Finally, I'll remove the unused `memfs` dependency.
+  - '### Part 3: Documentation and API Clarity'
+  - >-
+    To make integration easier and prevent confusion, I'm clarifying the
+    architecture around database handling. I've moved the `DBBackend` interface
+    to the central `types.ts` file, refactored internal imports, and updated the
+    `README.md` to explicitly state that the host application is responsible for
+    injecting a database implementation.
+  - typescript
+  - '-// src/app/api/agent/route.ts'
+  - '-import { TGP, tgpTools } from ''@tgp/core'';'
+  - +// server/agent.ts
+  - +import { TGP, tgpTools, DBBackend } from '@tgp/core';
+  - import { generateText } from 'ai';
+  - '-'
+  - '-const kernel = new TGP({ configFile: ''./tgp.config.ts'' });'
+  - >-
+    +import { myDbAdapter } from './db'; // Your adapter implementing the
+    DBBackend interface
+  - +
+  - +const kernel = new TGP({
+  - '+  configFile: ''./tgp.config.ts'','
+  - '+  db: myDbAdapter // Inject your database implementation'
+  - +});
+  - 'export async function POST(req: Request) {'
+  - const { messages } = await req.json();
+  - '-  // Injects: list_files, read_file, write_file, exec_tool'
+  - +  // Provides the agent with its core capabilities
+  - const tools = tgpTools(kernel);
+  - const result = await generateText({
+  - 'model: openai(''gpt-4-turbo''),'
+  - tools,
+  - messages,
+  - '-    // The System Prompt enforces the "8 Standards"'
+  - 'system: kernel.getSystemPrompt()'
+  - '});'
+  - '```'
+operations:
+  - type: write
+    path: src/types.ts
+    content: >+
+      --- src/types.ts
+
+      +++ src/types.ts
+
+      @@ -5,6 +5,7 @@
+         provider: z.enum(['github', 'gitlab', 'bitbucket']),
+         repo: z.string().min(1, "Repository name is required"),
+         branch: z.string().default('main'),
+      +  apiBaseUrl: z.string().url().default('https://api.github.com'),
+         auth: z.object({
+           token: z.string().min(1, "Git auth token is required"),
+           user: z.string().default('tgp-bot[bot]'),
+      @@ -62,3 +63,22 @@
+         warn(message: string, ...args: any[]): void;
+         error(message: string, ...args: any[]): void;
+       }
+      +
+
+      +/**
+
+      + * The Database Kernel Interface.
+
+      + *
+
+      + * TGP guarantees that all tool executions happen within a transaction.
+
+      + * If the tool throws, the transaction is rolled back.
+
+      + * This interface must be implemented by the host application and
+      injected into the TGP Kernel.
+
+      + */
+
+      +export interface DBBackend {
+
+      +  /**
+
+      +   * Executes a raw SQL query.
+
+      +   * @param sql The SQL query string.
+
+      +   * @param params Parameter substitutions.
+
+      +   */
+
+      +  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+      +  query(sql: string, params?: any[]): Promise<any[]>;
+
+      +
+
+      +  /**
+
+      +   * Wraps a function in a database transaction.
+
+      +   * @param fn The function to execute. It receives a transactional DB
+      instance.
+
+      +   */
+
+      +  transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
+
+      +}
+
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/git.ts
+    content: >
+      --- src/kernel/git.ts
+
+      +++ src/kernel/git.ts
+
+      @@ -31,7 +31,7 @@
+        */
+       export function createGitBackend(deps: GitDependencies, config: TGPConfig, logger: Logger): GitBackend {
+         const dir = config.rootDir;
+      -  const { repo, auth, branch, writeStrategy } = config.git;
+
+      +  const { repo, auth, branch, writeStrategy, apiBaseUrl } = config.git;
+         const { fs, http } = deps;
+       
+         // Configuration for isomorphic-git
+      @@ -107,6 +107,38 @@
+             } else {
+                logger.info(`Already on feature branch: ${targetBranch}`);
+             }
+      +
+
+      +      const createPullRequest = async () => {
+
+      +        const [owner, repoName] = repo.split('/');
+
+      +        const url = new URL(`/repos/${owner}/${repoName}/pulls`,
+      apiBaseUrl).href;
+
+      +        
+
+      +        logger.info(`Creating Pull Request on ${repo}...`);
+
+      +
+
+      +        try {
+
+      +          // We use native fetch here, which is available in modern Node.
+
+      +          const response = await fetch(url, {
+
+      +            method: 'POST',
+
+      +            headers: {
+
+      +              'Authorization': `token ${auth.token}`,
+
+      +              'Accept': 'application/vnd.github.v3+json',
+
+      +              'Content-Type': 'application/json',
+
+      +            },
+
+      +            body: JSON.stringify({
+
+      +              title: message,
+
+      +              head: targetBranch,
+
+      +              base: branch,
+
+      +              body: `Forged by TGP.\nCommit Message: ${message}`,
+
+      +            }),
+
+      +          });
+
+      +          
+
+      +          const result = await response.json();
+
+      +          if (response.ok) {
+
+      +            logger.info(`Successfully created Pull Request:
+      ${result.html_url}`);
+
+      +          } else if (response.status === 422) { // Unprocessable Entity -
+      often means PR exists
+
+      +            logger.warn(`Could not create PR (it may already exist):
+      ${JSON.stringify(result.errors)}`);
+
+      +          }
+
+      +        } catch (e) {
+
+      +          logger.error('Failed to create pull request via API.', e);
+
+      +        }
+
+      +      };
+       
+             for (const filepath of files) {
+               await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+      @@ -128,6 +160,7 @@
+                   ref: targetBranch,
+                 });
+                 logger.info(`Pushed ${targetBranch} to origin.`);
+      +          await createPullRequest();
+             } catch (e) {
+                 logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+             }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/execute.ts
+    content: |
+      <<<<<<< SEARCH
+          // 3. Shim Injection
+          // We prepend a CommonJS loader shim to the user code.
+          // This allows 'require' to work by calling back to __tgp_load_module.
+          const shim = `
+            const __moduleCache = {};
+
+            function __makeRequire(baseDir) {
+              return function(id) {
+                // Check Cache (Global)
+                // In a real system, cache keys should be absolute paths.
+                // Here we rely on the host to return consistent paths if we wanted perfect caching.
+                // For now, we skip cache or use simple ID (flawed for relatives).
+                // Let's implement correct caching by asking Host for absolute path first?
+                // Simpler: Just reload for now (Stateless).
+                
+                // Call Host Sync
+                const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+                
+                if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+
+                // Wrap in CommonJS Function
+                const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+                const newModule = { exports: {} };
+                
+                // Execute
+                fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+                
+                __moduleCache[mod.path] = newModule.exports;
+                return newModule.exports;
+              };
+            }
+            
+            // Setup Global Require for the entry point
+            // We assume the entry point is at 'filePath'
+            global.require = __makeRequire('${path.dirname(filePath)}');
+          `;
+      =======
+          // 3. Shim Injection
+          // We prepend a CommonJS loader shim to the user code.
+          // This allows 'require' to work by calling back to the host via __tgp_load_module.
+          // It includes a cache to prevent reloading the same module within a single execution.
+          const shim = `
+            const __moduleCache = {};
+
+            function __makeRequire(baseDir) {
+              return function(id) {
+                // HOST INTERACTION: Resolve module path and get its source code from the host.
+                // This is a synchronous call to the Node.js environment.
+                const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+                
+                // CACHE CHECK: If the module has already been loaded, return it from the cache.
+                if (__moduleCache[mod.path]) {
+                  return __moduleCache[mod.path].exports;
+                }
+
+                // MODULE EXECUTION: If it's a new module, execute its code.
+                const newModule = { exports: {} };
+                
+                // Before executing, store the module object in the cache to handle circular dependencies.
+                __moduleCache[mod.path] = newModule;
+
+                // We provide the module with its own 'exports' object, a 'require' function
+                // scoped to its own directory, and other CommonJS globals.
+                const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+                
+                // Execute the module's code.
+                fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+                
+                // The 'newModule.exports' object is now populated.
+                return newModule.exports;
+              };
+            }
+            
+            // Setup Global Require for the entry point
+            global.require = __makeRequire('${path.dirname(filePath)}');
+          `;
+      >>>>>>> REPLACE
+    patchStrategy: search-replace
+  - type: write
+    path: package.json
+    content: |
+      <<<<<<< SEARCH
+          "isomorphic-git": "^1.35.1",
+          "memfs": "^4.51.0",
+          "zod": "^3.25.76",
+      =======
+          "isomorphic-git": "^1.35.1",
+          "zod": "^3.25.76",
+      >>>>>>> REPLACE
+    patchStrategy: search-replace
+  - type: write
+    path: src/kernel/db.ts
+    content: >+
+      --- src/kernel/db.ts
+
+      +++ src/kernel/db.ts
+
+      @@ -1,28 +1,5 @@
+       /* eslint-disable no-console */
+      -import { TGPConfig } from '../types.js';
+
+      -
+
+      -/**
+
+      - * The Database Kernel Interface.
+
+      - * 
+
+      - * TGP guarantees that all tool executions happen within a transaction.
+
+      - * If the tool throws, the transaction is rolled back.
+
+      - */
+
+      -export interface DBBackend {
+
+      -  /**
+
+      -   * Executes a raw SQL query.
+
+      -   * @param sql The SQL query string.
+
+      -   * @param params Parameter substitutions.
+
+      -   */
+
+      -  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+      -  query(sql: string, params?: any[]): Promise<any[]>;
+
+      -
+
+      -  /**
+
+      -   * Wraps a function in a database transaction.
+
+      -   * @param fn The function to execute. It receives a transactional DB
+      instance.
+
+      -   */
+
+      -  transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
+
+      -}
+
+      +import { TGPConfig, DBBackend } from '../types.js';
+       
+       /**
+        * Factory to create the Database Backend based on configuration.
+
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/core.ts
+    content: |+
+      --- src/kernel/core.ts
+      +++ src/kernel/core.ts
+      @@ -1,7 +1,7 @@
+       /* eslint-disable no-console */
+      -import { TGPConfig, Logger } from '../types.js';
+      +import { TGPConfig, Logger, DBBackend } from '../types.js';
+       import { VFSAdapter } from '../vfs/types.js';
+       import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+      -import { createDBBackend, DBBackend } from './db.js';
+      +import { createDBBackend } from './db.js';
+       import { createRegistry, Registry } from './registry.js';
+       
+       // We inject the platform-specific environment dependencies here.
+
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tgp.ts
+    content: >+
+      --- src/tgp.ts
+
+      +++ src/tgp.ts
+
+      @@ -3,11 +3,9 @@
+       import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
+       import { loadTGPConfig } from './config.js';
+       import { createNodeVFS } from './vfs/node.js';
+      -import { TGPConfigSchema, TGPConfig, Logger } from './types.js';
+
+      +import { TGPConfigSchema, TGPConfig, Logger, DBBackend } from
+      './types.js';
+       import { VFSAdapter } from './vfs/types.js';
+       import { GitBackend } from './kernel/git.js';
+      -import { DBBackend } from './kernel/db.js';
+       import { Registry } from './kernel/registry.js';
+       
+       export interface TGPOptions {
+
+    patchStrategy: standard-diff
+  - type: write
+    path: README.md
+    content: >-
+      --- README.md
+
+      +++ README.md
+
+      @@ -219,6 +219,8 @@
+       export default defineTGPConfig({
+         // The Root of the Agent's filesystem (Ephemeral in serverless)
+         rootDir: './.tgp',
+      +  // NOTE: The 'db' and 'fs' sections below are METADATA for the Agent.
+
+      +  // The actual database and filesystem permissions must be injected at
+      runtime.
+       
+         // 1. DATA: How the Agent sees your DB
+         db: {
+      @@ -253,23 +255,25 @@
+       ## 7.3 Runtime Usage (The SDK)
+       
+       
+    patchStrategy: standard-diff
+snapshot:
+  src/types.ts: |-
+    import { z } from 'zod';
+
+    // --- Git Configuration Schema ---
+    export const GitConfigSchema = z.object({
+      provider: z.enum(['github', 'gitlab', 'bitbucket']),
+      repo: z.string().min(1, "Repository name is required"),
+      branch: z.string().default('main'),
+      auth: z.object({
+        token: z.string().min(1, "Git auth token is required"),
+        user: z.string().default('tgp-bot[bot]'),
+        email: z.string().email().default('tgp-bot@users.noreply.github.com'),
+      }),
+      writeStrategy: z.enum(['direct', 'pr']).default('direct'),
+    });
+
+    // --- Database Configuration Schema ---
+    export const DBConfigSchema = z.object({
+      dialect: z.enum(['postgres', 'mysql', 'sqlite', 'libsql']),
+      ddlSource: z.string().optional().describe("Command to generate DDL, e.g., 'drizzle-kit generate'"),
+    });
+
+    // --- Filesystem Jail Schema ---
+    export const FSConfigSchema = z.object({
+      allowedDirs: z.array(z.string()).default(['./tmp']),
+      blockUpwardTraversal: z.boolean().default(true),
+    });
+
+    // --- Main TGP Configuration Schema ---
+    export const TGPConfigSchema = z.object({
+      rootDir: z.string().default('./.tgp'),
+      db: DBConfigSchema.optional(),
+      git: GitConfigSchema,
+      fs: FSConfigSchema.default({}),
+      allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+    });
+
+    // --- Inferred Static Types ---
+    // We export these so the rest of the app relies on the Zod inference, 
+    // ensuring types and validation never drift apart.
+    export type GitConfig = z.infer<typeof GitConfigSchema>;
+    export type DBConfig = z.infer<typeof DBConfigSchema>;
+    export type FSConfig = z.infer<typeof FSConfigSchema>;
+    export type TGPConfig = z.infer<typeof TGPConfigSchema>;
+
+    /**
+     * Defines the structure for a tool file persisted in the VFS.
+     * This is what resides in ./.tgp/tools/
+     */
+    export const ToolSchema = z.object({
+      name: z.string(),
+      description: z.string(),
+      parameters: z.record(z.unknown()), // JsonSchema
+      code: z.string(), // The raw TypeScript source
+    });
+
+    export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+    export interface ToolMetadata {
+      name: string;
+      description: string;
+      path: string;
+    }
+
+    export interface RegistryState {
+      tools: Record<string, ToolMetadata>;
+    }
+
+    export interface Logger {
+      debug(message: string, ...args: any[]): void;
+      info(message: string, ...args: any[]): void;
+      warn(message: string, ...args: any[]): void;
+      error(message: string, ...args: any[]): void;
+    }
+  src/kernel/git.ts: >2
+     
+    import * as git from 'isomorphic-git';
+
+    import { TGPConfig, Logger } from '../types.js';
+
+    import * as path from 'path';
+
+
+    /**
+     * The Git Interface required by the Kernel.
+     * We rely on the 'fs' interface compatible with isomorphic-git.
+     */
+    export interface GitBackend {
+      hydrate(): Promise<void>;
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    export interface GitDependencies {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http: any;
+    }
+
+
+    /**
+     * Strategy interface for persisting changes to the upstream repository.
+     */
+    interface GitWriteStrategy {
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    /**
+     * Factory to create the Git Backend based on configuration.
+     */
+    export function createGitBackend(deps: GitDependencies, config: TGPConfig,
+    logger: Logger): GitBackend {
+      const dir = config.rootDir;
+      const { repo, auth, branch, writeStrategy } = config.git;
+      const { fs, http } = deps;
+
+      // Configuration for isomorphic-git
+      const gitOpts = {
+        fs,
+        dir,
+        http,
+        onAuth: () => ({ username: auth.token }),
+      };
+
+      const author = {
+        name: auth.user,
+        email: auth.email,
+      };
+
+      // --- Strategy Implementations ---
+
+      const directStrategy: GitWriteStrategy = {
+        async persist(message: string, filesToAdd: string[]) {
+          if (filesToAdd.length === 0) return;
+
+          // 1. Add files
+          for (const filepath of filesToAdd) {
+            try {
+               // check if file exists before adding
+               await git.add({ ...gitOpts, filepath });
+            } catch (e) {
+               logger.warn(`Git Add failed for ${filepath}`, e);
+               throw new Error(`Failed to stage file ${filepath}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+
+          try {
+            // 2. Commit
+            const sha = await git.commit({
+              ...gitOpts,
+              message,
+              author,
+            });
+            logger.info(`Committed ${sha.slice(0, 7)}: ${message}`);
+
+            // 3. Push
+            logger.info(`Pushing to ${branch}...`);
+            await git.push({
+              ...gitOpts,
+              remote: 'origin',
+              ref: branch,
+            });
+          } catch (e) {
+            logger.error(`Git Commit/Push failed:`, e);
+            throw new Error(`Failed to persist changes to Git: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      };
+
+      const prStrategy: GitWriteStrategy = {
+        async persist(message: string, files: string[]) {
+          if (files.length === 0) return;
+          
+          // 1. Get current branch
+          const currentBranch = await git.currentBranch({ ...gitOpts }) ?? 'HEAD';
+          
+          // 2. If we are on the protected branch (main/master), we must fork
+          let targetBranch = currentBranch;
+          
+          if (currentBranch === branch) {
+             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+             // Sanitize message for branch name
+             const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+             targetBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+             
+             logger.info(`Switching to new branch: ${targetBranch}`);
+             
+             await git.branch({ ...gitOpts, ref: targetBranch });
+             await git.checkout({ ...gitOpts, ref: targetBranch });
+          } else {
+             logger.info(`Already on feature branch: ${targetBranch}`);
+          }
+
+          for (const filepath of files) {
+            await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+          }
+
+          await git.commit({
+            ...gitOpts,
+            message: message,
+            author,
+          });
+          
+          logger.info(`Changes committed to ${targetBranch}.`);
+          
+          // Try to push the feature branch if auth is present
+          try {
+              await git.push({
+                ...gitOpts,
+                remote: 'origin',
+                ref: targetBranch,
+              });
+              logger.info(`Pushed ${targetBranch} to origin.`);
+          } catch (e) {
+              logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+          }
+        }
+      };
+
+      // Select Strategy
+      const strategy = writeStrategy === 'pr' ? prStrategy : directStrategy;
+
+      return {
+        async hydrate() {
+          try {
+            // 1. Check if repo exists locally
+            const gitDirExists = (await fs.promises.stat(path.join(dir, '.git'))
+              .then(() => true)
+              .catch(() => false)) as boolean;
+
+            if (!gitDirExists) {
+              // Clone
+              logger.info(`Cloning ${repo} into ${dir}...`);
+              await git.clone({
+                ...gitOpts,
+                url: `https://github.com/${repo}.git`,
+                ref: branch,
+                singleBranch: true,
+                depth: 1,
+              });
+            } else {
+              // Pull
+              logger.info(`Pulling latest from ${repo}...`);
+              await git.pull({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+                singleBranch: true,
+                author,
+              });
+            }
+          } catch (error) {
+            logger.error(`Git Hydration Failed:`, error);
+            // We might want to throw here to stop boot, but for now we log.
+            throw error;
+          }
+        },
+
+        async persist(message: string, filesToAdd: string[]) {
+          return strategy.persist(message, filesToAdd);
+        }
+      };
+    }
+  src/sandbox/execute.ts: >2-
+     
+    import { Kernel } from '../kernel/core.js';
+
+    import { createSandbox } from './isolate.js';
+
+    import { createSandboxBridge } from './bridge.js';
+
+    import { transformSync } from 'esbuild';
+
+    import * as path from 'path';
+
+
+    export interface ExecutionResult {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      result: any;
+      logs: string[];
+      error?: string;
+    }
+
+
+    /**
+     * Executes a tool script within a secure sandbox.
+     * 
+     * @param kernel The TGP Kernel instance
+     * @param code The TypeScript source code of the tool
+     * @param args The arguments object to pass to the tool (as 'args' global)
+     * @param filePath Optional path of the tool being executed (used for relative imports)
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+    export async function executeTool(kernel: Kernel, code: string, args:
+    Record<string, any> = {}, filePath: string = 'root.ts'):
+    Promise<ExecutionResult> {
+      const sandbox = createSandbox({
+        memoryLimitMb: 128,
+        timeoutMs: 5000 // 5s hard limit
+      });
+      
+      const logs: string[] = [];
+
+      try {
+        // 1. Setup Bridge
+        // We pass the kernel directly.
+        const bridge = createSandboxBridge({
+          kernel,
+          onLog: (msg) => logs.push(msg)
+        });
+
+        // 2. Module Orchestration (The 'require' Bridge)
+        // This host function is called synchronously from the Guest.
+        const __tgp_load_module = (baseDir: string, importId: string) => {
+          // Security: Ensure we don't traverse out of sandbox (handled by VFS)
+          // Resolution Logic:
+          // - Starts with '.': Relative to baseDir
+          // - Otherwise: Absolute from root (or relative to root)
+          
+          let targetPath = '';
+          if (importId.startsWith('.')) {
+            targetPath = path.join(baseDir, importId);
+          } else {
+            targetPath = importId;
+          }
+
+          // Normalize extension (assume .ts if missing)
+          if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+              // Check if it exists with .ts
+              // We can't easily check existence sync in VFS without try/catch read
+              // Let's assume .ts for TGP tools
+              targetPath += '.ts';
+          }
+
+          try {
+            const raw = kernel.vfs.readSync(targetPath);
+            const transformed = transformSync(raw, {
+              loader: 'ts',
+              format: 'cjs',
+              target: 'es2020',
+            });
+            
+            return {
+              code: transformed.code,
+              path: targetPath,
+              dirname: path.dirname(targetPath)
+            };
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
+          }
+        };
+
+        // 3. Shim Injection
+        // We prepend a CommonJS loader shim to the user code.
+        // This allows 'require' to work by calling back to __tgp_load_module.
+        const shim = `
+          const __moduleCache = {};
+
+          function __makeRequire(baseDir) {
+            return function(id) {
+              // Check Cache (Global)
+              // In a real system, cache keys should be absolute paths.
+              // Here we rely on the host to return consistent paths if we wanted perfect caching.
+              // For now, we skip cache or use simple ID (flawed for relatives).
+              // Let's implement correct caching by asking Host for absolute path first?
+              // Simpler: Just reload for now (Stateless).
+              
+              // Call Host Sync
+              const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+              
+              if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+
+              // Wrap in CommonJS Function
+              const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+              const newModule = { exports: {} };
+              
+              // Execute
+              fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+              
+              __moduleCache[mod.path] = newModule.exports;
+              return newModule.exports;
+            };
+          }
+          
+          // Setup Global Require for the entry point
+          // We assume the entry point is at 'filePath'
+          global.require = __makeRequire('${path.dirname(filePath)}');
+        `;
+
+        const context = {
+          ...bridge, // { tgp: { ... } }
+          args,
+          __tgp_load_module // Injected as Reference
+        };
+
+        // Combine Shim + User Code
+        // We wrap user code to provide top-level CommonJS variables if needed, 
+        // but standard TGP tools are just scripts. 
+        // We append the code. The 'shim' sets up 'global.require'.
+        const fullScript = shim + '\n' + code;
+
+        const result = await sandbox.compileAndRun(fullScript, context);
+        return { result, logs };
+
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        kernel.logger.error(`Tool Execution Failed:`, error);
+        return { result: null, logs, error: errMsg };
+      } finally {
+        sandbox.dispose();
+      }
+    }
+  package.json: |
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "lint": "eslint src/**/*.ts",
+        "lint:fix": "eslint src/**/*.ts --fix",
+        "test": "echo \"Error: no test specified\" && exit 1",
+        "tgp": "node bin/tgp.js"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "bin": {
+        "tgp": "./bin/tgp.js"
+      },
+      "dependencies": {
+        "esbuild": "^0.19.12",
+        "isolated-vm": "^6.0.2",
+        "isomorphic-git": "^1.35.1",
+        "memfs": "^4.51.0",
+        "zod": "^3.25.76",
+        "zod-to-json-schema": "^3.22.4"
+      },
+      "devDependencies": {
+        "@types/node": "^20.19.25",
+        "@typescript-eslint/eslint-plugin": "^8.48.0",
+        "@typescript-eslint/parser": "^8.48.0",
+        "eslint": "^9.39.1",
+        "typescript": "^5.9.3"
+      }
+    }
+  src/kernel/db.ts: |-
+    /* eslint-disable no-console */
+    import { TGPConfig } from '../types.js';
+
+    /**
+     * The Database Kernel Interface.
+     * 
+     * TGP guarantees that all tool executions happen within a transaction.
+     * If the tool throws, the transaction is rolled back.
+     */
+    export interface DBBackend {
+      /**
+       * Executes a raw SQL query.
+       * @param sql The SQL query string.
+       * @param params Parameter substitutions.
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      query(sql: string, params?: any[]): Promise<any[]>;
+
+      /**
+       * Wraps a function in a database transaction.
+       * @param fn The function to execute. It receives a transactional DB instance.
+       */
+      transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T>;
+    }
+
+    /**
+     * Factory to create the Database Backend based on configuration.
+     * Loads the appropriate driver or falls back to NoOp.
+     */
+    export function createDBBackend(config: TGPConfig): DBBackend {
+      const dbConfig = config.db;
+
+      if (dbConfig) {
+        // In a real implementation, we would perform a dynamic import here based on the dialect.
+        // e.g. if (dbConfig.dialect === 'postgres') return new PostgresBackend(dbConfig);
+        
+        if (dbConfig.dialect === 'postgres' || dbConfig.dialect === 'mysql' || dbConfig.dialect === 'sqlite' || dbConfig.dialect === 'libsql') {
+           console.warn(`[TGP-DB] Dialect '${dbConfig.dialect}' configured. NoOp driver active (Drivers not bundled in Core).`);
+        } else {
+          throw new Error(`[TGP-DB] Unsupported dialect: ${dbConfig.dialect}`);
+        }
+      }
+
+      return createNoOpDB();
+    }
+
+    /**
+     * A No-Op Database Backend used when no DB is configured.
+     * It logs operations to the console to verify behavior.
+     */
+    export function createNoOpDB(): DBBackend {
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async query(sql: string, params: any[] = []) {
+          console.log(`[TGP-DB] Query: ${sql}`, params);
+          return [];
+        },
+
+        async transaction<T>(fn: (trx: DBBackend) => Promise<T>): Promise<T> {
+          console.log(`[TGP-DB] Begin Transaction`);
+          try {
+            // In a real DB, we would start a trx here.
+            // We pass 'this' as the transactional client (NoOp doesn't distinguish)
+            const result = await fn(this);
+            console.log(`[TGP-DB] Commit Transaction`);
+            return result;
+          } catch (err) {
+            console.log(`[TGP-DB] Rollback Transaction`);
+            throw err;
+          }
+        }
+      };
+    }
+  src/kernel/core.ts: |-
+    /* eslint-disable no-console */
+    import { TGPConfig, Logger } from '../types.js';
+    import { VFSAdapter } from '../vfs/types.js';
+    import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+    import { createDBBackend, DBBackend } from './db.js';
+    import { createRegistry, Registry } from './registry.js';
+
+    // We inject the platform-specific environment dependencies here.
+    // This allows the Kernel to run in Node, Edge, or Browser environments.
+    export interface KernelEnvironment extends GitDependencies {
+      // We can extend this if Kernel needs more platform specific components later
+    }
+
+    export interface KernelOptions {
+      config: TGPConfig;
+      vfs: VFSAdapter; 
+      env: KernelEnvironment;
+      logger?: Logger;
+      db?: DBBackend;
+    }
+
+    export interface Kernel {
+      boot(): Promise<void>;
+      shutdown(): Promise<void>;
+      config: TGPConfig;
+      vfs: VFSAdapter;
+      git: GitBackend;
+      db: DBBackend;
+      registry: Registry;
+      logger: Logger;
+    }
+
+    const defaultLogger: Logger = {
+      debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
+      info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
+      warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
+      error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
+    };
+
+    /**
+     * Factory to create a TGP Kernel.
+     * This wires up the configuration, the filesystem, and the git backend.
+     */
+    export function createKernel(opts: KernelOptions): Kernel {
+      const { config, vfs, env } = opts;
+      const logger = opts.logger ?? defaultLogger;
+      
+      const git = createGitBackend(env, config, logger);
+      const db = opts.db ?? createDBBackend(config); 
+      const registry = createRegistry(vfs);
+
+      let isBooted = false;
+
+      return {
+        config,
+        vfs,
+        git,
+        db,
+        registry,
+        logger,
+
+        async boot() {
+          if (isBooted) return;
+          logger.info(`Kernel booting...`);
+          
+          try {
+            // Hydrate the filesystem from Git
+            await git.hydrate().catch(err => {
+              logger.error(`Git hydration failed.`, err);
+              throw err;
+            });
+            
+            // Hydrate registry from meta.json
+            await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
+            
+            isBooted = true;
+            logger.info(`Kernel ready.`);
+          } catch (error) {
+            logger.error(`Boot failed:`, error);
+            throw error;
+          }
+        },
+
+        async shutdown() {
+          logger.info(`Kernel shutting down...`);
+          // Cleanup tasks (close db connections, etc) can go here
+          isBooted = false;
+        }
+      };
+    }
+  src/tgp.ts: >-
+    import * as fs from 'node:fs';
+
+    import * as http from 'isomorphic-git/http/node';
+
+    import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
+
+    import { loadTGPConfig } from './config.js';
+
+    import { createNodeVFS } from './vfs/node.js';
+
+    import { TGPConfigSchema, TGPConfig, Logger } from './types.js';
+
+    import { VFSAdapter } from './vfs/types.js';
+
+    import { GitBackend } from './kernel/git.js';
+
+    import { DBBackend } from './kernel/db.js';
+
+    import { Registry } from './kernel/registry.js';
+
+
+    export interface TGPOptions {
+      /**
+       * Path to the configuration file.
+       * @default "./tgp.config.ts"
+       */
+      configFile?: string;
+
+      /**
+       * Override the Virtual Filesystem Adapter.
+       * Useful for using MemoryVFS in tests or Edge environments.
+       * If omitted, defaults to NodeVFS rooted at config.rootDir.
+       */
+      vfs?: VFSAdapter;
+
+      /**
+       * Inject a custom logger. Defaults to console.
+       */
+      logger?: Logger;
+
+      /**
+       * Inject a custom Database Backend.
+       */
+      db?: DBBackend;
+
+      /**
+       * Override the raw filesystem used by Git.
+       * If omitted, defaults to 'node:fs'.
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs?: any;
+
+      /**
+       * Override the HTTP client used by Git.
+       * If omitted, defaults to 'isomorphic-git/http/node'.
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http?: any;
+    }
+
+
+    /**
+     * The TGP Kernel Class.
+     * Manages the lifecycle of the Agent's runtime environment, including
+     * configuration, filesystem (VFS), Git persistence, and the Tool Registry.
+     */
+    export class TGP implements Kernel {
+      public config: TGPConfig;
+      public vfs: VFSAdapter;
+      public git: GitBackend;
+      public db: DBBackend;
+      public registry: Registry;
+      public logger: Logger;
+      
+      private _isBooted = false;
+
+      constructor(private opts: TGPOptions = {}) {
+        // 1. Initialize with Defaults (Sync)
+        // We use the default schema to ensure the kernel is usable immediately (e.g. for tooling)
+        // even before the async config load completes.
+        this.config = TGPConfigSchema.parse({});
+        
+        // 2. Setup VFS
+        // Use injected VFS or default to Node VFS
+        this.vfs = opts.vfs || createNodeVFS(this.config.rootDir);
+
+        // 3. Initialize Kernel Components
+        // Construct Environment with defaults if not provided
+        const env: KernelEnvironment = {
+          fs: opts.fs || fs,
+          http: opts.http || http
+        };
+
+        const kernel = createKernel({
+          config: this.config,
+          vfs: this.vfs,
+          env,
+          logger: opts.logger,
+          db: opts.db
+        });
+
+        this.git = kernel.git;
+        this.db = kernel.db;
+        this.registry = kernel.registry;
+        this.logger = kernel.logger;
+      }
+
+      /**
+       * Hydrates the Kernel from the configuration file and Git.
+       * This must be awaited before executing tools in production.
+       */
+      async boot(): Promise<void> {
+        if (this._isBooted) return;
+
+        const configPath = this.opts.configFile || './tgp.config.ts';
+
+        try {
+          // 1. Load Real Configuration
+          const loadedConfig = await loadTGPConfig(configPath);
+          this.config = loadedConfig;
+
+          // 2. Re-initialize VFS if RootDir changed AND user didn't inject a custom VFS
+          // If the user injected a VFS, we assume they configured it correctly.
+          if (!this.opts.vfs) {
+            this.vfs = createNodeVFS(this.config.rootDir);
+          }
+
+          // 3. Re-initialize Kernel Components with new Config/VFS
+          const env: KernelEnvironment = {
+            fs: this.opts.fs || fs,
+            http: this.opts.http || http
+          };
+
+          const kernel = createKernel({
+            config: this.config,
+            vfs: this.vfs,
+            env,
+            logger: this.opts.logger,
+            db: this.opts.db
+          });
+          
+          this.git = kernel.git;
+          this.db = kernel.db;
+          this.registry = kernel.registry;
+
+          // 4. Hydrate State (Git Clone/Pull + Registry Build)
+          await kernel.boot();
+          
+          this._isBooted = true;
+        } catch (error) {
+          // If config loading fails, we might still be in a valid default state,
+          // but we should warn the user.
+          console.warn(`[TGP] Boot warning:`, error);
+          throw error;
+        }
+      }
+
+      async shutdown(): Promise<void> {
+        // Passthrough to internal kernel shutdown if needed
+        this._isBooted = false;
+      }
+
+      /**
+       * Generates the System Prompt enforcing the "8 Standards" and TGP protocol.
+       */
+      getSystemPrompt(): string {
+        return `
+    You are an autonomous AI Engineer running on the Tool Generation Protocol
+    (TGP).
+
+    Your goal is to build, validate, and execute tools to solve the user's
+    request.
+
+
+    # THE PROTOCOL
+
+
+    1.  **Reuse or Forge**: Check if a tool exists. If not, write it.
+
+    2.  **No One-Offs**: Do not execute arbitrary scripts. Create a reusable
+    tool in 'tools/'.
+
+    3.  **Strict Typing**: All tools must be written in TypeScript. No 'any', no
+    'unknown'.
+
+
+    # CODING STANDARDS (The 8 Commandments)
+
+
+    1.  **Abstract**: Logic must be separated from data. (e.g., args.taxRate,
+    not 0.05).
+
+    2.  **Composable**: Functions should return results usable by others.
+
+    3.  **HOFs**: Use map/reduce/filter over imperative loops.
+
+    4.  **Stateless**: No global state. No reliance on previous execution.
+
+    5.  **Reusable**: Generic enough for multiple use cases.
+
+    6.  **General by Params**: Behavior controlled by arguments.
+
+    7.  **No Hardcoded Values**: No magic numbers or IDs.
+
+    8.  **Orchestrator**: Tools can import other tools via 'require'.
+
+
+    # EXECUTION FLOW
+
+
+    1.  List files to see what you have.
+
+    2.  Read file content to understand the tool.
+
+    3.  If missing, write_file to create a new tool.
+
+    4.  Use check_tool to validate syntax.
+
+    5.  Use exec_tool to run it.
+
+    `;
+      }
+    }
+
+
+    /**
+     * Legacy Factory to create a TGP Kernel (Backward Compatibility).
+     */
+    export async function createTGP(opts: TGPOptions = {}): Promise<Kernel> {
+      const tgp = new TGP(opts);
+      await tgp.boot();
+      return tgp;
+    }
+
+
+    /**
+     * Helper to get the system prompt (Backward Compatibility).
+     */
+    export function getSystemPrompt(): string {
+      return new TGP().getSystemPrompt();
+    }
+  README.md: >
+    # Tool Generation Protocol (TGP)
+
+
+    > **The Self-Assembling Backend.**
+
+    > **MCP is dead.** Stop streaming context. Start compiling tools.
+
+
+    # 1. Manifesto
+
+
+    **The Problem:** You spend 80% of your time writing "glue code"—RPCs, CRUD
+    wrappers, and slightly different "Export to CSV" endpoints.
+
+    **The Trap (MCP):** Model Context Protocol (MCP) is just better glue. It
+    requires you to pre-build tools. If you didn't write the endpoint, the Agent
+    fails.
+
+    **The Solution (TGP):** Give the Agent a compiler.
+
+
+    TGP is a **JIT Runtime for Business Logic**. The Agent forges its own tools,
+    validates them, and persists them to Git. It builds a personalized standard
+    library for your application.
+
+
+    *   **MCP**: "I can't do that. I don't have a tool."
+
+    *   **TGP**: "I wrote a tool. It's running."
+
+
+    ## 1.1 Use Cases (The Long Tail)
+
+
+    99% of features are never built because they are too specific. TGP solves
+    the "I wish the app could do X" problem.
+
+
+    *   **Reporting**: "List users who downgraded in June, pipe-delimited." ->
+    Forges `tools/reports/downgrade.ts`. Time: 4s.
+
+    *   **Cleanup**: "Fix typo in 'Ohiio' for active users." -> Forges
+    `tools/maintenance/fix_typo.ts`. Atomic SQL update.
+
+    *   **Logic**: "Calculate dimensional weight `(L*W*H)/139`." -> Forges
+    `tools/shipping/dim_weight.ts`. Deterministic V8 execution.
+
+
+    ## 1.2 Anti-Patterns
+
+
+    TGP is a **JIT Compiler**, not a Daemon.
+
+    *   **Not a Server**: No `express.listen()`. Tools are ephemeral
+    (Lambda-style).
+
+    *   **Not a Browser**: No DOM. No Puppeteer.
+
+    *   **Not an ORM**: No object mutation. Use raw, atomic SQL.
+
+
+    # 2. Architecture (The Stack)
+
+
+    TGP drops into your existing Node/Next.js/Nest apps. It is **just
+    TypeScript**.
+
+
+    ## 2.1 The Developer View
+
+
+    The agent views `./.tgp` as its root directory. This is a standard Git
+    repository.
+
+
+    ```bash
+
+    ./.tgp/
+
+    ├── .git/                  # MEMORY: Version history of TOOL SOURCE CODE.
+
+    ├── bin/                   # KERNEL: The compiled 'tgp' binary.
+
+    ├── tools/                 # USER SPACE: Generated capabilities.
+
+    │   ├── analytics/         # e.g., "churn-prediction.ts"
+
+    │   └── reports/           # e.g., "revenue-csv.ts"
+
+    └── meta.json              # REGISTRY: Fast lookup index.
+
+    ```
+
+
+    ## 2.2 GitOps & Serverless Harmony
+
+
+    **Is TGP Serverless Friendly?** Yes.
+
+
+    In a Serverless environment (Cloudflare Workers, AWS Lambda, Vercel), the
+    runtime filesystem is ephemeral. TGP handles this by treating **Git as the
+    Backend**.
+
+
+    1.  **Hydration**: On boot, TGP checks if the local cache matches the remote
+    `HEAD`. If not, it pulls the latest tools from GitHub/GitLab.
+
+    2.  **Execution**: Tools run in the local V8 Isolate (milliseconds).
+
+    3.  **Persistence**: When an Agent forges a new tool, it commits and pushes
+    to the remote repository.
+
+    4.  **Concurrency**: TGP uses standard Git locking to handle concurrent
+    writes from multiple agents.
+
+
+    *Configuring GitHub credentials enables the "Infinite Memory" feature.*
+
+
+    ## 2.3 The VFS (Virtual Filesystem)
+
+
+    TGP enforces a strict separation between **The Editor (Host)** and **The
+    Runtime (Sandbox)**.
+
+
+    1.  **The Editor (Agent Context)**: The Agent accesses `./.tgp` directly via
+    the Kernel Tools. It works just like a human dev using VS Code.
+
+    2.  **The Runtime (Sandbox Context)**: When code *executes*, it runs inside
+    the V8 Isolate with a restricted VFS:
+        *   **`/lib`**: Read-Only mount of Host's `./.tgp/tools`.
+        *   **`/tmp`**: Read-Write ephemeral scratchpad (wiped on exit).
+
+    ## 2.4 The Kernel Tools (Agent Capabilities)
+
+
+    The Agent is provided with a specific set of primitives to interact with the
+    environment. It does not have generic shell access.
+
+
+    | Tool | Signature | Description |
+
+    | :--- | :--- | :--- |
+
+    | **`list_files`** | `(dir: string) => string[]` | Recursively list
+    available tools or definitions. |
+
+    | **`read_file`** | `(path: string) => string` | Read the content of an
+    existing tool or schema. |
+
+    | **`write_file`** | `(path: string, content: string) => void` | Create a
+    new tool or overwrite a draft. |
+
+    | **`patch_file`** | `(path: string, search: string, replace: string) =>
+    void` | Surgical search-and-replace for refactoring. |
+
+    | **`check_tool`** | `(path: string) => { valid: boolean, errors: string[]
+    }` | Run the JIT compiler and linter. |
+
+    | **`exec_tool`** | `(path: string, args: object) => any` | Execute a tool
+    inside the secure Sandbox. |
+
+
+    ---
+
+
+    # 3. The Protocol
+
+
+    This is the algorithm the Agent must follow. It is the "software" running on
+    the Agent's "CPU".
+
+
+    ## 3.1 The Prime Directive: "Reuse or Forge"
+
+
+    The Agent is forbidden from executing one-off scripts for repetitive tasks.
+
+
+    1.  **Lookup**: Query registry. If a tool exists (Score > 0.85), **Reuse**.
+
+    2.  **Forge**: If no tool exists, **Create**.
+
+    3.  **Persist**: Commit to Git.
+
+
+    ## 3.2 The 8 Standards of Code Quality
+
+
+    To ensure the ecosystem remains clean, the Agent must adhere to strict code
+    quality guidelines. The Linter/Reviewer will reject tools that violate these
+    principles.
+
+
+    1.  **Abstract**: Logic must be separated from specific data instances.
+        *   *Bad*: `const tax = 0.05`
+        *   *Good*: `const tax = args.taxRate`
+    2.  **Composable**: Functions should do one thing and return a result usable
+    by other functions.
+
+    3.  **HOFs (Higher Order Functions)**: Use map/reduce/filter patterns rather
+    than imperative loops where possible.
+
+    4.  **Stateless**: Tools must not rely on variables outside their scope or
+    previous executions.
+
+    5.  **Reusable**: The code should be generic enough to serve multiple use
+    cases.
+
+    6.  **General by Params**: Behavior is controlled by arguments, not
+    hardcoded strings.
+
+    7.  **No Hardcoded Values**: No magic numbers, no specific IDs, no emails in
+    source code.
+
+    8.  **Orchestrator Capable**: Tools should be able to import and invoke
+    other TGP tools (via the `require` bridge).
+
+
+    ## 3.3 The Feedback Loop (Self-Healing)
+
+
+    If a tool fails during execution:
+
+    1.  **Capture**: Agent reads STDERR.
+
+    2.  **Diagnose**: Agent identifies the logic error or schema mismatch.
+
+    3.  **Patch**: Agent uses `patch_file` to fix the code in place.
+
+    4.  **Verify**: Agent runs `check_tool`.
+
+
+    ---
+
+
+    # 4. Security (The Sandbox)
+
+
+    **TL;DR:**
+
+    1.  **Zero-Trust**: Tools run in a stripped V8 context. No `process`, no
+    `fs`, no `eval`.
+
+    2.  **Resource Caps**: 64MB RAM, 50ms CPU time. Infinite loops die
+    instantly.
+
+    3.  **Transaction Safety**: All DB writes run inside a transaction. If the
+    tool throws, the DB rolls back.
+
+
+    ## 4.1 The Great Wall (isolated-vm)
+
+    TGP uses `isolated-vm` to create a boundary between the Host (Agent) and the
+    Guest (Tool).
+
+    *   **Memory**: Separate Heaps.
+
+    *   **Syscalls**: Bridged via specific `tgp` global object.
+
+    *   **Network**: Blocked by default. Allowed only via whitelisted `fetch`
+    bridge.
+
+
+    ---
+
+
+    # 5. The Ecosystem (Join the Hive)
+
+
+    We are building the **`libc` of the AI Age**.
+
+
+    ## 5.1 The Logic/State Split
+
+    In TGP, **Tools are Stateless**.
+
+    *   **Logic (Public)**: The TypeScript code
+    (`tools/analytics/retention.ts`).
+
+    *   **State (Private)**: The Database Connection (`DATABASE_URL`).
+
+
+    ## 5.2 Hub & Spoke Topology (Git Backed)
+
+    Because TGP relies on Git, your tools are portable.
+
+    *   **Upstream**: A private repo (e.g., `github.com/org/tgp-global`).
+
+    *   **Downstream**: The ephemeral serverless instances pull from Upstream.
+
+
+    ---
+
+
+    # 6. Governance Modes
+
+
+    ## 6.1 God Mode (Development)
+
+    *   **Behavior**: `Forge -> Compile -> Execute`.
+
+    *   **Target**: Local `.tgp/` folder or direct push to `main`.
+
+
+    ## 6.2 Gatekeeper Mode (Production)
+
+    *   **Behavior**: `Forge -> Compile -> Pull Request`.
+
+    *   **Target**: Agent creates a branch `feat/tool-name` and opens a PR.
+
+    *   **Approval**: A human or a Senior Agent reviews the diff before merging
+    to `main`.
+
+
+    ---
+
+
+    # 7. Integration Spec
+
+
+    ## 7.1 The Bootstrap
+
+    ```bash
+
+    npx tgp@latest init
+
+    ```
+
+
+    ## 7.2 Configuration (`tgp.config.ts`)
+
+
+    The configuration defines the Sandbox boundaries and the Git backend.
+
+
+    ```typescript
+
+    import { defineTGPConfig } from '@tgp/core';
+
+
+    export default defineTGPConfig({
+      // The Root of the Agent's filesystem (Ephemeral in serverless)
+      rootDir: './.tgp',
+
+      // 1. DATA: How the Agent sees your DB
+      db: {
+        dialect: 'postgres',
+        ddlSource: 'drizzle-kit generate --print',
+      },
+
+      // 2. BACKEND (GitOps)
+      // Essential for Serverless/Ephemeral environments.
+      // The Agent pulls state from here and pushes new tools here.
+      git: {
+        provider: 'github', // or 'gitlab', 'bitbucket'
+        repo: 'my-org/tgp-tools',
+        branch: 'main',
+        auth: {
+          // Why not in config? Because we read from ENV for security.
+          token: process.env.TGP_GITHUB_TOKEN,
+          user: 'tgp-bot[bot]',
+          email: 'tgp-bot@users.noreply.github.com'
+        },
+        // Strategy: 'direct' (push) or 'pr' (pull request)
+        writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
+      },
+
+      // 3. FILESYSTEM JAIL
+      fs: {
+        allowedDirs: ['./public/exports', './tmp'],
+        blockUpwardTraversal: true
+      },
+
+      // 4. RUNTIME
+      allowedImports: ['@tgp/std', 'zod', 'date-fns']
+    });
+
+    ```
+
+
+    ## 7.3 Runtime Usage (The SDK)
+
+
+    ```typescript
+
+    // src/app/api/agent/route.ts
+
+    import { TGP, tgpTools } from '@tgp/core';
+
+    import { generateText } from 'ai';
+
+
+    const kernel = new TGP({ configFile: './tgp.config.ts' });
+
+
+    export async function POST(req: Request) {
+      const { messages } = await req.json();
+
+      // Injects: list_files, read_file, write_file, exec_tool
+      const tools = tgpTools(kernel);
+
+      const result = await generateText({
+        model: openai('gpt-4-turbo'),
+        tools, 
+        messages,
+        // The System Prompt enforces the "8 Standards"
+        system: kernel.getSystemPrompt() 
+      });
+
+      return result.response;
+    }
+
+    ```
+
+
+    ---
+
+
+    # 8. Roadmap & Contributing
+
+
+    We are hacking on the future of backend development.
+
+
+    *   **[P0] The LSP**: IDE extension for real-time tool visibility.
+
+    *   **[P1] Vector Memory**: Semantic search for tool reuse.
+
+    *   **[P2] Multi-Lang**: Python support via WebAssembly.
+
+
+    **Get Involved:**
+
+    `git clone` -> `npm install` -> `npm run forge`.
+
+    ```
+approved: true
+linesAdded: 88
+linesRemoved: 48
+linesDifference: 136
+gitCommittedAt: null
+status: committed
+id: 30

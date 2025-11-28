@@ -3,10 +3,9 @@ import * as http from 'isomorphic-git/http/node';
 import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
 import { loadTGPConfig } from './config.js';
 import { createNodeVFS } from './vfs/node.js';
-import { TGPConfigSchema, TGPConfig, Logger } from './types.js';
+import { TGPConfigSchema, TGPConfig, Logger, DBBackend } from './types.js';
 import { VFSAdapter } from './vfs/types.js';
 import { GitBackend } from './kernel/git.js';
-import { DBBackend } from './kernel/db.js';
 import { Registry } from './kernel/registry.js';
 
 export interface TGPOptions {

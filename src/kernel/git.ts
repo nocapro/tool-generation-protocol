@@ -31,7 +31,7 @@ interface GitWriteStrategy {
  */
 export function createGitBackend(deps: GitDependencies, config: TGPConfig, logger: Logger): GitBackend {
   const dir = config.rootDir;
-  const { repo, auth, branch, writeStrategy } = config.git;
+  const { repo, auth, branch, writeStrategy, apiBaseUrl } = config.git;
   const { fs, http } = deps;
 
   // Configuration for isomorphic-git
@@ -111,6 +111,40 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
          logger.info(`Already on feature branch: ${targetBranch}`);
       }
 
+      const createPullRequest = async () => {
+        const [owner, repoName] = repo.split('/');
+        const url = new URL(`/repos/${owner}/${repoName}/pulls`, apiBaseUrl).href;
+        
+        logger.info(`Creating Pull Request on ${repo}...`);
+
+        try {
+          // We use native fetch here, which is available in modern Node.
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `token ${auth.token}`,
+              'Accept': 'application/vnd.github.v3+json',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              title: message,
+              head: targetBranch,
+              base: branch,
+              body: `Forged by TGP.\nCommit Message: ${message}`,
+            }),
+          });
+          
+          const result = await response.json();
+          if (response.ok) {
+            logger.info(`Successfully created Pull Request: ${result.html_url}`);
+          } else if (response.status === 422) { // Unprocessable Entity - often means PR exists
+            logger.warn(`Could not create PR (it may already exist): ${JSON.stringify(result.errors)}`);
+          }
+        } catch (e) {
+          logger.error('Failed to create pull request via API.', e);
+        }
+      };
+
       for (const filepath of files) {
         await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
       }
@@ -131,6 +165,7 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
             ref: targetBranch,
           });
           logger.info(`Pushed ${targetBranch} to origin.`);
+          await createPullRequest();
       } catch (e) {
           logger.warn(`Failed to push feature branch. Changes are local only.`, e);
       }
