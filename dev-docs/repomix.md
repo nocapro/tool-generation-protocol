@@ -32,9 +32,6 @@ src/
   tgp.ts
   types.ts
 test/
-  e2e/
-    scenarios.test.ts
-    utils.ts
   integration/
     bridge.test.ts
     gitops.test.ts
@@ -50,6 +47,117 @@ tsconfig.json
 ```
 
 # Files
+
+## File: bin/tgp.js
+````javascript
+#!/usr/bin/env node
+
+import { cli } from '../dist/cli/index.js';
+
+cli().catch((err) => {
+  console.error('TGP CLI Error:', err);
+  process.exit(1);
+});
+````
+
+## File: src/adapter.ts
+````typescript
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+import { ToolSet } from './tools/types.js';
+
+/**
+ * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
+ * 
+ * @param tools The TGP ToolSet (from tgpTools(kernel))
+ * @returns An object compatible with the `tools` parameter of `generateText`
+ */
+export function formatTools(tools: ToolSet) {
+  // Vercel AI SDK Core accepts tools as an object where keys are names
+  // and values have { description, parameters, execute }.
+  // TGP tools already match this signature largely, but we ensure strict typing here.
+  return tools;
+}
+
+/**
+ * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
+ * Useful if using the raw OpenAI SDK.
+ */
+export function toOpenAITools(tools: ToolSet) {
+  return Object.entries(tools).map(([name, tool]) => ({
+    type: 'function',
+    function: {
+      name,
+      description: tool.description,
+      parameters: zodToJsonSchema(tool.parameters),
+    },
+  }));
+}
+````
+
+## File: src/config.ts
+````typescript
+import { pathToFileURL } from 'url';
+import { TGPConfig, TGPConfigSchema } from './types.js';
+
+/**
+ * Identity function to provide type inference for configuration files.
+ * usage: export default defineTGPConfig({ ... })
+ */
+export function defineTGPConfig(config: TGPConfig): TGPConfig {
+  return config;
+}
+
+/**
+ * Dynamically loads a TGP configuration file, validates it against the schema,
+ * and returns the typed configuration object.
+ * 
+ * @param configPath - Absolute or relative path to the config file (e.g., ./tgp.config.ts)
+ */
+export async function loadTGPConfig(configPath: string): Promise<TGPConfig> {
+  try {
+    // Convert path to file URL to ensure compatibility with ESM imports
+    // We assume the host environment (Node) can handle the import.
+    // In Serverless environments, the config might be injected differently, 
+    // but this loader is primarily for the CLI/Node runtime.
+    const importPath = pathToFileURL(configPath).href;
+    
+    const module = await import(importPath);
+    
+    // Support both default export and named export 'config'
+    const rawConfig = module.default || module.config;
+
+    if (!rawConfig) {
+      throw new Error(`No default export found in ${configPath}`);
+    }
+
+    // Runtime Validation: Ensure the user provided valid configuration
+    const parsed = TGPConfigSchema.safeParse(rawConfig);
+
+    if (!parsed.success) {
+      const errors = parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('\n');
+      throw new Error(`Invalid TGP Configuration:\n${errors}`);
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Failed to load TGP config from ${configPath}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+````
+
+## File: src/index.ts
+````typescript
+// Exporting the Core DNA for consumers
+export * from './types.js';
+export * from './config.js';
+export * from './tools/index.js';
+export * from './tgp.js';
+export * from './adapter.js';
+````
 
 ## File: test/integration/bridge.test.ts
 ````typescript
@@ -299,7 +407,7 @@ describe('Integration: SQL Adapter (Real SQLite)', () => {
   });
 
   afterEach(async () => {
-    db.close();
+    if (db) db.close();
     await cleanupDir(tempDir);
     await cleanupDir(remoteRepo);
   });
@@ -398,117 +506,6 @@ describe('Integration: SQL Adapter (Real SQLite)', () => {
     expect(count.c).toBe(2);
   });
 });
-````
-
-## File: bin/tgp.js
-````javascript
-#!/usr/bin/env node
-
-import { cli } from '../dist/cli/index.js';
-
-cli().catch((err) => {
-  console.error('TGP CLI Error:', err);
-  process.exit(1);
-});
-````
-
-## File: src/adapter.ts
-````typescript
-import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
-import { ToolSet } from './tools/types.js';
-
-/**
- * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
- * 
- * @param tools The TGP ToolSet (from tgpTools(kernel))
- * @returns An object compatible with the `tools` parameter of `generateText`
- */
-export function formatTools(tools: ToolSet) {
-  // Vercel AI SDK Core accepts tools as an object where keys are names
-  // and values have { description, parameters, execute }.
-  // TGP tools already match this signature largely, but we ensure strict typing here.
-  return tools;
-}
-
-/**
- * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
- * Useful if using the raw OpenAI SDK.
- */
-export function toOpenAITools(tools: ToolSet) {
-  return Object.entries(tools).map(([name, tool]) => ({
-    type: 'function',
-    function: {
-      name,
-      description: tool.description,
-      parameters: zodToJsonSchema(tool.parameters),
-    },
-  }));
-}
-````
-
-## File: src/config.ts
-````typescript
-import { pathToFileURL } from 'url';
-import { TGPConfig, TGPConfigSchema } from './types.js';
-
-/**
- * Identity function to provide type inference for configuration files.
- * usage: export default defineTGPConfig({ ... })
- */
-export function defineTGPConfig(config: TGPConfig): TGPConfig {
-  return config;
-}
-
-/**
- * Dynamically loads a TGP configuration file, validates it against the schema,
- * and returns the typed configuration object.
- * 
- * @param configPath - Absolute or relative path to the config file (e.g., ./tgp.config.ts)
- */
-export async function loadTGPConfig(configPath: string): Promise<TGPConfig> {
-  try {
-    // Convert path to file URL to ensure compatibility with ESM imports
-    // We assume the host environment (Node) can handle the import.
-    // In Serverless environments, the config might be injected differently, 
-    // but this loader is primarily for the CLI/Node runtime.
-    const importPath = pathToFileURL(configPath).href;
-    
-    const module = await import(importPath);
-    
-    // Support both default export and named export 'config'
-    const rawConfig = module.default || module.config;
-
-    if (!rawConfig) {
-      throw new Error(`No default export found in ${configPath}`);
-    }
-
-    // Runtime Validation: Ensure the user provided valid configuration
-    const parsed = TGPConfigSchema.safeParse(rawConfig);
-
-    if (!parsed.success) {
-      const errors = parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('\n');
-      throw new Error(`Invalid TGP Configuration:\n${errors}`);
-    }
-
-    return parsed.data;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to load TGP config from ${configPath}: ${error.message}`);
-    }
-    throw error;
-  }
-}
-````
-
-## File: src/index.ts
-````typescript
-// Exporting the Core DNA for consumers
-export * from './types.js';
-export * from './config.js';
-export * from './tools/index.js';
-export * from './tgp.js';
-export * from './adapter.js';
 ````
 
 ## File: src/cli/index.ts
@@ -624,7 +621,7 @@ import { z } from 'zod';
 import { AgentTool, ToolSet } from './types.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type DBExecutor = (sql: string, params: any[]) => Promise<any[]>;
+export type DBExecutor = (sql: string, params: any[]) => Promise<any>;
 
 export const ExecSqlParams = z.object({
   sql: z.string().describe('The raw SQL query to execute.'),
@@ -648,7 +645,7 @@ export function createSqlTools(executor: DBExecutor): ToolSet {
         return executor(sql, params ?? []);
       },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as AgentTool<typeof ExecSqlParams, any[]>,
+    } as AgentTool<typeof ExecSqlParams, any>,
   };
 }
 ````
@@ -1290,361 +1287,6 @@ export function createNodeVFS(rootDir: string): VFSAdapter {
 }
 ````
 
-## File: test/e2e/scenarios.test.ts
-````typescript
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { createTempDir, initBareRepo, createTgpConfig, runTgpCli, cleanupDir } from './utils.js';
-import { TGP } from '../../src/tgp.js';
-import { tgpTools } from '../../src/tools/index.js';
-import { createSqlTools } from '../../src/tools/sql.js';
-
-describe('E2E Scenarios', () => {
-  let tempDir: string;
-  let remoteRepo: string;
-
-  beforeEach(async () => {
-    tempDir = await createTempDir();
-    remoteRepo = await createTempDir('tgp-remote-');
-    await initBareRepo(remoteRepo);
-  });
-
-  afterEach(async () => {
-    await cleanupDir(tempDir);
-    await cleanupDir(remoteRepo);
-  });
-
-  it('Scenario 1: Cold Start (Hydration, Fabrication, Execution)', async () => {
-    // 1. Setup Config
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    
-    // 2. Boot Kernel
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    
-    const tools = tgpTools(kernel);
-
-    // 3. Create a Tool (Fibonacci)
-    const fibPath = 'tools/math/fib.ts';
-    const fibCode = `
-      export default function fib(args: { n: number }) {
-        const n = args.n;
-        if (n <= 1) return n;
-        let a = 0, b = 1;
-        for (let i = 2; i <= n; i++) {
-          const temp = a + b;
-          a = b;
-          b = temp;
-        }
-        return b;
-      }
-    `;
-
-    const writeRes = await tools.write_file.execute({ path: fibPath, content: fibCode });
-    expect(writeRes.success).toBe(true);
-
-    // 4. Validate Tool
-    const checkRes = await tools.check_tool.execute({ path: fibPath });
-    expect(checkRes.valid).toBe(true);
-
-    // 5. Execute Tool
-    const execRes = await tools.exec_tool.execute({ path: fibPath, args: { n: 10 } });
-    expect(execRes.success).toBe(true);
-    expect(execRes.result).toBe(55);
-
-    // 6. Verify Persistence
-    // Clone remote repo to a new dir and check file existence
-    const verifyDir = await createTempDir('tgp-verify-');
-    const { execSync } = await import('node:child_process');
-    execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
-    
-    const exists = await fs.access(path.join(verifyDir, fibPath)).then(() => true).catch(() => false);
-    expect(exists).toBe(true);
-
-    await cleanupDir(verifyDir);
-  });
-
-  it('Scenario 2: Concurrency (The Merge Test)', async () => {
-    // Agent A
-    const dirA = await createTempDir('tgp-agent-a-');
-    const configA = await createTgpConfig(dirA, remoteRepo);
-    const kernelA = new TGP({ configFile: configA });
-    await kernelA.boot();
-
-    // Agent B
-    const dirB = await createTempDir('tgp-agent-b-');
-    const configB = await createTgpConfig(dirB, remoteRepo);
-    const kernelB = new TGP({ configFile: configB });
-    await kernelB.boot();
-
-    const toolsA = tgpTools(kernelA);
-    const toolsB = tgpTools(kernelB);
-
-    // Both agents create different tools simultaneously
-    // This forces one to fail the push, auto-rebase, and push again.
-    await Promise.all([
-      toolsA.write_file.execute({ 
-        path: 'tools/tool_A.ts', 
-        content: 'export default () => "A"' 
-      }),
-      toolsB.write_file.execute({ 
-        path: 'tools/tool_B.ts', 
-        content: 'export default () => "B"' 
-      })
-    ]);
-    
-    // Verify using a fresh Agent C
-    const dirC = await createTempDir('tgp-agent-c-');
-    const configC = await createTgpConfig(dirC, remoteRepo);
-    const kernelC = new TGP({ configFile: configC });
-    await kernelC.boot();
-    
-    const files = await kernelC.vfs.listFiles('tools');
-    expect(files).toContain('tools/tool_A.ts');
-    expect(files).toContain('tools/tool_B.ts');
-
-    await cleanupDir(dirA);
-    await cleanupDir(dirB);
-    await cleanupDir(dirC);
-  });
-
-  it('Scenario 3: Refactor (Search & Replace)', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    const tools = tgpTools(kernel);
-
-    const toolName = 'tools/greet.ts';
-    await tools.write_file.execute({ 
-      path: toolName, 
-      content: `export default function(args: { name: string }) { return "hello " + args.name; }`
-    });
-
-    let res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
-    expect(res.result).toBe('hello world');
-
-    await tools.patch_file.execute({
-      path: toolName,
-      search: 'return "hello " + args.name;',
-      replace: 'return "greetings " + args.name;'
-    });
-
-    res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
-    expect(res.result).toBe('greetings world');
-  });
-
-  it('Scenario 4: Resilience (Infinite Loop)', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    const tools = tgpTools(kernel);
-
-    const badTool = 'tools/freeze.ts';
-    await tools.write_file.execute({
-      path: badTool,
-      content: `export default function() { while(true) {} }`
-    });
-
-    const res = await tools.exec_tool.execute({ path: badTool, args: {} });
-    expect(res.success).toBe(false);
-    expect(res.error).toMatch(/timed out/i);
-  });
-
-  it('Scenario 5: Security (Jailbreak)', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    const tools = tgpTools(kernel);
-
-    const hackTool = 'tools/hack.ts';
-    await tools.write_file.execute({
-      path: hackTool,
-      content: `
-        export default async function() {
-           return await tgp.read_file('../../package.json');
-        }
-      `
-    });
-
-    const res = await tools.exec_tool.execute({ path: hackTool, args: {} });
-    expect(res.success).toBe(false);
-    expect(res.error).toMatch(/Security Violation/i);
-  });
-
-  it('Scenario 6: SQL Error Propagation', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-
-    // Mock DB executor
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mockExecutor = async (sql: string, _params: any[] = []) => {
-      if (sql.includes('fail')) {
-        throw new Error('Database Error');
-      }
-      return [];
-    };
-
-    const kernel = new TGP({ 
-      configFile: configPath,
-      sandboxAPI: { exec_sql: mockExecutor }
-    });
-    await kernel.boot();
-
-    const tools = { ...tgpTools(kernel), ...createSqlTools(mockExecutor) };
-
-    const dbTool = 'tools/db_ops.ts';
-    await tools.write_file.execute({
-      path: dbTool,
-      content: `
-        export default async function(args: { crash: boolean }) {
-           if (args.crash) {
-              await tgp.exec_sql('SELECT * FROM users WHERE name = "fail"', []);
-           }
-        }
-      `
-    });
-
-    const res = await tools.exec_tool.execute({ path: dbTool, args: { crash: true } });
-    expect(res.success).toBe(false);
-    expect(res.error).toContain('Database Error');
-  });
-
-  it('Scenario 9: Tool Composition (Orchestrator)', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    const tools = tgpTools(kernel);
-
-    // 1. Create the Library Tool (The Dependency)
-    const libPath = 'tools/lib/multiplier.ts';
-    await tools.write_file.execute({
-      path: libPath,
-      content: `
-        export default function multiply(a: number, b: number) {
-          return a * b;
-        }
-      `
-    });
-
-    // 2. Create the Consumer Tool (The Orchestrator)
-    const consumerPath = 'tools/calc.ts';
-    // Note: We use require() because the sandbox environment uses CommonJS shim for inter-tool dependencies.
-    await tools.write_file.execute({
-      path: consumerPath,
-      content: `
-        const multiplier = require('./lib/multiplier').default;
-
-        export default function calculate(args: { a: number, b: number }) {
-          // Logic: (a * b) + 100
-          const product = multiplier(args.a, args.b);
-          return product + 100;
-        }
-      `
-    });
-
-    // 3. Execute
-    const res = await tools.exec_tool.execute({ 
-      path: consumerPath, 
-      args: { a: 5, b: 5 } 
-    });
-
-    expect(res.success).toBe(true);
-    expect(res.result).toBe(125); // (5 * 5) + 100
-  });
-
-  it('Scenario 10: Registry Integrity (Meta.json)', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    const tools = tgpTools(kernel);
-
-    const docTool = 'tools/docs/roi.ts';
-    const description = 'Calculates the Return on Investment based on cost and revenue.';
-    
-    // Write tool with JSDoc
-    await tools.write_file.execute({
-      path: docTool,
-      content: `
-        /**
-         * ${description}
-         */
-        export default function roi(args: { cost: number, revenue: number }) {
-          return (args.revenue - args.cost) / args.cost;
-        }
-      `
-    });
-
-    // Verify meta.json in the VFS backing store (on disk)
-    // Note: The VFS root is at .tgp inside the tempDir
-    const metaPath = path.join(tempDir, '.tgp/meta.json');
-    const metaContent = await fs.readFile(metaPath, 'utf-8');
-    const meta = JSON.parse(metaContent);
-
-    expect(meta.tools[docTool]).toBeDefined();
-    expect(meta.tools[docTool].description).toBe(description);
-  });
-
-  it('Scenario 11: Standards Enforcement (Linter)', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    const tools = tgpTools(kernel);
-
-    // Test 1: Magic Number
-    const magicTool = 'tools/bad/magic.ts';
-    await tools.write_file.execute({
-      path: magicTool,
-      content: `export default function(args: { x: number }) { return args.x * 9999; }`
-    });
-
-    let check = await tools.check_tool.execute({ path: magicTool });
-    expect(check.valid).toBe(false);
-    expect(check.errors.some(e => e.includes('Magic Number'))).toBe(true);
-
-    // Test 2: Hardcoded Secret
-    const secretTool = 'tools/bad/secret.ts';
-    await tools.write_file.execute({
-      path: secretTool,
-      content: `
-        export default function() { 
-          const apiKey = "sk-live-1234567890abcdef12345678"; 
-          return apiKey;
-        }
-      `
-    });
-
-    check = await tools.check_tool.execute({ path: secretTool });
-    expect(check.valid).toBe(false);
-    expect(check.errors.some(e => e.includes('Secret'))).toBe(true);
-
-    // Test 3: Valid Tool (Control)
-    const validTool = 'tools/good/clean.ts';
-    await tools.write_file.execute({
-      path: validTool,
-      content: `export default function(args: { factor: number }) { return args.factor * 100; }` // 100 is allowed
-    });
-
-    check = await tools.check_tool.execute({ path: validTool });
-    expect(check.valid).toBe(true);
-  });
-
-  // Note: Scenario 7 (SIGTERM) is skipped as the CLI currently does not have a long-running 'serve' mode to test against.
-
-  it('Scenario 8: CLI Bootstrap', async () => {
-    // We assume the project has been built via 'npm run build' for bin/tgp.js to work
-    // If not, this test might fail if dist/ doesn't exist.
-    const { code } = await runTgpCli(['init'], tempDir);
-    expect(code).toBe(0);
-    
-    const configExists = await fs.access(path.join(tempDir, 'tgp.config.ts')).then(() => true).catch(() => false);
-    expect(configExists).toBe(true);
-    
-    const metaExists = await fs.access(path.join(tempDir, '.tgp/meta.json')).then(() => true).catch(() => false);
-    expect(metaExists).toBe(true);
-  });
-});
-````
-
 ## File: tsconfig.json
 ````json
 {
@@ -1707,152 +1349,6 @@ export function createExecTools(kernel: Kernel) {
     } as AgentTool<typeof ExecToolParams, any>,
   };
 }
-````
-
-## File: test/e2e/utils.ts
-````typescript
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import { spawn, execSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-
-// ESM Polyfills
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Robust Project Root Detection
-// If running from dist/test/e2e, we are 3 levels deep from root (dist/test/e2e -> dist/test -> dist -> root)
-// If running from test/e2e, we are 2 levels deep (test/e2e -> test -> root)
-const isRunningInDist = __dirname.includes(path.join('dist', 'test', 'e2e'));
-
-const projectRoot = isRunningInDist 
-  ? path.resolve(__dirname, '../../../') 
-  : path.resolve(__dirname, '../../');
-
-const distConfigPath = path.join(projectRoot, 'dist/src/config.js').split(path.sep).join('/');
-
-// Track temp dirs for cleanup
-const tempDirs: string[] = [];
-
-/**
- * Creates a unique temporary directory for a test case.
- * Registers it for auto-cleanup on process exit.
- */
-export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
-  const tmpDir = os.tmpdir();
-  const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-/**
- * Recursively deletes a directory.
- */
-export async function cleanupDir(dir: string): Promise<void> {
-  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-}
-
-/**
- * Initializes a bare Git repository at the specified path.
- * This serves as the 'Remote' for the E2E tests.
- */
-export async function initBareRepo(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
-  execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
-  
-  // Setup: Create an initial commit so all clones share a history.
-  // This prevents "fatal: refusing to merge unrelated histories" during concurrent pushes.
-  const initDir = await createTempDir('tgp-init-');
-  execSync(`git init`, { cwd: initDir, stdio: 'ignore' });
-  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
-  execSync(`git add .`, { cwd: initDir, stdio: 'ignore' });
-  execSync(`git commit -m "Initial commit"`, { cwd: initDir, stdio: 'ignore' });
-  execSync(`git remote add origin ${dir}`, { cwd: initDir, stdio: 'ignore' });
-  execSync(`git push origin master:main`, { cwd: initDir, stdio: 'ignore' }); // push master to main
-  await cleanupDir(initDir);
-
-  execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
-}
-
-/**
- * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
- * We use an absolute path for rootDir to ensure tests don't pollute the project root.
- */
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.js'): Promise<string> {
-    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
-    const remotePath = remoteRepo.split(path.sep).join('/');
-    const allowedDir = workDir.split(path.sep).join('/');
-
-    // We MUST import from the built distribution because:
-    // 1. 'node bin/tgp.js' does not have a TS loader, so it cannot import .ts files.
-    // 2. The generated config itself must be .js.
-    // 3. The import path inside it must resolve to a .js file that Node can understand.
-    
-    // Verify dist exists
-    try {
-      await fs.access(path.join(projectRoot, 'dist/src/config.js'));
-    } catch {
-      // Fallback for dev/watch mode if dist doesn't exist (though E2E usually implies build)
-      // console.warn("Warning: dist/src/config.js not found. E2E tests might fail if running via 'node bin/tgp.js'.");
-    }
-
-    const configContent = `
-import { defineTGPConfig } from '${distConfigPath}';
-
-export default defineTGPConfig({
-  rootDir: '${rootDir}',
-  git: {
-    provider: 'local',
-    repo: '${remotePath}',
-    branch: 'main',
-    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
-  },
-  fs: {
-    allowedDirs: ['${allowedDir}', '${os.tmpdir().split(path.sep).join('/')}'],
-    blockUpwardTraversal: false
-  },
-  allowedImports: ['zod', 'date-fns']
-});
-`;
-    const configPath = path.join(workDir, fileName);
-    await fs.writeFile(configPath, configContent);
-    return configPath;
-}
-
-/**
- * Executes the TGP CLI binary in the given directory.
- */
-export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
-    return new Promise((resolve) => {
-        // Points to the source bin wrapper, which imports from dist/
-        // Note: 'npm run build' must be run before testing CLI if using the bin script directly.
-        // For development tests, we might want to run with tsx, but here we test the "production" bin behavior logic.
-        const tgpBin = path.join(projectRoot, 'bin/tgp.js');
-        
-        const proc = spawn('node', [tgpBin, ...args], {
-            cwd,
-            env: { ...process.env, NODE_ENV: 'test' }
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        proc.stdout.on('data', d => stdout += d.toString());
-        proc.stderr.on('data', d => stderr += d.toString());
-
-        proc.on('close', (code) => {
-            resolve({ stdout, stderr, code: code ?? -1 });
-        });
-    });
-}
-
-// Cleanup hook
-process.on('exit', () => {
-    tempDirs.forEach(d => {
-        try { execSync(`rm -rf ${d}`); } catch {}
-    });
-});
 ````
 
 ## File: src/tools/validation.ts
@@ -2722,56 +2218,6 @@ export interface Logger {
 }
 ````
 
-## File: package.json
-````json
-{
-  "name": "@tgp/core",
-  "version": "0.0.1",
-  "description": "The Tool Generation Protocol",
-  "main": "dist/src/index.js",
-  "types": "dist/src/index.d.ts",
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsx src/cli/index.ts",
-    "lint": "eslint src/**/*.ts",
-    "lint:fix": "eslint src/**/*.ts --fix",
-    "pretest": "npm run build",
-    "test": "vitest run --passWithNoTests",
-    "tgp": "node bin/tgp.js"
-  },
-  "keywords": [
-    "ai",
-    "agent",
-    "protocol",
-    "backend"
-  ],
-  "author": "",
-  "license": "MIT",
-  "bin": {
-    "tgp": "./bin/tgp.js"
-  },
-  "dependencies": {
-    "esbuild": "^0.19.12",
-    "isolated-vm": "^6.0.2",
-    "isomorphic-git": "^1.35.1",
-    "zod": "^3.25.76",
-    "zod-to-json-schema": "^3.22.4",
-    "typescript": "^5.9.3"
-  },
-  "devDependencies": {
-    "@types/node": "^20.19.25",
-    "@types/better-sqlite3": "^7.6.9",
-    "@typescript-eslint/eslint-plugin": "^8.48.0",
-    "@typescript-eslint/parser": "^8.48.0",
-    "better-sqlite3": "^9.4.3",
-    "eslint": "^9.39.1",
-    "tsx": "^4.16.2",
-    "vitest": "^1.6.0"
-  }
-}
-````
-
 ## File: README.md
 ````markdown
 # Tool Generation Protocol (TGP)
@@ -3127,6 +2573,56 @@ export function createKernel(opts: KernelOptions): Kernel {
       isBooted = false;
     }
   };
+}
+````
+
+## File: package.json
+````json
+{
+  "name": "@tgp/core",
+  "version": "0.0.1",
+  "description": "The Tool Generation Protocol",
+  "main": "dist/src/index.js",
+  "types": "dist/src/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "pretest": "npm run build",
+    "test": "vitest run --passWithNoTests",
+    "tgp": "node bin/tgp.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "protocol",
+    "backend"
+  ],
+  "author": "",
+  "license": "MIT",
+  "bin": {
+    "tgp": "./bin/tgp.js"
+  },
+  "dependencies": {
+    "esbuild": "^0.19.12",
+    "isolated-vm": "^6.0.2",
+    "isomorphic-git": "^1.35.1",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.22.4",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "@types/better-sqlite3": "^7.6.9",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "better-sqlite3": "^9.4.3",
+    "eslint": "^9.39.1",
+    "tsx": "^4.16.2",
+    "vitest": "^1.6.0"
+  }
 }
 ````
 

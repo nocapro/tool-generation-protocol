@@ -1,13 +1,66 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import Database from 'better-sqlite3';
 import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
 import { TGP } from '../../src/tgp.js';
 import { tgpTools, createSqlTools } from '../../src/tools/index.js';
 
+// Abstraction for DB differences between Node (better-sqlite3) and Bun (bun:sqlite)
+// This ensures tests run natively in Bun without 'better-sqlite3' ABI issues,
+// while maintaining Node compatibility.
+interface TestDB {
+  exec(sql: string): void;
+  prepare(sql: string): {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    all(...params: any[]): any[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    get(...params: any[]): any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    run(...params: any[]): any;
+  };
+  close(): void;
+}
+
+async function createTestDB(): Promise<TestDB> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const isBun = typeof process !== 'undefined' && (process.versions as any).bun;
+
+  if (isBun) {
+    // Dynamic import to avoid build-time errors/resolutions in Node
+    const { Database } = await import('bun:sqlite'); 
+    const db = new Database(':memory:');
+    return {
+      exec: (sql: string) => db.run(sql),
+      prepare: (sql: string) => {
+        const query = db.query(sql);
+        return {
+          all: (...params: any[]) => query.all(...params),
+          get: (...params: any[]) => query.get(...params),
+          run: (...params: any[]) => query.run(...params),
+        };
+      },
+      close: () => db.close(),
+    };
+  } else {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(':memory:');
+    return {
+      exec: (sql: string) => db.exec(sql),
+      prepare: (sql: string) => {
+        const stmt = db.prepare(sql);
+        return {
+          all: (...params: any[]) => stmt.all(...params),
+          get: (...params: any[]) => stmt.get(...params),
+          run: (...params: any[]) => stmt.run(...params),
+        };
+      },
+      close: () => db.close(),
+    };
+  }
+}
+
 describe('Integration: SQL Adapter (Real SQLite)', () => {
   let tempDir: string;
   let remoteRepo: string;
-  let db: Database.Database;
+  let db: TestDB;
 
   beforeEach(async () => {
     tempDir = await createTempDir('tgp-int-sql-');
@@ -15,14 +68,14 @@ describe('Integration: SQL Adapter (Real SQLite)', () => {
     await initBareRepo(remoteRepo);
     
     // Setup Real SQLite DB (In-memory for speed/isolation)
-    db = new Database(':memory:');
+    db = await createTestDB();
     db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');
     db.exec("INSERT INTO users (name) VALUES ('Alice')");
     db.exec("INSERT INTO users (name) VALUES ('Bob')");
   });
 
   afterEach(async () => {
-    db.close();
+    if (db) db.close();
     await cleanupDir(tempDir);
     await cleanupDir(remoteRepo);
   });
@@ -35,9 +88,9 @@ describe('Integration: SQL Adapter (Real SQLite)', () => {
     const executor = async (sql: string, params: any[]) => {
       const stmt = db.prepare(sql);
       if (sql.trim().toLowerCase().startsWith('select')) {
-        return stmt.all(params);
+        return stmt.all(...params);
       }
-      return stmt.run(params);
+      return stmt.run(...params);
     };
 
     const kernel = new TGP({ 
@@ -71,7 +124,7 @@ describe('Integration: SQL Adapter (Real SQLite)', () => {
     // Executor
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const executor = async (sql: string, params: any[]) => {
-      return db.prepare(sql).run(params);
+      return db.prepare(sql).run(...params);
     };
 
     const kernel = new TGP({ configFile: configPath });
@@ -93,7 +146,7 @@ describe('Integration: SQL Adapter (Real SQLite)', () => {
     });
 
     // Emulate Host Application Transaction Wrapper
-    // Since better-sqlite3 is synchronous, we manage transaction via raw SQL commands
+    // Since we manage transaction via raw SQL commands
     // surrounding the async tool execution.
     
     db.exec('BEGIN');
