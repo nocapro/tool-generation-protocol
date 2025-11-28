@@ -49,6 +49,13 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
 
       const jsCode = transformed.code;
 
+      // Wrap code to ensure module/exports exist for basic CJS compatibility (e.g. unit tests)
+      const wrappedCode = `
+        if (typeof module === 'undefined') { var module = { exports: {} }; }
+        if (typeof exports === 'undefined') { var exports = module.exports; }
+        ${jsCode}
+      `;
+
       if (useFallback) {
          // --- Node.js VM Fallback ---
          const sandboxContext = vm.createContext({ ...context });
@@ -56,7 +63,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
          sandboxContext.global = sandboxContext;
          
          try {
-             const script = new vm.Script(jsCode);
+             const script = new vm.Script(wrappedCode);
              return script.runInContext(sandboxContext, { timeout });
          } catch (e) {
              throw e;
@@ -110,7 +117,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
         }
 
         // 4. Compile the Script inside the Isolate
-        const script = await currentIsolate.compileScript(jsCode);
+        const script = await currentIsolate.compileScript(wrappedCode);
 
         // 5. Execute
         const result = await script.run(ivmContext, { timeout });
