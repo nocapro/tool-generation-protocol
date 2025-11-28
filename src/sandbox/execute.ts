@@ -1,4 +1,3 @@
- 
 import { Kernel } from '../kernel/core.js';
 import { createSandbox } from './isolate.js';
 import { createSandboxBridge } from './bridge.js';
@@ -11,6 +10,43 @@ export interface ExecutionResult {
   result: any;
   logs: string[];
   error?: string;
+}
+
+/**
+ * Resolves a module path within the VFS using standard Node.js resolution logic.
+ * Checks: path, path.ts, path.js, path/index.ts, path/index.js
+ */
+function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath: string): string | null {
+  const candidates: string[] = [];
+  
+  // Resolve absolute path based on import type
+  // If it starts with '/', it's absolute (from VFS root).
+  // Otherwise, it's relative to baseDir.
+  const target = importPath.startsWith('/') 
+    ? importPath 
+    : path.join(baseDir, importPath);
+
+  // 1. Exact match (e.g. require('./foo.ts'))
+  candidates.push(target);
+  
+  // 2. Extensions (e.g. require('./foo'))
+  candidates.push(`${target}.ts`);
+  candidates.push(`${target}.js`);
+  
+  // 3. Directory Indices
+  candidates.push(path.join(target, 'index.ts'));
+  candidates.push(path.join(target, 'index.js'));
+
+  for (const c of candidates) {
+    try {
+      // Synchronous check is required for the sync require shim
+      vfs.readSync(c);
+      return c;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 /**
@@ -59,28 +95,15 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
         }
       }
 
-      // Security: Ensure we don't traverse out of sandbox (handled by VFS)
-      // Resolution Logic:
-      // - Starts with '.': Relative to baseDir
-      // - Otherwise: Absolute from root (or relative to root)
-      
-      let targetPath: string;
-      if (importId.startsWith('.')) {
-        targetPath = path.join(baseDir, importId);
-      } else {
-        targetPath = importId;
-      }
+      // 2. Resolve Local Modules (VFS)
+      const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
 
-      // Normalize extension (assume .ts if missing)
-      if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
-          // Check if it exists with .ts
-          // We can't easily check existence sync in VFS without try/catch read
-          // Let's assume .ts for TGP tools
-          targetPath += '.ts';
+      if (!resolvedPath) {
+        throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
       }
 
       try {
-        const raw = kernel.vfs.readSync(targetPath);
+        const raw = kernel.vfs.readSync(resolvedPath);
         const transformed = transformSync(raw, {
           loader: 'ts',
           format: 'cjs',
@@ -89,8 +112,8 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
         
         return {
           code: transformed.code,
-          path: targetPath,
-          dirname: path.dirname(targetPath)
+          path: resolvedPath,
+          dirname: path.dirname(resolvedPath)
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);

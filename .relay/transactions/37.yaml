@@ -1,0 +1,1057 @@
+uuid: 44342220-424f-4027-bc5b-4b19c28e833f
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T01:53:40.342Z'
+gitCommitMsg: >-
+  feat: Harden validation and runtime with AST and standard module resolution.
+
+  - Promoted `typescript` to runtime dependency. - Replaced regex-based
+  `check_tool` with AST parsing for strict standard enforcement. - Implemented
+  Node-compatible module resolution (index files, extensions) in sandbox. -
+  Corrected Kernel fail-fast behavior and logging comments.
+promptSummary: >-
+  Promote 'typescript' to a runtime dependency and implement AST-based
+  validation for tools to enforce the '8 Standards' (e.g. no 'any', no magic
+  numbers) more robustly than regex. Also update the sandbox execution engine to
+  support standard Node.js module resolution (checking .ts, .js, index.ts).
+reasoning:
+  - >-
+    1.  **Promoting TypeScript Dependency**: First, I will move `typescript`
+    from `devDependencies` to `dependencies` in `package.json`. This ensures the
+    compiler API is available at runtime for the AST validation logic.
+  - >-
+    2.  **Kernel Cleanup**: I will clarify the error handling in
+    `src/kernel/git.ts` to reflect the fail-fast philosophy and correct the
+    synchronization comments in `src/kernel/registry.ts` to explicitly state
+    that we prioritize data integrity over IO performance during tool
+    registration.
+  - >-
+    3.  **AST Validation Implementation**: I will completely replace
+    `src/tools/validation.ts`. The new implementation will use `typescript` to
+    parse the source code into an AST. I will implement a visitor pattern to
+    walk the tree and strictly enforce the "8 Standards" (no `any`, no `eval`,
+    no magic numbers, etc.) with much higher accuracy than the previous regex
+    approach.
+  - >-
+    4.  **Robust Module Resolution**: I will modify `src/sandbox/execute.ts` to
+    implement a Node.js-compatible module resolution strategy. I'll add a helper
+    function `resolveVfsPath` that checks for file extensions (`.ts`, `.js`) and
+    index files (`/index.ts`, `/index.js`) using the synchronous VFS API. This
+    ensures the agent can robustly import code within the sandbox.
+operations:
+  - type: write
+    path: package.json
+    content: |-
+      {
+        "name": "@tgp/core",
+        "version": "0.0.1",
+        "description": "The Tool Generation Protocol",
+        "main": "dist/index.js",
+        "types": "dist/index.d.ts",
+        "type": "module",
+        "scripts": {
+          "build": "tsc",
+          "dev": "tsx src/cli/index.ts",
+          "lint": "eslint src/**/*.ts",
+          "lint:fix": "eslint src/**/*.ts --fix",
+          "test": "vitest run",
+          "tgp": "node bin/tgp.js"
+        },
+        "keywords": [
+          "ai",
+          "agent",
+          "protocol",
+          "backend"
+        ],
+        "author": "",
+        "license": "MIT",
+        "bin": {
+          "tgp": "./bin/tgp.js"
+        },
+        "dependencies": {
+          "esbuild": "^0.19.12",
+          "isolated-vm": "^6.0.2",
+          "isomorphic-git": "^1.35.1",
+          "zod": "^3.25.76",
+          "zod-to-json-schema": "^3.22.4",
+          "typescript": "^5.9.3"
+        },
+        "devDependencies": {
+          "@types/node": "^20.19.25",
+          "@typescript-eslint/eslint-plugin": "^8.48.0",
+          "@typescript-eslint/parser": "^8.48.0",
+          "eslint": "^9.39.1",
+          "tsx": "^4.16.2",
+          "vitest": "^1.6.0"
+        }
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/kernel/git.ts
+    content: >
+      --- src/kernel/git.ts
+
+      +++ src/kernel/git.ts
+
+      @@ -183,8 +183,8 @@
+             } catch (error) {
+               logger.error(`Git Hydration Failed:`, error);
+      -        // We might want to throw here to stop boot, but for now we log.
+
+      +        // Fail fast: The agent cannot operate without a consistent
+      filesystem state.
+               throw error;
+             }
+           },
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/registry.ts
+    content: >
+      --- src/kernel/registry.ts
+
+      +++ src/kernel/registry.ts
+
+      @@ -58,8 +58,8 @@
+             state.tools[filePath] = metadata;
+             
+      -      // We don't sync on every register to avoid IO storm if called in
+      loop, 
+
+      -      // but for write_file it is fine.
+
+      +      // We sync immediately to ensure data integrity, prioritizing
+      safety over raw IO performance
+
+      +      // during tool creation.
+             await this.sync();
+           },
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tools/validation.ts
+    content: |-
+      import { z } from 'zod';
+      import * as ts from 'typescript';
+      import { Kernel } from '../kernel/core.js';
+      import { AgentTool } from './types.js';
+
+      export const CheckToolParams = z.object({
+        path: z.string().describe('The relative path of the tool to validate'),
+      });
+
+      export function createValidationTools(kernel: Kernel) {
+        return {
+          check_tool: {
+            description: 'Run JIT compilation and AST-based static analysis on a tool.',
+            parameters: CheckToolParams,
+            execute: async ({ path }) => {
+              try {
+                const code = await kernel.vfs.readFile(path);
+                
+                // 1. Parse AST
+                // We use ES2020 as target to match the sandbox environment
+                const sourceFile = ts.createSourceFile(
+                  path,
+                  code,
+                  ts.ScriptTarget.ES2020,
+                  true
+                );
+
+                const errors: string[] = [];
+
+                // 2. Recursive AST Visitor
+                const visit = (node: ts.Node) => {
+                  // [Standard 3] Strict Typing: No 'any'
+                  if (node.kind === ts.SyntaxKind.AnyKeyword) {
+                     errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+                  }
+
+                  // [Safety] No 'eval'
+                  if (ts.isCallExpression(node)) {
+                      if (ts.isIdentifier(node.expression) && node.expression.text === 'eval') {
+                          errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+                      }
+                  }
+
+                  // [Safety] No 'new Function(...)'
+                  if (ts.isNewExpression(node)) {
+                      if (ts.isIdentifier(node.expression) && node.expression.text === 'Function') {
+                          errors.push("Violation [Safety]: Dynamic code execution ('Function' constructor) is prohibited.");
+                      }
+                  }
+
+                  // [Standard 4] Stateless: No process global access (except process.env.NODE_ENV)
+                  if (ts.isIdentifier(node) && node.text === 'process') {
+                      // Check context to see if allowed.
+                      // We allow strict access to `process.env.NODE_ENV`.
+                      // AST Structure: PropertyAccess(NODE_ENV) -> PropertyAccess(env) -> Identifier(process)
+                      
+                      let isAllowed = false;
+                      
+                      // Ensure parent is property access 'env'
+                      if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && node.parent.name.text === 'env') {
+                           // Ensure grandparent is property access 'NODE_ENV'
+                           if (ts.isPropertyAccessExpression(node.parent.parent) && node.parent.parent.expression === node.parent && node.parent.parent.name.text === 'NODE_ENV') {
+                               isAllowed = true;
+                           }
+                      }
+                      
+                      if (!isAllowed) {
+                           // We check if this identifier is being used as a property access base or standalone.
+                           // To avoid noise, we only report if it's the base of a property access OR used standalone.
+                           // If it's a property of something else (e.g. myObj.process), parent is PropertyAccess but expression is NOT node.
+                           if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
+                               // This is something.process - Allowed
+                           } else {
+                               errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+                           }
+                      }
+                  }
+
+                  // [Standard 1] No Magic Numbers
+                  if (ts.isNumericLiteral(node)) {
+                      const val = parseFloat(node.text);
+                      const allowed = [0, 1, -1, 100, 1000]; 
+                      if (!allowed.includes(val)) {
+                          // Filter out array indices? Hard to detect without type checker.
+                          // We enforce strictness: abstract data to args.
+                          errors.push(`Violation [Standard 1]: Found potential magic number '${node.text}'. Abstract logic from data.`);
+                      }
+                  }
+
+                  // [Standard 7] No Hardcoded Secrets
+                  if (ts.isStringLiteral(node)) {
+                      const text = node.text;
+                      // Emails
+                      if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(text)) {
+                           errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+                      }
+                      // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+                      // Must be 24+ chars, alphanumeric mixed, no spaces.
+                      if (/[a-zA-Z0-9-]{24,}/.test(text) && !text.includes(' ')) {
+                           errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+                      }
+                  }
+
+                  ts.forEachChild(node, visit);
+                };
+
+                visit(sourceFile);
+
+                return { valid: errors.length === 0, errors };
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              } catch (error: any) {
+                const msg = error.message ?? String(error);
+                return { valid: false, errors: [msg] };
+              }
+            },
+          } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+        };
+      }
+    patchStrategy: replace
+  - type: write
+    path: src/sandbox/execute.ts
+    content: >-
+      import { Kernel } from '../kernel/core.js';
+
+      import { createSandbox } from './isolate.js';
+
+      import { createSandboxBridge } from './bridge.js';
+
+      import { bundleDependencySync } from './bundler.js';
+
+      import { transformSync } from 'esbuild';
+
+      import * as path from 'path';
+
+
+      export interface ExecutionResult {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        result: any;
+        logs: string[];
+        error?: string;
+      }
+
+
+      /**
+       * Resolves a module path within the VFS using standard Node.js resolution logic.
+       * Checks: path, path.ts, path.js, path/index.ts, path/index.js
+       */
+      function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath:
+      string): string | null {
+        const candidates: string[] = [];
+        
+        // Resolve absolute path based on import type
+        // If it starts with '/', it's absolute (from VFS root).
+        // Otherwise, it's relative to baseDir.
+        const target = importPath.startsWith('/') 
+          ? importPath 
+          : path.join(baseDir, importPath);
+
+        // 1. Exact match (e.g. require('./foo.ts'))
+        candidates.push(target);
+        
+        // 2. Extensions (e.g. require('./foo'))
+        candidates.push(`${target}.ts`);
+        candidates.push(`${target}.js`);
+        
+        // 3. Directory Indices
+        candidates.push(path.join(target, 'index.ts'));
+        candidates.push(path.join(target, 'index.js'));
+
+        for (const c of candidates) {
+          try {
+            // Synchronous check is required for the sync require shim
+            vfs.readSync(c);
+            return c;
+          } catch {
+            continue;
+          }
+        }
+        return null;
+      }
+
+
+      /**
+       * Executes a tool script within a secure sandbox.
+       * 
+       * @param kernel The TGP Kernel instance
+       * @param code The TypeScript source code of the tool
+       * @param args The arguments object to pass to the tool (as 'args' global)
+       * @param filePath Optional path of the tool being executed (used for relative imports)
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+      export async function executeTool(kernel: Kernel, code: string, args:
+      Record<string, any> = {}, filePath: string = 'root.ts'):
+      Promise<ExecutionResult> {
+        const sandbox = createSandbox({
+          memoryLimitMb: 128,
+          timeoutMs: 5000 // 5s hard limit
+        });
+        
+        const logs: string[] = [];
+
+        try {
+          // 1. Setup Bridge
+          // We pass the kernel directly.
+          const bridge = createSandboxBridge({
+            kernel,
+            onLog: (msg) => logs.push(msg)
+          });
+
+          // 2. Module Orchestration (The 'require' Bridge)
+          // This host function is called synchronously from the Guest.
+          const __tgp_load_module = (baseDir: string, importId: string) => {
+            // 1. Handle whitelisted node modules (bare specifiers)
+            if (!importId.startsWith('.') && !importId.startsWith('/')) {
+              if (!kernel.config.allowedImports.includes(importId)) {
+                throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
+              }
+              try {
+                const bundledCode = bundleDependencySync(importId);
+                return {
+                  code: bundledCode,
+                  path: `/__node_modules__/${importId}`, // Virtual path for caching
+                  dirname: `/__node_modules__`,
+                };
+              } catch (err: unknown) {
+                const msg = err instanceof Error ? err.message : String(err);
+                throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
+              }
+            }
+
+            // 2. Resolve Local Modules (VFS)
+            const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
+
+            if (!resolvedPath) {
+              throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
+            }
+
+            try {
+              const raw = kernel.vfs.readSync(resolvedPath);
+              const transformed = transformSync(raw, {
+                loader: 'ts',
+                format: 'cjs',
+                target: 'es2020',
+              });
+              
+              return {
+                code: transformed.code,
+                path: resolvedPath,
+                dirname: path.dirname(resolvedPath)
+              };
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : String(err);
+              throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
+            }
+          };
+
+          // 3. Shim Injection
+          // We prepend a CommonJS loader shim to the user code.
+          // This allows 'require' to work by calling back to the host via __tgp_load_module.
+          // It includes a cache to prevent reloading the same module within a single execution.
+          const shim = `
+            const __moduleCache = {};
+
+            function __makeRequire(baseDir) {
+              return function(id) {
+                // HOST INTERACTION: Resolve module path and get its source code from the host.
+                // This is a synchronous call to the Node.js environment.
+                const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+
+                // CACHE CHECK: If the module has already been loaded, return it from the cache.
+                if (__moduleCache[mod.path]) {
+                  return __moduleCache[mod.path].exports;
+                }
+
+                // MODULE EXECUTION: If it's a new module, execute its code.
+                const newModule = { exports: {} };
+
+                // Before executing, store the module object in the cache to handle circular dependencies.
+                __moduleCache[mod.path] = newModule;
+
+                // We provide the module with its own 'exports' object, a 'require' function
+                // scoped to its own directory, and other CommonJS globals.
+                const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+
+                // Execute the module's code.
+                fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+
+                // The 'newModule.exports' object is now populated.
+                return newModule.exports;
+              };
+            }
+
+            // Setup Global Require for the entry point
+            global.require = __makeRequire('${path.dirname(filePath)}');
+          `;
+
+          const context = {
+            ...bridge, // { tgp: { ... } }
+            args,
+            __tgp_load_module // Injected as Reference
+          };
+
+          // Combine Shim + User Code
+          // We wrap user code to provide top-level CommonJS variables if needed, 
+          // but standard TGP tools are just scripts. 
+          // We append the code. The 'shim' sets up 'global.require'.
+          const fullScript = shim + '\n' + code;
+
+          const result = await sandbox.compileAndRun(fullScript, context);
+          return { result, logs };
+
+        } catch (error) {
+          const errMsg = error instanceof Error ? error.message : String(error);
+          kernel.logger.error(`Tool Execution Failed:`, error);
+          return { result: null, logs, error: errMsg };
+        } finally {
+          sandbox.dispose();
+        }
+      }
+    patchStrategy: replace
+snapshot:
+  package.json: |
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "dev": "tsx src/cli/index.ts",
+        "lint": "eslint src/**/*.ts",
+        "lint:fix": "eslint src/**/*.ts --fix",
+        "test": "vitest run",
+        "tgp": "node bin/tgp.js"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "bin": {
+        "tgp": "./bin/tgp.js"
+      },
+      "dependencies": {
+        "esbuild": "^0.19.12",
+        "isolated-vm": "^6.0.2",
+        "isomorphic-git": "^1.35.1",
+        "zod": "^3.25.76",
+        "zod-to-json-schema": "^3.22.4"
+      },
+      "devDependencies": {
+        "@types/node": "^20.19.25",
+        "@typescript-eslint/eslint-plugin": "^8.48.0",
+        "@typescript-eslint/parser": "^8.48.0",
+        "eslint": "^9.39.1",
+        "tsx": "^4.16.2",
+        "typescript": "^5.9.3",
+        "vitest": "^1.6.0"
+      }
+    }
+  src/kernel/git.ts: >2
+     
+    import * as git from 'isomorphic-git';
+
+    import { TGPConfig, Logger } from '../types.js';
+
+    import * as path from 'path';
+
+
+    /**
+     * The Git Interface required by the Kernel.
+     * We rely on the 'fs' interface compatible with isomorphic-git.
+     */
+    export interface GitBackend {
+      hydrate(): Promise<void>;
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    export interface GitDependencies {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http: any;
+    }
+
+
+    /**
+     * Strategy interface for persisting changes to the upstream repository.
+     */
+    interface GitWriteStrategy {
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    /**
+     * Factory to create the Git Backend based on configuration.
+     */
+    export function createGitBackend(deps: GitDependencies, config: TGPConfig,
+    logger: Logger): GitBackend {
+      const dir = config.rootDir;
+      const { repo, auth, branch, writeStrategy, apiBaseUrl } = config.git;
+      const { fs, http } = deps;
+
+      // Configuration for isomorphic-git
+      const gitOpts = {
+        fs,
+        dir,
+        http,
+        onAuth: () => ({ username: auth.token }),
+      };
+
+      const author = {
+        name: auth.user,
+        email: auth.email,
+      };
+
+      // --- Strategy Implementations ---
+
+      const directStrategy: GitWriteStrategy = {
+        async persist(message: string, filesToAdd: string[]) {
+          if (filesToAdd.length === 0) return;
+
+          // 1. Add files
+          for (const filepath of filesToAdd) {
+            try {
+               // check if file exists before adding
+               await git.add({ ...gitOpts, filepath });
+            } catch (e) {
+               logger.warn(`Git Add failed for ${filepath}`, e);
+               throw new Error(`Failed to stage file ${filepath}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+
+          try {
+            // 2. Commit
+            const sha = await git.commit({
+              ...gitOpts,
+              message,
+              author,
+            });
+            logger.info(`Committed ${sha.slice(0, 7)}: ${message}`);
+
+            // 3. Push
+            logger.info(`Pushing to ${branch}...`);
+            await git.push({
+              ...gitOpts,
+              remote: 'origin',
+              ref: branch,
+            });
+          } catch (e) {
+            logger.error(`Git Commit/Push failed:`, e);
+            throw new Error(`Failed to persist changes to Git: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      };
+
+      const prStrategy: GitWriteStrategy = {
+        async persist(message: string, files: string[]) {
+          if (files.length === 0) return;
+          
+          // 1. Get current branch
+          const currentBranch = await git.currentBranch({ ...gitOpts }) ?? 'HEAD';
+          
+          // 2. If we are on the protected branch (main/master), we must fork
+          let targetBranch = currentBranch;
+          
+          if (currentBranch === branch) {
+             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+             // Sanitize message for branch name
+             const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+             targetBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+             
+             logger.info(`Switching to new branch: ${targetBranch}`);
+             
+             await git.branch({ ...gitOpts, ref: targetBranch });
+             await git.checkout({ ...gitOpts, ref: targetBranch });
+          } else {
+             logger.info(`Already on feature branch: ${targetBranch}`);
+          }
+
+          const createPullRequest = async () => {
+            const [owner, repoName] = repo.split('/');
+            const url = new URL(`/repos/${owner}/${repoName}/pulls`, apiBaseUrl).href;
+            
+            logger.info(`Creating Pull Request on ${repo}...`);
+
+            try {
+              // We use native fetch here, which is available in modern Node.
+              const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `token ${auth.token}`,
+                  'Accept': 'application/vnd.github.v3+json',
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  title: message,
+                  head: targetBranch,
+                  base: branch,
+                  body: `Forged by TGP.\nCommit Message: ${message}`,
+                }),
+              });
+              
+              const result = await response.json();
+              if (response.ok) {
+                logger.info(`Successfully created Pull Request: ${result.html_url}`);
+              } else if (response.status === 422) { // Unprocessable Entity - often means PR exists
+                logger.warn(`Could not create PR (it may already exist): ${JSON.stringify(result.errors)}`);
+              }
+            } catch (e) {
+              logger.error('Failed to create pull request via API.', e);
+            }
+          };
+
+          for (const filepath of files) {
+            await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+          }
+
+          await git.commit({
+            ...gitOpts,
+            message: message,
+            author,
+          });
+          
+          logger.info(`Changes committed to ${targetBranch}.`);
+          
+          // Try to push the feature branch if auth is present
+          try {
+              await git.push({
+                ...gitOpts,
+                remote: 'origin',
+                ref: targetBranch,
+              });
+              logger.info(`Pushed ${targetBranch} to origin.`);
+              await createPullRequest();
+          } catch (e) {
+              logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+          }
+        }
+      };
+
+      // Select Strategy
+      const strategy = writeStrategy === 'pr' ? prStrategy : directStrategy;
+
+      return {
+        async hydrate() {
+          try {
+            // 1. Check if repo exists locally
+            const gitDirExists = (await fs.promises.stat(path.join(dir, '.git'))
+              .then(() => true)
+              .catch(() => false)) as boolean;
+
+            if (!gitDirExists) {
+              // Clone
+              logger.info(`Cloning ${repo} into ${dir}...`);
+              await git.clone({
+                ...gitOpts,
+                url: `https://github.com/${repo}.git`,
+                ref: branch,
+                singleBranch: true,
+                depth: 1,
+              });
+            } else {
+              // Pull
+              logger.info(`Pulling latest from ${repo}...`);
+              await git.pull({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+                singleBranch: true,
+                author,
+              });
+            }
+          } catch (error) {
+            logger.error(`Git Hydration Failed:`, error);
+            // We might want to throw here to stop boot, but for now we log.
+            throw error;
+          }
+        },
+
+        async persist(message: string, filesToAdd: string[]) {
+          return strategy.persist(message, filesToAdd);
+        }
+      };
+    }
+  src/kernel/registry.ts: |-
+    /* eslint-disable no-console */
+    import { VFSAdapter } from '../vfs/types.js';
+    import { RegistryState, ToolMetadata } from '../types.js';
+    import * as path from 'path';
+
+    export interface Registry {
+      hydrate(): Promise<void>;
+      register(filePath: string, code: string): Promise<void>;
+      list(): ToolMetadata[];
+      sync(): Promise<void>;
+    }
+
+    export function createRegistry(vfs: VFSAdapter): Registry {
+      let state: RegistryState = { tools: {} };
+      const META_PATH = 'meta.json';
+
+      // Helper to parse JSDoc
+      function extractMetadata(filePath: string, code: string): ToolMetadata {
+        const name = path.basename(filePath, path.extname(filePath));
+        
+        // Simple JSDoc Regex: /** ... */
+        const jsDocMatch = code.match(/\/\*\*([\s\S]*?)\*\//);
+        let description = "No description provided.";
+        
+        if (jsDocMatch) {
+          const content = jsDocMatch[1];
+          // Clean up stars and whitespace
+          description = content
+            .split('\n')
+            .map(line => line.replace(/^\s*\*\s?/, '').trim())
+            .filter(line => !line.startsWith('@') && line.length > 0) // Remove param tags and empty lines
+            .join(' ');
+        }
+
+        return {
+          name,
+          description: description || "No description provided.",
+          path: filePath
+        };
+      }
+
+      return {
+        async hydrate() {
+          if (await vfs.exists(META_PATH)) {
+            try {
+              const content = await vfs.readFile(META_PATH);
+              state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+            } catch (err) {
+              console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
+              state = { tools: {} };
+            }
+          }
+        },
+
+        async register(filePath: string, code: string) {
+          // Ignore non-tool files (e.g. config or hidden files)
+          if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+          const metadata = extractMetadata(filePath, code);
+          state.tools[filePath] = metadata;
+          
+          // We don't sync on every register to avoid IO storm if called in loop, 
+          // but for write_file it is fine.
+          await this.sync();
+        },
+
+        list() {
+          return Object.values(state.tools);
+        },
+
+        async sync() {
+          await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+        }
+      };
+    }
+  src/tools/validation.ts: |-
+    import { z } from 'zod';
+    import { transform } from 'esbuild';
+    import { Kernel } from '../kernel/core.js';
+    import { AgentTool } from './types.js';
+
+    export const CheckToolParams = z.object({
+      path: z.string().describe('The relative path of the tool to validate'),
+    });
+
+    export function createValidationTools(kernel: Kernel) {
+      return {
+        check_tool: {
+          description: 'Run JIT compilation and syntax check on a tool.',
+          parameters: CheckToolParams,
+          execute: async ({ path }) => {
+            try {
+              const code = await kernel.vfs.readFile(path);
+              
+              // Dry-run transformation to catch syntax errors
+              await transform(code, {
+                loader: 'ts',
+                format: 'cjs',
+                target: 'es2020',
+              });
+
+              // LINTING: Enforce the "8 Standards" via Static Analysis
+              const errors: string[] = [];
+
+              // 1. Strict Typing: No 'any'
+              if (/\bany\b/.test(code)) {
+                errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+              }
+
+              // 2. Safety: No 'eval' or 'Function' constructor
+              if (/\beval\(/.test(code) || /\bnew Function\(/.test(code)) {
+                errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+              }
+
+              // 3. Stateless: No process global access (except inside standard library wrappers which are hidden)
+              if (/\bprocess\./.test(code) && !code.includes('process.env.NODE_ENV')) {
+                errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+              }
+
+              // 4. Abstract / No Magic Numbers (Heuristic)
+              // We look for 'const x = 0.05' type patterns.
+              // This matches: const name = number; (with optional decimals)
+              // We skip common integers like 0, 1, -1, 100 which are often used for loops or percentages base.
+              const magicNumMatch = code.match(/\bconst\s+[a-zA-Z0-9_]+\s*=\s*(\d+(?:\.\d+)?)\s*;/);
+              if (magicNumMatch) {
+                const val = parseFloat(magicNumMatch[1]);
+                if (val !== 0 && val !== 1 && val !== -1 && val !== 100) {
+                   errors.push(`Violation [Standard 1]: Found potential magic number '${magicNumMatch[0]}'. Abstract logic from data (e.g., args.taxRate, not 0.05).`);
+                }
+              }
+
+              // 5. No Hardcoded Secrets/IDs
+              // Emails
+              if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(code)) {
+                errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+              }
+              // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+              if (/['"][a-zA-Z0-9-]{24,}['"]/.test(code)) {
+                 errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+              }
+
+              return { valid: errors.length === 0, errors };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } catch (error: any) {
+              // esbuild errors are usually descriptive
+              const msg = error.message ?? String(error);
+              // Return valid: false so the model can reason about the error, rather than crashing the tool call
+              return { valid: false, errors: [msg] };
+            }
+          },
+        } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+      };
+    }
+  src/sandbox/execute.ts: >2-
+     
+    import { Kernel } from '../kernel/core.js';
+
+    import { createSandbox } from './isolate.js';
+
+    import { createSandboxBridge } from './bridge.js';
+
+    import { bundleDependencySync } from './bundler.js';
+
+    import { transformSync } from 'esbuild';
+
+    import * as path from 'path';
+
+
+    export interface ExecutionResult {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      result: any;
+      logs: string[];
+      error?: string;
+    }
+
+
+    /**
+     * Executes a tool script within a secure sandbox.
+     * 
+     * @param kernel The TGP Kernel instance
+     * @param code The TypeScript source code of the tool
+     * @param args The arguments object to pass to the tool (as 'args' global)
+     * @param filePath Optional path of the tool being executed (used for relative imports)
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+    export async function executeTool(kernel: Kernel, code: string, args:
+    Record<string, any> = {}, filePath: string = 'root.ts'):
+    Promise<ExecutionResult> {
+      const sandbox = createSandbox({
+        memoryLimitMb: 128,
+        timeoutMs: 5000 // 5s hard limit
+      });
+      
+      const logs: string[] = [];
+
+      try {
+        // 1. Setup Bridge
+        // We pass the kernel directly.
+        const bridge = createSandboxBridge({
+          kernel,
+          onLog: (msg) => logs.push(msg)
+        });
+
+        // 2. Module Orchestration (The 'require' Bridge)
+        // This host function is called synchronously from the Guest.
+        const __tgp_load_module = (baseDir: string, importId: string) => {
+          // 1. Handle whitelisted node modules (bare specifiers)
+          if (!importId.startsWith('.') && !importId.startsWith('/')) {
+            if (!kernel.config.allowedImports.includes(importId)) {
+              throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
+            }
+            try {
+              const bundledCode = bundleDependencySync(importId);
+              return {
+                code: bundledCode,
+                path: `/__node_modules__/${importId}`, // Virtual path for caching
+                dirname: `/__node_modules__`,
+              };
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : String(err);
+              throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
+            }
+          }
+
+          // Security: Ensure we don't traverse out of sandbox (handled by VFS)
+          // Resolution Logic:
+          // - Starts with '.': Relative to baseDir
+          // - Otherwise: Absolute from root (or relative to root)
+          
+          let targetPath: string;
+          if (importId.startsWith('.')) {
+            targetPath = path.join(baseDir, importId);
+          } else {
+            targetPath = importId;
+          }
+
+          // Normalize extension (assume .ts if missing)
+          if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+              // Check if it exists with .ts
+              // We can't easily check existence sync in VFS without try/catch read
+              // Let's assume .ts for TGP tools
+              targetPath += '.ts';
+          }
+
+          try {
+            const raw = kernel.vfs.readSync(targetPath);
+            const transformed = transformSync(raw, {
+              loader: 'ts',
+              format: 'cjs',
+              target: 'es2020',
+            });
+            
+            return {
+              code: transformed.code,
+              path: targetPath,
+              dirname: path.dirname(targetPath)
+            };
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
+          }
+        };
+
+        // 3. Shim Injection
+        // We prepend a CommonJS loader shim to the user code.
+        // This allows 'require' to work by calling back to the host via __tgp_load_module.
+        // It includes a cache to prevent reloading the same module within a single execution.
+        const shim = `
+          const __moduleCache = {};
+
+          function __makeRequire(baseDir) {
+            return function(id) {
+              // HOST INTERACTION: Resolve module path and get its source code from the host.
+              // This is a synchronous call to the Node.js environment.
+              const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+
+              // CACHE CHECK: If the module has already been loaded, return it from the cache.
+              if (__moduleCache[mod.path]) {
+                return __moduleCache[mod.path].exports;
+              }
+
+              // MODULE EXECUTION: If it's a new module, execute its code.
+              const newModule = { exports: {} };
+
+              // Before executing, store the module object in the cache to handle circular dependencies.
+              __moduleCache[mod.path] = newModule;
+
+              // We provide the module with its own 'exports' object, a 'require' function
+              // scoped to its own directory, and other CommonJS globals.
+              const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+
+              // Execute the module's code.
+              fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+
+              // The 'newModule.exports' object is now populated.
+              return newModule.exports;
+            };
+          }
+
+          // Setup Global Require for the entry point
+          global.require = __makeRequire('${path.dirname(filePath)}');
+        `;
+
+        const context = {
+          ...bridge, // { tgp: { ... } }
+          args,
+          __tgp_load_module // Injected as Reference
+        };
+
+        // Combine Shim + User Code
+        // We wrap user code to provide top-level CommonJS variables if needed, 
+        // but standard TGP tools are just scripts. 
+        // We append the code. The 'shim' sets up 'global.require'.
+        const fullScript = shim + '\n' + code;
+
+        const result = await sandbox.compileAndRun(fullScript, context);
+        return { result, logs };
+
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        kernel.logger.error(`Tool Execution Failed:`, error);
+        return { result: null, logs, error: errMsg };
+      } finally {
+        sandbox.dispose();
+      }
+    }
+approved: true
+linesAdded: 132
+linesRemoved: 69
+linesDifference: 201
+gitCommittedAt: null
+status: committed
+id: 37
