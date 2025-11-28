@@ -1,0 +1,639 @@
+uuid: 4400e99b-4357-4b95-a228-662363158f00
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T08:20:57.186Z'
+gitCommitMsg: >-
+  fix(sandbox): inject CJS runtime globals to support esbuild output in strict
+  mode
+promptSummary: >-
+  Fixed sandbox environment issues causing Unit and E2E failures (ReferenceError
+  exports). Added CJS shim in isolate.ts and robust wrapper in execute.ts.
+reasoning:
+  - >-
+    The unit tests failed due to a missing CommonJS runtime (`module`,
+    `exports`) in the raw sandbox `isolate.ts`. The E2E tests failed because the
+    `execute.ts` harness relied on `this` context which is undefined in strict
+    mode (enforced by esbuild), leading to `ReferenceError: exports is not
+    defined`. I am patching `isolate.ts` to provide a minimal CJS shim for raw
+    executions (fixing unit tests) and `execute.ts` to use a robust
+    closure-based CJS wrapper (fixing E2E tests). I am also adding logging to
+    `validation.ts` to debug the linter failure.
+operations:
+  - type: write
+    path: src/sandbox/isolate.ts
+    content: >
+      --- src/sandbox/isolate.ts
+
+      +++ src/sandbox/isolate.ts
+
+      @@ -37,6 +37,13 @@
+       
+             const jsCode = transformed.code;
+       
+      +      // Wrap code to ensure module/exports exist for basic CJS
+      compatibility (e.g. unit tests)
+
+      +      const wrappedCode = `
+
+      +        if (typeof module === 'undefined') { var module = { exports: {}
+      }; }
+
+      +        if (typeof exports === 'undefined') { var exports =
+      module.exports; }
+
+      +        ${jsCode}
+
+      +      `;
+
+      +
+             if (useFallback) {
+                // --- Node.js VM Fallback ---
+                const sandboxContext = vm.createContext({ ...context });
+                // Setup global self-reference
+                sandboxContext.global = sandboxContext;
+                
+                try {
+      -             const script = new vm.Script(jsCode);
+
+      +             const script = new vm.Script(wrappedCode);
+                    return script.runInContext(sandboxContext, { timeout });
+                } catch (e) {
+                    throw e;
+      @@ -99,7 +106,7 @@
+               }
+       
+               // 4. Compile the Script inside the Isolate
+      -        const script = await currentIsolate.compileScript(jsCode);
+
+      +        const script = await currentIsolate.compileScript(wrappedCode);
+       
+               // 5. Execute
+               const result = await script.run(ivmContext, { timeout });
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/execute.ts
+    content: |
+      --- src/sandbox/execute.ts
+      +++ src/sandbox/execute.ts
+      @@ -107,17 +107,24 @@
+       
+           // 2. Construct the Execution Harness
+           const script = `
+             ${shim}
+       
+             // Setup CJS Environment for the entry point
+      -      this.exports = {};
+      -      this.module = { exports: this.exports };
+      -      this.require = __makeRequire('${path.dirname(filePath)}');
+      +      const __module = { exports: {} };
+      +      const __exports = __module.exports;
+      +      const __require = __makeRequire('${path.dirname(filePath)}');
+      +      const __filename = '${filePath}';
+      +      const __dirname = '${path.dirname(filePath)}';
+       
+      -      global.exports = this.exports;
+      -      global.module = this.module;
+      -      global.require = this.require;
+      +      // Assign to global for unexpected access patterns
+      +      global.module = __module;
+      +      global.exports = __exports;
+      +      global.require = __require;
+       
+             // Execute User Code
+      -      (function() {
+      +      (function(exports, require, module, __filename, __dirname) {
+               ${cjsCode}
+      -      })();
+      +      })(__exports, __require, __module, __filename, __dirname);
+       
+             // Run Default Export
+      -      const __main = this.module.exports.default || this.module.exports;
+      +      const __main = __module.exports.default || __module.exports;
+             if (typeof __main === 'function') {
+      -         __main(global.args);
+      +         __main(args);
+             } else {
+                __main;
+             }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tools/validation.ts
+    content: |
+      --- src/tools/validation.ts
+      +++ src/tools/validation.ts
+      @@ -118,6 +118,7 @@
+               // eslint-disable-next-line @typescript-eslint/no-explicit-any
+               } catch (error: any) {
+                 const msg = error.message ?? String(error);
+      +          console.error('[Validation Error]', msg);
+                 return { valid: false, errors: [msg] };
+               }
+             },
+    patchStrategy: standard-diff
+snapshot:
+  src/sandbox/isolate.ts: |-
+    import type * as IVM from 'isolated-vm';
+    import { transform } from 'esbuild';
+    import * as vm from 'node:vm';
+
+    /**
+     * Configuration for the V8 Sandbox.
+     */
+    export interface SandboxOptions {
+      memoryLimitMb?: number; // Default 128MB
+      timeoutMs?: number;     // Default 5000ms
+    }
+
+    export interface Sandbox {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+      dispose: () => void;
+    }
+
+    /**
+     * Creates a secure V8 Isolate.
+     * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
+     */
+    export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+      const memoryLimit = opts.memoryLimitMb ?? 128;
+      const timeout = opts.timeoutMs ?? 5000;
+
+      let isolate: IVM.Isolate | undefined;
+      let useFallback = false;
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async compileAndRun(tsCode: string, context: Record<string, any>) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let ivm: any;
+          try {
+            // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+            ivm = (await import('isolated-vm')).default;
+          } catch {
+            useFallback = true;
+          }
+
+          // 1. JIT Compile (TypeScript -> JavaScript)
+          // We use esbuild for speed.
+          const transformed = await transform(tsCode, {
+            loader: 'ts',
+            format: 'cjs', // CommonJS ensures simple execution in V8
+            target: 'es2020',
+          });
+
+          const jsCode = transformed.code;
+
+          if (useFallback) {
+             // --- Node.js VM Fallback ---
+             const sandboxContext = vm.createContext({ ...context });
+             // Setup global self-reference
+             sandboxContext.global = sandboxContext;
+             
+             try {
+                 const script = new vm.Script(jsCode);
+                 return script.runInContext(sandboxContext, { timeout });
+             } catch (e) {
+                 throw e;
+             }
+          }
+
+          // Initialize isolate if not already created (reuse across executions)
+          const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
+          // Update state
+          isolate = currentIsolate;
+
+          // 2. Create a fresh Context for this execution
+          // We use currentIsolate which is guaranteed to be defined
+          const ivmContext = await currentIsolate.createContext();
+
+          try {
+            // 3. Bridge the Global Scope (Host -> Guest)
+            const jail = ivmContext.global;
+            
+            // Inject the 'tgp' global object which holds our bridge
+            await jail.set('global', jail.derefInto()); // standard polyfill
+
+            // Inject Context
+            for (const [key, value] of Object.entries(context)) {
+                // Special handling for the 'tgp' namespace object
+                if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                    // Initialize the namespace in the guest
+                    const initScript = await currentIsolate.compileScript('global.tgp = {}');
+                    await initScript.run(ivmContext);
+                    const tgpHandle = await jail.get('tgp');
+                    
+                    // Populate the namespace
+                    for (const [subKey, subValue] of Object.entries(value)) {
+                        if (typeof subValue === 'function') {
+                           // Functions must be passed by Reference
+                           await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                        } else {
+                           // Values are copied
+                           await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                        }
+                    }
+                } 
+                // Handle top-level functions (like __tgp_load_module)
+                else if (typeof value === 'function') {
+                  await jail.set(key, new ivm.Reference(value));
+                } 
+                // Handle standard values
+                else {
+                  await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                }
+            }
+
+            // 4. Compile the Script inside the Isolate
+            const script = await currentIsolate.compileScript(jsCode);
+
+            // 5. Execute
+            const result = await script.run(ivmContext, { timeout });
+            
+            // 6. Return result (Unwrap from IVM)
+            if (typeof result === 'object' && result !== null && 'copy' in result) {
+                // If it's a reference, try to copy it out, otherwise return as is
+                return result.copy();
+            }
+            return result;
+
+          } finally {
+            // Cleanup the context to free memory immediately
+            ivmContext.release();
+          }
+        },
+
+        dispose() {
+          if (isolate && !isolate.isDisposed) {
+            isolate.dispose();
+          }
+        }
+      };
+    }
+  src/sandbox/execute.ts: >-
+    import { Kernel } from '../kernel/core.js';
+
+    import { createSandbox } from './isolate.js';
+
+    import { createSandboxBridge } from './bridge.js';
+
+    import { bundleDependencySync } from './bundler.js';
+
+    import { transformSync } from 'esbuild';
+
+    import * as path from 'path';
+
+
+    export interface ExecutionResult {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      result: any;
+      logs: string[];
+      error?: string;
+    }
+
+
+    /**
+     * Resolves a module path within the VFS using standard Node.js resolution logic.
+     * Checks: path, path.ts, path.js, path/index.ts, path/index.js
+     */
+    function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath:
+    string): string | null {
+      const candidates: string[] = [];
+      
+      // Resolve absolute path based on import type
+      // If it starts with '/', it's absolute (from VFS root).
+      // Otherwise, it's relative to baseDir.
+      const target = importPath.startsWith('/') 
+        ? importPath 
+        : path.join(baseDir, importPath);
+
+      // 1. Exact match (e.g. require('./foo.ts'))
+      candidates.push(target);
+      
+      // 2. Extensions (e.g. require('./foo'))
+      candidates.push(`${target}.ts`);
+      candidates.push(`${target}.js`);
+      
+      // 3. Directory Indices
+      candidates.push(path.join(target, 'index.ts'));
+      candidates.push(path.join(target, 'index.js'));
+
+      for (const c of candidates) {
+        try {
+          // Synchronous check is required for the sync require shim
+          vfs.readSync(c);
+          return c;
+        } catch {
+          continue;
+        }
+      }
+      return null;
+    }
+
+
+    /**
+     * Executes a tool script within a secure sandbox.
+     * 
+     * @param kernel The TGP Kernel instance
+     * @param code The TypeScript source code of the tool
+     * @param args The arguments object to pass to the tool (as 'args' global)
+     * @param filePath Optional path of the tool being executed (used for relative imports)
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+    export async function executeTool(kernel: Kernel, code: string, args:
+    Record<string, any> = {}, filePath: string = 'root.ts'):
+    Promise<ExecutionResult> {
+      const sandbox = createSandbox({
+        memoryLimitMb: 128,
+        timeoutMs: 5000 // 5s hard limit
+      });
+      
+      const logs: string[] = [];
+
+      try {
+        // 1. Setup Bridge
+        // We pass the kernel directly.
+        const bridge = createSandboxBridge({
+          kernel,
+          onLog: (msg) => logs.push(msg)
+        });
+
+        // 2. Module Orchestration (The 'require' Bridge)
+        // This host function is called synchronously from the Guest.
+        const __tgp_load_module = (baseDir: string, importId: string) => {
+          // 1. Handle whitelisted node modules (bare specifiers)
+          if (!importId.startsWith('.') && !importId.startsWith('/')) {
+            if (!kernel.config.allowedImports.includes(importId)) {
+              throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
+            }
+            try {
+              const bundledCode = bundleDependencySync(importId);
+              return {
+                code: bundledCode,
+                path: `/__node_modules__/${importId}`, // Virtual path for caching
+                dirname: `/__node_modules__`,
+              };
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : String(err);
+              throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
+            }
+          }
+
+          // 2. Resolve Local Modules (VFS)
+          const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
+
+          if (resolvedPath === null) {
+            throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
+          }
+
+          try {
+            const raw = kernel.vfs.readSync(resolvedPath);
+            const transformed = transformSync(raw, {
+              loader: 'ts',
+              format: 'cjs',
+              target: 'es2020',
+            });
+            
+            return {
+              code: transformed.code,
+              path: resolvedPath,
+              dirname: path.dirname(resolvedPath)
+            };
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
+          }
+        };
+
+        // 3. Shim Injection
+        // We prepend a CommonJS loader shim to the user code.
+        // This allows 'require' to work by calling back to the host via __tgp_load_module.
+        // It includes a cache to prevent reloading the same module within a single execution.
+        const shim = `
+          const __moduleCache = {};
+
+          function __makeRequire(baseDir) {
+            return function(id) {
+              // HOST INTERACTION: Resolve module path and get its source code from the host.
+              // This is a synchronous call to the Node.js environment.
+              
+              let mod;
+              if (typeof __tgp_load_module.applySync === 'function') {
+                 mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+              } else {
+                 mod = __tgp_load_module(baseDir, id);
+              }
+
+              // CACHE CHECK: If the module has already been loaded, return it from the cache.
+              if (__moduleCache[mod.path]) {
+                return __moduleCache[mod.path].exports;
+              }
+
+              // MODULE EXECUTION: If it's a new module, execute its code.
+              const newModule = { exports: {} };
+
+              // Before executing, store the module object in the cache to handle circular dependencies.
+              __moduleCache[mod.path] = newModule;
+
+              // We provide the module with its own 'exports' object, a 'require' function
+              // scoped to its own directory, and other CommonJS globals.
+              const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+
+              // Execute the module's code.
+              fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+
+              // The 'newModule.exports' object is now populated.
+              return newModule.exports;
+            };
+          }
+        `;
+
+        const context = {
+          ...bridge, // { tgp: { ... } }
+          args,
+          __tgp_load_module // Injected as Reference
+        };
+
+        // 1. Transform user code to CJS explicitly
+        // We do this to ensure we can wrap it safely without worrying about top-level imports in the final string
+        const { code: cjsCode } = transformSync(code, {
+          loader: 'ts',
+          format: 'cjs',
+          target: 'es2020',
+        });
+
+        // 2. Construct the Execution Harness
+        const script = `
+          ${shim}
+
+          // Setup CJS Environment for the entry point
+          this.exports = {};
+          this.module = { exports: this.exports };
+          this.require = __makeRequire('${path.dirname(filePath)}');
+
+          global.exports = this.exports;
+          global.module = this.module;
+          global.require = this.require;
+
+          // Execute User Code
+          (function() {
+            ${cjsCode}
+          })();
+
+          // Run Default Export
+          const __main = this.module.exports.default || this.module.exports;
+          if (typeof __main === 'function') {
+             __main(global.args);
+          } else {
+             __main;
+          }
+        `;
+
+        const result = await sandbox.compileAndRun(script, context);
+        return { result, logs };
+
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        kernel.logger.error(`Tool Execution Failed:`, error);
+        return { result: null, logs, error: errMsg };
+      } finally {
+        sandbox.dispose();
+      }
+    }
+  src/tools/validation.ts: |-
+    import { z } from 'zod';
+    import * as ts from 'typescript';
+    import { Kernel } from '../kernel/core.js';
+    import { AgentTool } from './types.js';
+
+    export const CheckToolParams = z.object({
+      path: z.string().describe('The relative path of the tool to validate'),
+    });
+
+    export function createValidationTools(kernel: Kernel) {
+      return {
+        check_tool: {
+          description: 'Run JIT compilation and AST-based static analysis on a tool.',
+          parameters: CheckToolParams,
+          execute: async ({ path }) => {
+            const { allowedImports } = kernel.config;
+            try {
+              const code = await kernel.vfs.readFile(path);
+              
+              // 1. Parse AST
+              // We use ES2020 as target to match the sandbox environment
+              const sourceFile = ts.createSourceFile(
+                path,
+                code,
+                ts.ScriptTarget.ES2020,
+                true
+              );
+
+              const errors: string[] = [];
+
+              // 2. Recursive AST Visitor
+              const visit = (node: ts.Node) => {
+                // [Standard 3] Strict Typing: No 'any'
+                if (node.kind === ts.SyntaxKind.AnyKeyword) {
+                   errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+                }
+
+                // [Safety] Restricted Imports
+                if (ts.isImportDeclaration(node)) {
+                    if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+                        const pkg = node.moduleSpecifier.text;
+                        if (!allowedImports.includes(pkg)) {
+                             errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
+                        }
+                    }
+                }
+
+                // [Safety] No 'eval'
+                if (ts.isCallExpression(node)) {
+                    if (ts.isIdentifier(node.expression) && node.expression.text === 'eval') {
+                        errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+                    }
+                }
+
+                // [Safety] No 'new Function(...)'
+                if (ts.isNewExpression(node)) {
+                    if (ts.isIdentifier(node.expression) && node.expression.text === 'Function') {
+                        errors.push("Violation [Safety]: Dynamic code execution ('Function' constructor) is prohibited.");
+                    }
+                }
+
+                // [Standard 4] Stateless: No process global access (except process.env.NODE_ENV)
+                if (ts.isIdentifier(node) && node.text === 'process') {
+                    // Check context to see if allowed.
+                    // We allow strict access to `process.env.NODE_ENV`.
+                    // AST Structure: PropertyAccess(NODE_ENV) -> PropertyAccess(env) -> Identifier(process)
+                    
+                    let isAllowed = false;
+                    
+                    // Ensure parent is property access 'env'
+                    if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && node.parent.name.text === 'env') {
+                         // Ensure grandparent is property access 'NODE_ENV'
+                         if (ts.isPropertyAccessExpression(node.parent.parent) && node.parent.parent.expression === node.parent && node.parent.parent.name.text === 'NODE_ENV') {
+                             isAllowed = true;
+                         }
+                    }
+                    
+                    if (!isAllowed) {
+                         // We check if this identifier is being used as a property access base or standalone.
+                         // To avoid noise, we only report if it's the base of a property access OR used standalone.
+                         // If it's a property of something else (e.g. myObj.process), parent is PropertyAccess but expression is NOT node.
+                         if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
+                             // This is something.process - Allowed
+                         } else {
+                             errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+                         }
+                    }
+                }
+
+                // [Standard 1] No Magic Numbers
+                if (ts.isNumericLiteral(node)) {
+                    const text = node.text;
+                    const val = Number(text); // Handle hex, etc.
+                    const allowed = [0, 1, 2, -1, 100, 1000];
+                    if (!isNaN(val) && !allowed.includes(val)) {
+                        // Filter out array indices? Hard to detect without type checker.
+                        // We enforce strictness: abstract data to args.
+                        errors.push(`Violation [Standard 1]: Found potential Magic Number '${node.text}'. Abstract logic from data.`);
+                    }
+                }
+
+                // [Standard 7] No Hardcoded Secrets
+                if (ts.isStringLiteral(node)) {
+                    const text = node.text;
+                    // Emails
+                    if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(text)) {
+                         errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+                    }
+                    // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+                    // Must be 24+ chars, alphanumeric mixed, no spaces.
+                    if (/[a-zA-Z0-9-]{24,}/.test(text) && !text.includes(' ')) {
+                         errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+                    }
+                }
+
+                ts.forEachChild(node, visit);
+              };
+
+              visit(sourceFile);
+
+              return { valid: errors.length === 0, errors };
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            } catch (error: any) {
+              const msg = error.message ?? String(error);
+              return { valid: false, errors: [msg] };
+            }
+          },
+        } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+      };
+    }
+approved: true
+linesAdded: 23
+linesRemoved: 12
+linesDifference: 35
+gitCommittedAt: null
+status: committed
+id: 66

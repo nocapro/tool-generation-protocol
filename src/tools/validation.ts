@@ -122,6 +122,7 @@ export function createValidationTools(kernel: Kernel) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (error: any) {
           const msg = error.message ?? String(error);
+          console.error('[Validation Error]', msg);
           return { valid: false, errors: [msg] };
         }
       },

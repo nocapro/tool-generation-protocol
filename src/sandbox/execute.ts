@@ -183,23 +183,26 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
       ${shim}
 
       // Setup CJS Environment for the entry point
-      this.exports = {};
-      this.module = { exports: this.exports };
-      this.require = __makeRequire('${path.dirname(filePath)}');
+      const __module = { exports: {} };
+      const __exports = __module.exports;
+      const __require = __makeRequire('${path.dirname(filePath)}');
+      const __filename = '${filePath}';
+      const __dirname = '${path.dirname(filePath)}';
 
-      global.exports = this.exports;
-      global.module = this.module;
-      global.require = this.require;
+      // Assign to global for unexpected access patterns
+      global.module = __module;
+      global.exports = __exports;
+      global.require = __require;
 
       // Execute User Code
-      (function() {
+      (function(exports, require, module, __filename, __dirname) {
         ${cjsCode}
-      })();
+      })(__exports, __require, __module, __filename, __dirname);
 
       // Run Default Export
-      const __main = this.module.exports.default || this.module.exports;
+      const __main = __module.exports.default || __module.exports;
       if (typeof __main === 'function') {
-         __main(global.args);
+         __main(args);
       } else {
          __main;
       }
