@@ -1,7 +1,7 @@
 
 ===
 
-generate e2e, integration, unit test cases plan based on readme.md
+create e2e.test-plan.md, integration.test-plan.md, unit.test-plan.md plan based on readme.md
 
 === DONE
 

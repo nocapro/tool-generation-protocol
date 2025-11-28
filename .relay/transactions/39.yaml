@@ -1,0 +1,266 @@
+uuid: c3273e6a-7429-4d37-920f-074404097f48
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T02:15:34.875Z'
+gitCommitMsg: 'docs(test): add comprehensive real-implementation test plans'
+promptSummary: >-
+  Create comprehensive unit, integration, and e2e test plans in test-docs/
+  adhering to strict "no mock, real implementation" rules.
+reasoning:
+  - >-
+    Here are the updated, comprehensive test plans adhering to the **Real
+    Implementation** and **No Mock** philosophy.
+  - '### 1. Unit Test Plan (`test-docs/unit.test-plan.md`)'
+  - >-
+    Since mocks are forbidden, "Unit" tests here refer to testing individual
+    modules (Classes/Functions) using real, disposable resources (temporary
+    directories, real V8 instances).
+  - '### 2. Integration Test Plan (`test-docs/integration.test-plan.md`)'
+  - >-
+    Focuses on the interaction between the Kernel and its subsystems (Git, VFS,
+    Sandbox) using real local servers/databases where necessary.
+  - '### 3. E2E Test Plan (`test-docs/e2e.test-plan.md`)'
+  - Full user stories involving the CLI, the Agent Lifecycle, and "Reboots".
+operations:
+  - type: write
+    path: test-docs/unit.test-plan.md
+    content: >-
+      # Unit Test Plan (Real Implementation)
+
+
+      **Rules:**
+
+      1.  **No Mocks**: Use real file systems, real V8 isolates.
+
+      2.  **Isolation**: Each test suite creates a unique temporary directory
+      (`/tmp/tgp-test-{uuid}`).
+
+      3.  **Cleanup**: Register `process.on('SIGTERM')` handlers to wipe temp
+      dirs.
+
+
+      ## 1. VFS (Virtual Filesystem) - Node Adapter
+
+      **Target**: `src/vfs/node.ts`
+
+      **Setup**: Create a temporary directory `TEST_ROOT`.
+
+
+      - [ ] **Real I/O Operations**
+          - [ ] `write('deep/nested/file.txt')`: Verify it creates physical directories on disk.
+          - [ ] `read('deep/nested/file.txt')`: Verify it returns exact byte content written.
+          - [ ] `list('deep')`: Verify it returns structure matching OS `ls -R`.
+      - [ ] **Path Security (Jail)**
+          - [ ] Attempt `write('../outside.txt')`. **Assert**: Throws specific `SecurityViolation` error. File **must not** exist outside `TEST_ROOT`.
+          - [ ] Attempt symlink traversal. Create a symlink in `TEST_ROOT` pointing to `/etc/passwd`. Attempt `read()`. **Assert**: Throws or resolves to empty/null (depending on config).
+
+      ## 2. Sandbox Execution (V8)
+
+      **Target**: `src/sandbox/isolate.ts`, `src/sandbox/bundler.ts`
+
+      **Setup**: Instantiate real `isolated-vm`.
+
+
+      - [ ] **Compilation**
+          - [ ] Feed raw TypeScript: `export default (a: number) => a * 2;`.
+          - [ ] **Assert**: Returns a callable function handle.
+          - [ ] Feed Syntax Error: `const x = ;`.
+          - [ ] **Assert**: Throws `CompilationError` with line number.
+      - [ ] **Runtime constraints**
+          - [ ] **Memory**: Execute script that allocates 100MB buffer. **Assert**: Throws `ERR_ISOLATE_MEMORY`.
+          - [ ] **Timeout**: Execute `while(true){}`. **Assert**: Throws `ERR_ISOLATE_TIMEOUT` after 50ms (or configured limit).
+      - [ ] **Determinism**
+          - [ ] Run `Math.random()`. **Assert**: If seed is configurable, output is constant. (If not, verify output format).
+
+      ## 3. Tool Validation logic
+
+      **Target**: `src/tools/validation.ts`
+
+
+      - [ ] **Static Analysis**
+          - [ ] Input source code with `process.exit()`.
+          - [ ] **Assert**: Validation fails with "Global 'process' is forbidden".
+          - [ ] Input source code with `import fs from 'fs'`.
+          - [ ] **Assert**: Validation fails if import is not in whitelist.
+    patchStrategy: replace
+  - type: write
+    path: test-docs/integration.test-plan.md
+    content: >-
+      # Integration Test Plan (Real Implementation)
+
+
+      **Rules:**
+
+      1.  **Git**: Use local "bare" repositories to simulate remotes.
+
+      2.  **Database**: Use local SQLite file or ephemeral Docker container for
+      SQL tests.
+
+
+      ## 1. GitOps & Persistence
+
+      **Target**: `src/kernel/git.ts`
+
+      **Setup**:
+
+      1.  Create `REMOTE_DIR` (init bare repo).
+
+      2.  Create `AGENT_DIR` (configured as TGP root).
+
+
+      - [ ] **Hydration (Clone/Pull)**
+          - [ ] Commit a tool `tools/hello.ts` to `REMOTE_DIR` using standard `git` CLI commands.
+          - [ ] Initialize `TGP Kernel` in `AGENT_DIR`.
+          - [ ] **Assert**: `tools/hello.ts` exists in `AGENT_DIR` and is readable.
+      - [ ] **Fabrication (Commit/Push)**
+          - [ ] Use Kernel to write `tools/new.ts` in `AGENT_DIR`.
+          - [ ] Trigger Kernel persistence (sync).
+          - [ ] Verify in `REMOTE_DIR` (using `git log`) that a new commit exists with the expected message.
+      - [ ] **Concurrency (Locking)**
+          - [ ] Instantiate **two** Kernels pointing to the same `REMOTE_DIR` but different local dirs.
+          - [ ] Agent A writes `toolA.ts`. Agent B writes `toolB.ts`.
+          - [ ] Both sync simultaneously.
+          - [ ] **Assert**: `REMOTE_DIR` contains both files. No merge conflicts (assuming distinct files).
+
+      ## 2. Kernel <-> Sandbox Bridge
+
+      **Target**: `src/sandbox/bridge.ts`
+
+
+      - [ ] **Host Filesystem Access**
+          - [ ] Create file `data.json` in Host VFS.
+          - [ ] Create tool that uses `tgp.read_file('data.json')`.
+          - [ ] Execute tool.
+          - [ ] **Assert**: Tool returns parsed JSON.
+      - [ ] **Recursive Tool Execution**
+          - [ ] Create `tools/multiplier.ts` (returns `a * b`).
+          - [ ] Create `tools/calculator.ts` that imports/calls `multiplier`.
+          - [ ] Execute `calculator`.
+          - [ ] **Assert**: Returns correct result. Verifies internal module resolution works in V8.
+
+      ## 3. SQL Adapter (Real SQLite)
+
+      **Target**: `src/tools/sql.ts`
+
+      **Setup**: Create `test.db` (SQLite). Run migration to create table
+      `users`.
+
+
+      - [ ] **Query Execution**
+          - [ ] Tool executes `SELECT * FROM users`.
+          - [ ] **Assert**: Returns real rows.
+      - [ ] **Transaction Rollback**
+          - [ ] Tool executes:
+              1. `INSERT INTO users ...`
+              2. `throw new Error('Boom')`
+          - [ ] Catch error in test.
+          - [ ] Query `users` table.
+          - [ ] **Assert**: Count is 0 (Rollback successful).
+    patchStrategy: replace
+  - type: write
+    path: test-docs/e2e.test-plan.md
+    content: >-
+      # End-to-End Test Plan (Real Implementation)
+
+
+      **Rules:**
+
+      1.  **Full Stack**: Tests run against the built `bin/tgp.js` or the public
+      API entry point.
+
+      2.  **Persistence**: Verification involves killing the process and
+      starting a new one to ensure state matches.
+
+
+      ## 1. The "Cold Start" Agent Scenario
+
+      **Story**: An agent wakes up in a serverless environment, connects to a
+      repo, builds a tool, uses it, and shuts down.
+
+
+      1.  **Setup Environment**:
+          -   Create `bare-repo.git` (The Remote).
+          -   Create `config.ts` pointing to `bare-repo.git`.
+      2.  **Agent Boot**:
+          -   Initialize TGP Kernel.
+          -   **Assert**: Local filesystem is clean (except for `.git` hydration).
+      3.  **Task**: "Create a fibonacci tool".
+          -   Agent calls `write_file('tools/math/fib.ts', ...)` (Real TS code).
+          -   Agent calls `check_tool('tools/math/fib.ts')`. **Assert**: Valid.
+      4.  **Execution**:
+          -   Agent calls `exec_tool('tools/math/fib.ts', { n: 10 })`.
+          -   **Assert**: Result is `55`.
+      5.  **Shutdown & Persist**:
+          -   Kernel calls `sync()`.
+          -   Process exits.
+      6.  **Verification (The "Next" Agent)**:
+          -   Clone `bare-repo.git` to a **new** directory.
+          -   Check file existence: `tools/math/fib.ts`.
+          -   **Assert**: File content matches exactly.
+
+      ## 2. The "Refactor" Scenario (Search & Replace)
+
+      **Story**: An existing tool is broken/outdated. Agent must patch it.
+
+
+      1.  **Pre-condition**: `tools/legacy.ts` exists with `console.log("old")`.
+
+      2.  **Agent Action**:
+          -   Agent reads file.
+          -   Agent calls `patch_file('tools/legacy.ts', ...)` to replace `console.log` with `return`.
+      3.  **Verification**:
+          -   Run `exec_tool`.
+          -   **Assert**: Output is returned value, not undefined.
+          -   Read file from disk. **Assert**: Content is updated.
+
+      ## 3. The "Infinite Loop" Self-Defense
+
+      **Story**: Agent generates malicious/buggy code that freezes.
+
+
+      1.  **Action**: Agent creates `tools/freeze.ts` (`while(true){}`).
+
+      2.  **Execution**: Agent calls `exec_tool('tools/freeze.ts')`.
+
+      3.  **Observation**:
+          -   Function call throws exception.
+          -   Exception is caught.
+          -   **Assert**: Main process (The Agent) remains alive and responsive.
+          -   **Assert**: Memory usage of Main process is stable (V8 isolate disposed).
+
+      ## 4. The "SIGTERM" Cleanliness Test
+
+      **Story**: Deployment platform kills the pod while tool is running.
+
+
+      1.  **Setup**:
+          -   Start TGP process that writes to a database loop.
+      2.  **Action**:
+          -   Send `SIGTERM` to process.
+      3.  **Verification**:
+          -   Check Database locks. **Assert**: Released.
+          -   Check Temporary Files (`/tmp/tgp-*`). **Assert**: Deleted/Cleaned up.
+          -   Check Git Lock files (`index.lock`). **Assert**: Cleared.
+
+      ## 5. CLI Bootstrap Test
+
+      **Story**: Developer initializes project.
+
+
+      1.  **Action**: Exec `node bin/tgp.js init` in empty dir.
+
+      2.  **Assert**:
+          -   `tgp.config.ts` created.
+          -   `.tgp` folder structure created.
+          -   `package.json` updated (if applicable).
+    patchStrategy: replace
+snapshot:
+  test-docs/unit.test-plan.md: null
+  test-docs/integration.test-plan.md: null
+  test-docs/e2e.test-plan.md: null
+approved: true
+linesAdded: 168
+linesRemoved: 0
+linesDifference: 168
+gitCommittedAt: null
+status: committed
+id: 39
