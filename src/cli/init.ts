@@ -66,13 +66,7 @@ export default defineTGPConfig({
   // The Root of the Agent's filesystem (Ephemeral in serverless)
   rootDir: './.tgp',
 
-  // 1. DATA: How the Agent sees your DB
-  db: {
-    dialect: 'postgres',
-    ddlSource: 'drizzle-kit generate --print',
-  },
-
-  // 2. BACKEND (GitOps)
+  // 1. BACKEND (GitOps)
   // Essential for Serverless/Ephemeral environments.
   // The Agent pulls state from here and pushes new tools here.
   git: {
@@ -89,13 +83,18 @@ export default defineTGPConfig({
     writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
   },
 
-  // 3. FILESYSTEM JAIL
+  // 2. FILESYSTEM JAIL
   fs: {
     allowedDirs: ['./public/exports', './tmp'],
     blockUpwardTraversal: true
   },
 
-  // 4. RUNTIME
-  allowedImports: ['@tgp/std', 'zod', 'date-fns']
+  // 3. RUNTIME
+  allowedImports: ['@tgp/std', 'zod', 'date-fns'],
+
+  // 4. NETWORKING
+  // Whitelist of URL prefixes the sandbox fetch can access.
+  // e.g. allowedFetchUrls: ['https://api.stripe.com', 'https://api.github.com']
+  allowedFetchUrls: []
 });
 `;

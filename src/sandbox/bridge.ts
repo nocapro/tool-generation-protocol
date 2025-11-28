@@ -1,9 +1,13 @@
 /* eslint-disable no-console */
 import { Kernel } from '../kernel/core.js';
 import * as path from 'path';
+import { TGPConfig } from '../types.js';
 
 export interface SandboxBridgeOptions {
-  kernel: Pick<Kernel, 'vfs' | 'config'>;
+  kernel: {
+    vfs: Kernel['vfs'];
+    config: TGPConfig;
+  };
   onLog?: (message: string) => void;
 }
 
@@ -16,6 +20,7 @@ export interface SandboxBridgeOptions {
 export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
   const { vfs, config } = kernel;
   const { allowedDirs } = config.fs;
+  const { allowedFetchUrls } = config;
 
   const isAllowedWrite = (target: string): boolean => {
     // Normalize target to ensure clean comparison (remove leading ./, etc)
@@ -49,13 +54,25 @@ export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
       // --- Network Bridge (Allowed Only) ---
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       fetch: async (url: string, init?: any) => {
-        // Security: Parse URL and allow-list check could happen here
+        // Security: Enforce URL allow-list
+        if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
+          throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
+        }
+        const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
+        if (!isAllowed) {
+          throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
+        }
+
         const response = await fetch(url, init);
-        const text = await response.text();
+
+        // Return a serializable, safe subset of the Response object.
+        // The methods must be wrapped to be transferred correctly.
         return {
           status: response.status,
-          text: () => text,
-          json: () => JSON.parse(text),
+          statusText: response.statusText,
+          headers: Object.fromEntries(response.headers.entries()),
+          text: () => response.text(),
+          json: () => response.json(),
         };
       },
 

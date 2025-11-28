@@ -1,8 +1,7 @@
 /* eslint-disable no-console */
-import { TGPConfig, Logger, DBBackend } from '../types.js';
+import { TGPConfig, Logger } from '../types.js';
 import { VFSAdapter } from '../vfs/types.js';
 import { createGitBackend, GitBackend, GitDependencies } from './git.js';
-import { createDBBackend } from './db.js';
 import { createRegistry, Registry } from './registry.js';
 
 // We inject the platform-specific environment dependencies here.
@@ -16,7 +15,6 @@ export interface KernelOptions {
   vfs: VFSAdapter; 
   env: KernelEnvironment;
   logger?: Logger;
-  db?: DBBackend;
 }
 
 export interface Kernel {
@@ -25,7 +23,6 @@ export interface Kernel {
   config: TGPConfig;
   vfs: VFSAdapter;
   git: GitBackend;
-  db: DBBackend;
   registry: Registry;
   logger: Logger;
 }
@@ -46,7 +43,6 @@ export function createKernel(opts: KernelOptions): Kernel {
   const logger = opts.logger ?? defaultLogger;
   
   const git = createGitBackend(env, config, logger);
-  const db = opts.db ?? createDBBackend(config); 
   const registry = createRegistry(vfs);
 
   let isBooted = false;
@@ -55,7 +51,6 @@ export function createKernel(opts: KernelOptions): Kernel {
     config,
     vfs,
     git,
-    db,
     registry,
     logger,
 

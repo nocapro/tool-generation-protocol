@@ -5,6 +5,7 @@ import { createExecTools } from './exec.js';
 import { ToolSet } from './types.js';
 
 export * from './types.js';
+export * from './sql.js';
 
 /**
  * Generates the complete set of TGP tools (Capabilities) for a given Kernel.

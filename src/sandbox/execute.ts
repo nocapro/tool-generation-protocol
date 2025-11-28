@@ -2,6 +2,7 @@
 import { Kernel } from '../kernel/core.js';
 import { createSandbox } from './isolate.js';
 import { createSandboxBridge } from './bridge.js';
+import { bundleDependencySync } from './bundler.js';
 import { transformSync } from 'esbuild';
 import * as path from 'path';
 
@@ -40,12 +41,30 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
     // 2. Module Orchestration (The 'require' Bridge)
     // This host function is called synchronously from the Guest.
     const __tgp_load_module = (baseDir: string, importId: string) => {
+      // 1. Handle whitelisted node modules (bare specifiers)
+      if (!importId.startsWith('.') && !importId.startsWith('/')) {
+        if (!kernel.config.allowedImports.includes(importId)) {
+          throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
+        }
+        try {
+          const bundledCode = bundleDependencySync(importId);
+          return {
+            code: bundledCode,
+            path: `/__node_modules__/${importId}`, // Virtual path for caching
+            dirname: `/__node_modules__`,
+          };
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
+        }
+      }
+
       // Security: Ensure we don't traverse out of sandbox (handled by VFS)
       // Resolution Logic:
       // - Starts with '.': Relative to baseDir
       // - Otherwise: Absolute from root (or relative to root)
       
-      let targetPath = '';
+      let targetPath: string;
       if (importId.startsWith('.')) {
         targetPath = path.join(baseDir, importId);
       } else {

@@ -7,9 +7,10 @@
   "type": "module",
   "scripts": {
     "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "vitest run",
     "tgp": "node bin/tgp.js"
   },
   "keywords": [
@@ -35,6 +36,8 @@
     "@typescript-eslint/eslint-plugin": "^8.48.0",
     "@typescript-eslint/parser": "^8.48.0",
     "eslint": "^9.39.1",
-    "typescript": "^5.9.3"
+    "tsx": "^4.16.2",
+    "typescript": "^5.9.3",
+    "vitest": "^1.6.0"
   }
 }

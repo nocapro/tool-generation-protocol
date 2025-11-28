@@ -81,6 +81,7 @@ The Agent is provided with a specific set of primitives to interact with the env
 | **`patch_file`** | `(path: string, search: string, replace: string) => void` | Surgical search-and-replace for refactoring. |
 | **`check_tool`** | `(path: string) => { valid: boolean, errors: string[] }` | Run the JIT compiler and linter. |
 | **`exec_tool`** | `(path: string, args: object) => any` | Execute a tool inside the secure Sandbox. |
+| **`exec_sql`**   | `(sql: string, params: object) => any` | Executes a raw SQL query against the host database. |
 
 ---
 
@@ -182,16 +183,8 @@ import { defineTGPConfig } from '@tgp/core';
 export default defineTGPConfig({
   // The Root of the Agent's filesystem (Ephemeral in serverless)
   rootDir: './.tgp',
-  // NOTE: The 'db' and 'fs' sections below are METADATA for the Agent.
-  // The actual database and filesystem permissions must be injected at runtime.
 
-  // 1. DATA: How the Agent sees your DB
-  db: {
-    dialect: 'postgres',
-    ddlSource: 'drizzle-kit generate --print',
-  },
-
-  // 2. BACKEND (GitOps)
+  // 1. BACKEND (GitOps)
   // Essential for Serverless/Ephemeral environments.
   // The Agent pulls state from here and pushes new tools here.
   git: {
@@ -208,14 +201,18 @@ export default defineTGPConfig({
     writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
   },
 
-  // 3. FILESYSTEM JAIL
+  // 2. FILESYSTEM JAIL
   fs: {
     allowedDirs: ['./public/exports', './tmp'],
     blockUpwardTraversal: true
   },
 
-  // 4. RUNTIME
-  allowedImports: ['@tgp/std', 'zod', 'date-fns']
+  // 3. RUNTIME
+  allowedImports: ['@tgp/std', 'zod', 'date-fns'],
+
+  // 4. NETWORKING
+  // Whitelist of URL prefixes the sandbox fetch can access.
+  allowedFetchUrls: ['https://api.stripe.com']
 });
 ```
 
@@ -223,8 +220,9 @@ export default defineTGPConfig({
 
 ```typescript
 // src/app/api/agent/route.ts
-import { TGP, tgpTools } from '@tgp/core';
+import { TGP, tgpTools, createSqlTools } from '@tgp/core';
 import { generateText } from 'ai';
+import { myDbExecutor } from '@/lib/db'; // Your DB connection
 
 const kernel = new TGP({ configFile: './tgp.config.ts' });
 
@@ -232,11 +230,13 @@ export async function POST(req: Request) {
   const { messages } = await req.json();
 
   // Injects: list_files, read_file, write_file, exec_tool
-  const tools = tgpTools(kernel);
+  const systemTools = tgpTools(kernel);
+  // Injects the `exec_sql` tool, powered by your database
+  const dataTools = createSqlTools(myDbExecutor);
 
   const result = await generateText({
     model: openai('gpt-4-turbo'),
-    tools, 
+    tools: { ...systemTools, ...dataTools },
     messages,
     // The System Prompt enforces the "8 Standards"
     system: kernel.getSystemPrompt() 
