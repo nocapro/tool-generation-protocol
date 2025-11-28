@@ -59,8 +59,8 @@ export function createRegistry(vfs: VFSAdapter): Registry {
       const metadata = extractMetadata(filePath, code);
       state.tools[filePath] = metadata;
       
-      // We don't sync on every register to avoid IO storm if called in loop, 
-      // but for write_file it is fine.
+      // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
+      // during tool creation.
       await this.sync();
     },
 

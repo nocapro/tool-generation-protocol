@@ -206,7 +206,7 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
         }
       } catch (error) {
         logger.error(`Git Hydration Failed:`, error);
-        // We might want to throw here to stop boot, but for now we log.
+        // Fail fast: The agent cannot operate without a consistent filesystem state.
         throw error;
       }
     },
