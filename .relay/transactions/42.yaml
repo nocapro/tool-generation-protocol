@@ -1,0 +1,697 @@
+uuid: c8d7e9f1-a2b3-4c5d-6e7f-8a9b0c1d2e3f
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T02:32:46.060Z'
+gitCommitMsg: >-
+  test(e2e): add infrastructure and local git support
+
+  - Update types to allow 'local' git provider. - Implement LocalGitBackend in
+  kernel using git CLI. - Add test/e2e/utils.ts with repo init and cleanup
+  helpers.
+promptSummary: >-
+  Implemented E2E infrastructure by adding 'local' git provider support and
+  creating test utilities.
+reasoning:
+  - >-
+    Based on the test plan and analysis, we need to first enable "Local" Git
+    support in the Kernel to allow isolated E2E testing without external
+    dependencies. Then we will implement the test utilities.
+  - '### Step 1: Update Configuration Schema'
+  - We add `'local'` to the allowed Git providers.
+  - '### Step 2: Implement Local Git Backend'
+  - >-
+    We modify `src/kernel/git.ts` to use the system `git` binary when `provider:
+    'local'` is selected. This ensures reliable operation against local
+    filesystem paths, which is critical for the "Cold Start" and "Concurrency"
+    test scenarios involving local bare repositories.
+  - '### Step 3: Create E2E Utilities'
+  - >-
+    Now we create the test infrastructure in `test/e2e/utils.ts` to manage
+    ephemeral environments.
+  - '### Final Step: Update YAML'
+operations:
+  - type: write
+    path: src/types.ts
+    content: |
+      --- src/types.ts
+      +++ src/types.ts
+      @@ -5,3 +5,3 @@
+       export const GitConfigSchema = z.object({
+      -  provider: z.enum(['github', 'gitlab', 'bitbucket']),
+      +  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
+         repo: z.string().min(1, "Repository name is required"),
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/git.ts
+    content: >
+      --- src/kernel/git.ts
+
+      +++ src/kernel/git.ts
+
+      @@ -2,2 +2,3 @@
+       import { TGPConfig, Logger } from '../types.js';
+       import * as path from 'path';
+      +import { spawn } from 'child_process';
+       
+      @@ -87,2 +88,71 @@
+       
+      +// --- Local Git Implementation (Shell-based) ---
+
+      +// Used for E2E testing and Air-gapped environments
+
+      +async function execGit(args: string[], cwd: string, logger: Logger):
+      Promise<void> {
+
+      +  return new Promise((resolve, reject) => {
+
+      +    const proc = spawn('git', args, { cwd, stdio: 'pipe' });
+
+      +    let output = '';
+
+      +    proc.stdout.on('data', d => output += d.toString());
+
+      +    proc.stderr.on('data', d => output += d.toString());
+
+      +    
+
+      +    proc.on('close', (code) => {
+
+      +      if (code === 0) resolve();
+
+      +      else reject(new Error(`Git command failed: git ${args.join(' ')} in
+      ${cwd}\nOutput: ${output}`));
+
+      +    });
+
+      +  });
+
+      +}
+
+      +
+
+      +function createLocalGitBackend(config: TGPConfig, logger: Logger):
+      GitBackend {
+
+      +  const dir = config.rootDir;
+
+      +  const { repo, branch } = config.git;
+
+      +
+
+      +  return {
+
+      +    async hydrate() {
+
+      +      const fs = await import('node:fs/promises');
+
+      +      const gitDirExists = await fs.stat(path.join(dir, '.git')).then(()
+      => true).catch(() => false);
+
+      +      
+
+      +      if (!gitDirExists) {
+
+      +        logger.info(`[Local] Cloning ${repo} into ${dir}...`);
+
+      +        await fs.mkdir(path.dirname(dir), { recursive: true });
+
+      +        // Clone needs to happen in parent dir
+
+      +        // We assume 'repo' is an absolute path to a bare repo
+
+      +        await execGit(['clone', repo, path.basename(dir)],
+      path.dirname(dir), logger);
+
+      +        
+
+      +        // Ensure we are on correct branch
+
+      +        try {
+
+      +            await execGit(['checkout', branch], dir, logger);
+
+      +        } catch {
+
+      +            logger.warn(`[Local] Failed to checkout ${branch}, assuming
+      default.`);
+
+      +        }
+
+      +      } else {
+
+      +        logger.info(`[Local] Pulling latest from ${repo}...`);
+
+      +        await execGit(['pull', 'origin', branch], dir, logger);
+
+      +      }
+
+      +    },
+
+      +
+
+      +    async persist(message: string, files: string[]) {
+
+      +      if (files.length === 0) return;
+
+      +      logger.info(`[Local] Persisting ${files.length} files...`);
+
+      +      
+
+      +      for (const f of files) {
+
+      +        await execGit(['add', f], dir, logger);
+
+      +      }
+
+      +      
+
+      +      try {
+
+      +        await execGit(['commit', '-m', message], dir, logger);
+
+      +      } catch(e) {
+
+      +         // Commit might fail if no changes
+
+      +         logger.warn(`[Local] Commit failed (empty?):`, String(e));
+
+      +         return;
+
+      +      }
+
+      +
+
+      +      try {
+
+      +          await execGit(['push', 'origin', branch], dir, logger);
+
+      +      } catch (e) {
+
+      +          // Handle non-fast-forward by pulling first (simple auto-merge)
+
+      +          logger.warn(`[Local] Push failed. Attempting rebase...`);
+
+      +          await execGit(['pull', '--rebase', 'origin', branch], dir,
+      logger);
+
+      +          await execGit(['push', 'origin', branch], dir, logger);
+
+      +      }
+
+      +    }
+
+      +  };
+
+      +}
+
+      +
+       /**
+        * Factory to create the Git Backend based on configuration.
+        */
+      @@ -93,2 +163,6 @@
+       
+      +  if (provider === 'local') {
+
+      +    return createLocalGitBackend(config, logger);
+
+      +  }
+
+      +
+         // Configuration for isomorphic-git
+    patchStrategy: standard-diff
+  - type: write
+    path: test/e2e/utils.ts
+    content: >-
+      import * as fs from 'node:fs/promises';
+
+      import * as path from 'node:path';
+
+      import * as os from 'node:os';
+
+      import { spawn, execSync } from 'node:child_process';
+
+      import { fileURLToPath, pathToFileURL } from 'node:url';
+
+
+      // ESM Polyfills
+
+      const __filename = fileURLToPath(import.meta.url);
+
+      const __dirname = path.dirname(__filename);
+
+
+      // Track temp dirs for cleanup
+
+      const tempDirs: string[] = [];
+
+
+      /**
+       * Creates a unique temporary directory for a test case.
+       * Registers it for auto-cleanup on process exit.
+       */
+      export async function createTempDir(prefix: string = 'tgp-e2e-'):
+      Promise<string> {
+        const tmpDir = os.tmpdir();
+        const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
+        tempDirs.push(dir);
+        return dir;
+      }
+
+
+      /**
+       * Recursively deletes a directory.
+       */
+      export async function cleanupDir(dir: string): Promise<void> {
+        await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+      }
+
+
+      /**
+       * Initializes a bare Git repository at the specified path.
+       * This serves as the 'Remote' for the E2E tests.
+       */
+      export async function initBareRepo(dir: string): Promise<void> {
+        await fs.mkdir(dir, { recursive: true });
+        execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
+        // Set default branch to main
+        execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
+      }
+
+
+      /**
+       * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
+       */
+      export async function createTgpConfig(rootDir: string, remoteRepo: string,
+      fileName: string = 'tgp.config.ts'): Promise<string> {
+          const projectRoot = path.resolve(__dirname, '../../');
+          const distPath = path.join(projectRoot, 'dist/config.js');
+          const distImport = pathToFileURL(distPath).href;
+
+          const configContent = `
+      import { defineTGPConfig } from '${distImport}';
+
+
+      export default defineTGPConfig({
+        rootDir: './.tgp',
+        git: {
+          provider: 'local',
+          repo: '${remoteRepo}',
+          branch: 'main',
+          auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+        },
+        fs: {
+          allowedDirs: ['./public/exports', './tmp'],
+          blockUpwardTraversal: true
+        }
+      });
+
+      `;
+          const configPath = path.join(rootDir, fileName);
+          await fs.writeFile(configPath, configContent);
+          return configPath;
+      }
+
+
+      /**
+       * Executes the TGP CLI binary in the given directory.
+       */
+      export function runTgpCli(args: string[], cwd: string): Promise<{ stdout:
+      string, stderr: string, code: number }> {
+          return new Promise((resolve) => {
+              const tgpBin = path.resolve(__dirname, '../../bin/tgp.js');
+              const proc = spawn('node', [tgpBin, ...args], {
+                  cwd,
+                  env: { ...process.env, NODE_ENV: 'test' }
+              });
+
+              let stdout = '';
+              let stderr = '';
+
+              proc.stdout.on('data', d => stdout += d.toString());
+              proc.stderr.on('data', d => stderr += d.toString());
+
+              proc.on('close', (code) => {
+                  resolve({ stdout, stderr, code: code ?? -1 });
+              });
+          });
+      }
+
+
+      // Cleanup hook
+
+      process.on('exit', () => {
+          // Sync cleanup on exit is limited, but we try best effort
+          tempDirs.forEach(d => {
+              try { execSync(`rm -rf ${d}`); } catch {}
+          });
+      });
+    patchStrategy: replace
+snapshot:
+  test/e2e/utils.ts: null
+  src/kernel/git.ts: >2
+     
+    import * as git from 'isomorphic-git';
+
+    import { TGPConfig, Logger } from '../types.js';
+
+    import * as path from 'path';
+
+
+    /**
+     * The Git Interface required by the Kernel.
+     * We rely on the 'fs' interface compatible with isomorphic-git.
+     */
+    export interface GitBackend {
+      hydrate(): Promise<void>;
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    export interface GitDependencies {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http: any;
+    }
+
+
+    /**
+     * Strategy interface for persisting changes to the upstream repository.
+     */
+    interface GitWriteStrategy {
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    /**
+     * Adapter interface for Git Hosting Platforms.
+     * Handles platform-specific API calls like creating Pull Requests.
+     */
+    interface GitPlatformAdapter {
+      createPullRequest(opts: {
+        title: string;
+        branch: string;
+        base: string;
+        body: string;
+      }): Promise<void>;
+    }
+
+
+    class GitHubAdapter implements GitPlatformAdapter {
+      constructor(
+        private repo: string,
+        private token: string,
+        private apiBaseUrl: string,
+        private logger: Logger
+      ) {}
+
+      async createPullRequest(opts: { title: string; branch: string; base: string; body: string }): Promise<void> {
+        const [owner, repoName] = this.repo.split('/');
+        const url = new URL(`/repos/${owner}/${repoName}/pulls`, this.apiBaseUrl).href;
+
+        this.logger.info(`Creating Pull Request on ${this.repo}...`);
+
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `token ${this.token}`,
+              'Accept': 'application/vnd.github.v3+json',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              title: opts.title,
+              head: opts.branch,
+              base: opts.base,
+              body: opts.body,
+            }),
+          });
+
+          const result = await response.json();
+          if (response.ok) {
+            this.logger.info(`Successfully created Pull Request: ${result.html_url}`);
+          } else if (response.status === 422) {
+            this.logger.warn(`Could not create PR (it may already exist): ${JSON.stringify(result.errors)}`);
+          } else {
+            this.logger.error(`GitHub API Error: ${response.status} ${response.statusText}`, result);
+          }
+        } catch (e) {
+          this.logger.error('Failed to create pull request via API.', e);
+          throw e;
+        }
+      }
+    }
+
+
+    class NotImplementedAdapter implements GitPlatformAdapter {
+      constructor(private provider: string) {}
+      async createPullRequest(): Promise<void> {
+        throw new Error(`Git Provider '${this.provider}' is not yet implemented.`);
+      }
+    }
+
+
+    /**
+     * Factory to create the Git Backend based on configuration.
+     */
+    export function createGitBackend(deps: GitDependencies, config: TGPConfig,
+    logger: Logger): GitBackend {
+      const dir = config.rootDir;
+      const { repo, auth, branch, writeStrategy, apiBaseUrl, provider } = config.git;
+      const { fs, http } = deps;
+
+      // Configuration for isomorphic-git
+      const gitOpts = {
+        fs,
+        dir,
+        http,
+        onAuth: () => ({ username: auth.token }),
+      };
+
+      const author = {
+        name: auth.user,
+        email: auth.email,
+      };
+
+      // Select Platform Adapter
+      let platformAdapter: GitPlatformAdapter;
+      if (provider === 'github') {
+        platformAdapter = new GitHubAdapter(repo, auth.token, apiBaseUrl, logger);
+      } else {
+        platformAdapter = new NotImplementedAdapter(provider);
+      }
+
+      // --- Strategy Implementations ---
+
+      const directStrategy: GitWriteStrategy = {
+        async persist(message: string, filesToAdd: string[]) {
+          if (filesToAdd.length === 0) return;
+
+          // 1. Add files
+          for (const filepath of filesToAdd) {
+            try {
+               // check if file exists before adding
+               await git.add({ ...gitOpts, filepath });
+            } catch (e) {
+               logger.warn(`Git Add failed for ${filepath}`, e);
+               throw new Error(`Failed to stage file ${filepath}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+
+          try {
+            // 2. Commit
+            const sha = await git.commit({
+              ...gitOpts,
+              message,
+              author,
+            });
+            logger.info(`Committed ${sha.slice(0, 7)}: ${message}`);
+
+            // 3. Push
+            logger.info(`Pushing to ${branch}...`);
+            await git.push({
+              ...gitOpts,
+              remote: 'origin',
+              ref: branch,
+            });
+          } catch (e) {
+            logger.error(`Git Commit/Push failed:`, e);
+            throw new Error(`Failed to persist changes to Git: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      };
+
+      const prStrategy: GitWriteStrategy = {
+        async persist(message: string, files: string[]) {
+          if (files.length === 0) return;
+          
+          // 1. Get current branch
+          const currentBranch = await git.currentBranch({ ...gitOpts }) ?? 'HEAD';
+          
+          // 2. If we are on the protected branch (main/master), we must fork
+          let targetBranch = currentBranch;
+          
+          if (currentBranch === branch) {
+             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+             // Sanitize message for branch name
+             const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+             targetBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+             
+             logger.info(`Switching to new branch: ${targetBranch}`);
+             
+             await git.branch({ ...gitOpts, ref: targetBranch });
+             await git.checkout({ ...gitOpts, ref: targetBranch });
+          } else {
+             logger.info(`Already on feature branch: ${targetBranch}`);
+          }
+
+          for (const filepath of files) {
+            await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+          }
+
+          await git.commit({
+            ...gitOpts,
+            message: message,
+            author,
+          });
+          
+          logger.info(`Changes committed to ${targetBranch}.`);
+          
+          // Try to push the feature branch if auth is present
+          try {
+              await git.push({
+                ...gitOpts,
+                remote: 'origin',
+                ref: targetBranch,
+              });
+              logger.info(`Pushed ${targetBranch} to origin.`);
+              await platformAdapter.createPullRequest({
+                title: message,
+                branch: targetBranch,
+                base: branch,
+                body: `Forged by TGP.\nCommit Message: ${message}`,
+              });
+          } catch (e) {
+              logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+          }
+        }
+      };
+
+      // Select Strategy
+      const strategy = writeStrategy === 'pr' ? prStrategy : directStrategy;
+
+      return {
+        async hydrate() {
+          try {
+            // 1. Check if repo exists locally
+            const gitDirExists = (await fs.promises.stat(path.join(dir, '.git'))
+              .then(() => true)
+              .catch(() => false)) as boolean;
+
+            if (!gitDirExists) {
+              // Clone
+              logger.info(`Cloning ${repo} into ${dir}...`);
+              await git.clone({
+                ...gitOpts,
+                url: `https://github.com/${repo}.git`,
+                ref: branch,
+                singleBranch: true,
+                depth: 1,
+              });
+            } else {
+              // Pull
+              logger.info(`Pulling latest from ${repo}...`);
+              await git.pull({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+                singleBranch: true,
+                author,
+              });
+            }
+          } catch (error) {
+            logger.error(`Git Hydration Failed:`, error);
+            // Fail fast: The agent cannot operate without a consistent filesystem state.
+            throw error;
+          }
+        },
+
+        async persist(message: string, filesToAdd: string[]) {
+          return strategy.persist(message, filesToAdd);
+        }
+      };
+    }
+  src/types.ts: |-
+    import { z } from 'zod';
+
+    // --- Git Configuration Schema ---
+    export const GitConfigSchema = z.object({
+      provider: z.enum(['github', 'gitlab', 'bitbucket']),
+      repo: z.string().min(1, "Repository name is required"),
+      branch: z.string().default('main'),
+      apiBaseUrl: z.string().url().default('https://api.github.com'),
+      auth: z.object({
+        token: z.string().min(1, "Git auth token is required"),
+        user: z.string().default('tgp-bot[bot]'),
+        email: z.string().email().default('tgp-bot@users.noreply.github.com'),
+      }),
+      writeStrategy: z.enum(['direct', 'pr']).default('direct'),
+    });
+
+    // --- Filesystem Jail Schema ---
+    export const FSConfigSchema = z.object({
+      allowedDirs: z.array(z.string()).default(['./tmp']),
+      blockUpwardTraversal: z.boolean().default(true),
+    });
+
+    // --- Main TGP Configuration Schema ---
+    export const TGPConfigSchema = z.object({
+      rootDir: z.string().default('./.tgp'),
+      git: GitConfigSchema,
+      fs: FSConfigSchema.default({}),
+      allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+      allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
+    });
+
+    // --- Inferred Static Types ---
+    // We export these so the rest of the app relies on the Zod inference, 
+    // ensuring types and validation never drift apart.
+    export type GitConfig = z.infer<typeof GitConfigSchema>;
+    export type FSConfig = z.infer<typeof FSConfigSchema>;
+    export type TGPConfig = z.infer<typeof TGPConfigSchema>;
+
+    /**
+     * Defines the structure for a tool file persisted in the VFS.
+     * This is what resides in ./.tgp/tools/
+     */
+    export const ToolSchema = z.object({
+      name: z.string(),
+      description: z.string(),
+      parameters: z.record(z.unknown()), // JsonSchema
+      code: z.string(), // The raw TypeScript source
+    });
+
+    export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+    export interface ToolMetadata {
+      name: string;
+      description: string;
+      path: string;
+    }
+
+    export interface RegistryState {
+      tools: Record<string, ToolMetadata>;
+    }
+
+    export interface Logger {
+      debug(message: string, ...args: any[]): void;
+      info(message: string, ...args: any[]): void;
+      warn(message: string, ...args: any[]): void;
+      error(message: string, ...args: any[]): void;
+    }
+approved: true
+linesAdded: 180
+linesRemoved: 1
+linesDifference: 181
+gitCommittedAt: null
+status: committed
+id: 42
