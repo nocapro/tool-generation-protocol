@@ -1,7 +1,21 @@
 
 ===
 
+lets implement e2e.test-plan.md to test/e2e/
+
+=== DONE
+
 create e2e.test-plan.md, integration.test-plan.md, unit.test-plan.md plan based on readme.md
+
+well, I want it to be more comprehensive especially the e2e. 
+
+also test rule codebase should be;
+
+1. no mock, no spy
+2. all real implementation to verify implementation
+3. isolated
+4. idempotent
+5. clean even on sigterm
 
 === DONE
 
