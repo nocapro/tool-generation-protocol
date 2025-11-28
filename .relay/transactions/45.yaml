@@ -1,0 +1,1004 @@
+uuid: c88d3e2a-115b-4395-8274-123456789abc
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T02:40:52.533Z'
+gitCommitMsg: >-
+  fix: linting errors and tsconfig rootDir
+
+  - Resolved unused variables in git kernel. - Fixed strict boolean expressions
+  in registry and bundler. - Updated tsconfig to handle test folder inclusion
+  correctly. - Adjusted package.json main entry point to match new build output
+  structure.
+promptSummary: >-
+  Fixed linting errors (unused vars, strict booleans) and TypeScript `rootDir`
+  configuration issue.
+reasoning:
+  - >-
+    I will fix the linting errors and the TypeScript configuration issue
+    regarding the `test` directory.
+  - '### Step 1: Fix Linting Errors in `src/kernel/git.ts`'
+  - >-
+    I will prefix unused variables with `_` and add a debug log to use the
+    `logger` argument.
+  - '### Step 2: Fix Linting Errors in `src/kernel/registry.ts`'
+  - I will fix the strict boolean expression errors by adding explicit checks.
+  - '### Step 3: Fix Linting Errors in `src/sandbox/bundler.ts`'
+  - I will remove the non-null assertion and improve the boolean check.
+  - '### Step 4: Fix Linting Errors in `src/sandbox/execute.ts`'
+  - I will use an explicit null check for `resolvedPath`.
+  - '### Step 5: Fix Linting Errors in `src/tools/sql.ts`'
+  - I will replace `||` with `??` for safer nullish coalescing.
+  - '### Step 6: Fix TypeScript Config and Package.json'
+  - >-
+    To resolve `error TS6059: File .../test/... is not under 'rootDir' .../src`,
+    I will remove the `rootDir` restriction from `tsconfig.json`. This causes
+    the compilation output to shift (source files will now go to `dist/src`
+    instead of `dist`), so I must also update `package.json` to point to the
+    correct main entry point.
+operations:
+  - type: write
+    path: src/kernel/git.ts
+    content: |
+      --- src/kernel/git.ts
+      +++ src/kernel/git.ts
+      @@ -96,8 +96,9 @@
+       // Used for E2E testing and Air-gapped environments
+       async function execGit(args: string[], cwd: string, logger: Logger): Promise<void> {
+      +  logger.debug(`[Local] Executing: git ${args.join(' ')} in ${cwd}`);
+         return new Promise((resolve, reject) => {
+           const proc = spawn('git', args, { cwd, stdio: 'pipe' });
+           let output = '';
+           proc.stdout.on('data', d => output += d.toString());
+           proc.stderr.on('data', d => output += d.toString());
+      @@ -156,7 +157,7 @@
+             try {
+                 await execGit(['push', 'origin', branch], dir, logger);
+      -      } catch (e) {
+      +      } catch (_e) {
+                 // Handle non-fast-forward by pulling first (simple auto-merge)
+                 logger.warn(`[Local] Push failed. Attempting rebase...`);
+                 await execGit(['pull', '--rebase', 'origin', branch], dir, logger);
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/registry.ts
+    content: |
+      --- src/kernel/registry.ts
+      +++ src/kernel/registry.ts
+      @@ -43,7 +43,7 @@
+             const findComment = (pos: number) => {
+               const ranges = ts.getLeadingCommentRanges(code, pos);
+      -        if (ranges?.length) {
+      +        if (ranges && ranges.length > 0) {
+                 const range = ranges[ranges.length - 1]; // Closest to the node
+                 if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
+                   const text = code.substring(range.pos, range.end);
+      @@ -56,13 +56,13 @@
+             // 1. Try attached to first statement (e.g. export const...)
+             if (sourceFile.statements.length > 0) {
+               const extracted = findComment(sourceFile.statements[0].getFullStart());
+      -        if (extracted) description = extracted;
+      +        if (extracted !== null) description = extracted;
+             }
+             
+             // 2. Fallback: Try top of file (detached)
+             if (description === "No description provided.") {
+               const extracted = findComment(0);
+      -        if (extracted) description = extracted;
+      +        if (extracted !== null) description = extracted;
+             }
+       
+           } catch (err) {
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/bundler.ts
+    content: >
+      --- src/sandbox/bundler.ts
+
+      +++ src/sandbox/bundler.ts
+
+      @@ -14,7 +14,7 @@
+        */
+       export function bundleDependencySync(dependency: string): string {
+         if (bundleCache.has(dependency)) {
+      -    return bundleCache.get(dependency)!;
+
+      +    return bundleCache.get(dependency) as string;
+         }
+       
+         try {
+      @@ -27,7 +27,7 @@
+             logLevel: 'silent', // Suppress esbuild warnings in production logs
+           });
+       
+      -    if (result.outputFiles && result.outputFiles.length > 0) {
+
+      +    if (result.outputFiles !== undefined && result.outputFiles.length >
+      0) {
+             const bundledCode = result.outputFiles[0].text;
+             bundleCache.set(dependency, bundledCode);
+             return bundledCode;
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/execute.ts
+    content: |
+      --- src/sandbox/execute.ts
+      +++ src/sandbox/execute.ts
+      @@ -100,7 +100,7 @@
+             // 2. Resolve Local Modules (VFS)
+             const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
+       
+      -      if (!resolvedPath) {
+      +      if (resolvedPath === null) {
+               throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
+             }
+       
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tools/sql.ts
+    content: |
+      --- src/tools/sql.ts
+      +++ src/tools/sql.ts
+      @@ -25,7 +25,7 @@
+             description: 'Executes a raw SQL query against the database. Returns an array of rows.',
+             parameters: ExecSqlParams,
+             execute: async ({ sql, params }) => {
+      -        return executor(sql, params || []);
+      +        return executor(sql, params ?? []);
+             },
+           // eslint-disable-next-line @typescript-eslint/no-explicit-any
+           } as AgentTool<typeof ExecSqlParams, any[]>,
+    patchStrategy: standard-diff
+  - type: write
+    path: tsconfig.json
+    content: |-
+      {
+        "compilerOptions": {
+          "target": "ES2022",
+          "module": "NodeNext",
+          "moduleResolution": "NodeNext",
+          "strict": true,
+          "noImplicitAny": true,
+          "strictNullChecks": true,
+          "strictFunctionTypes": true,
+          "noImplicitThis": true,
+          "noImplicitReturns": true,
+          "skipLibCheck": true,
+          "forceConsistentCasingInFileNames": true,
+          "outDir": "./dist",
+          "declaration": true
+        },
+        "include": ["src/**/*", "test/**/*"]
+      }
+    patchStrategy: replace
+  - type: write
+    path: package.json
+    content: |
+      --- package.json
+      +++ package.json
+      @@ -3,8 +3,8 @@
+         "version": "0.0.1",
+         "description": "The Tool Generation Protocol",
+      -  "main": "dist/index.js",
+      -  "types": "dist/index.d.ts",
+      +  "main": "dist/src/index.js",
+      +  "types": "dist/src/index.d.ts",
+         "type": "module",
+         "scripts": {
+           "build": "tsc",
+    patchStrategy: standard-diff
+snapshot:
+  src/kernel/git.ts: >2
+     
+    import * as git from 'isomorphic-git';
+
+    import { TGPConfig, Logger } from '../types.js';
+
+    import * as path from 'path';
+
+    import { spawn } from 'child_process';
+
+
+    /**
+     * The Git Interface required by the Kernel.
+     * We rely on the 'fs' interface compatible with isomorphic-git.
+     */
+    export interface GitBackend {
+      hydrate(): Promise<void>;
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    export interface GitDependencies {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http: any;
+    }
+
+
+    /**
+     * Strategy interface for persisting changes to the upstream repository.
+     */
+    interface GitWriteStrategy {
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    /**
+     * Adapter interface for Git Hosting Platforms.
+     * Handles platform-specific API calls like creating Pull Requests.
+     */
+    interface GitPlatformAdapter {
+      createPullRequest(opts: {
+        title: string;
+        branch: string;
+        base: string;
+        body: string;
+      }): Promise<void>;
+    }
+
+
+    class GitHubAdapter implements GitPlatformAdapter {
+      constructor(
+        private repo: string,
+        private token: string,
+        private apiBaseUrl: string,
+        private logger: Logger
+      ) {}
+
+      async createPullRequest(opts: { title: string; branch: string; base: string; body: string }): Promise<void> {
+        const [owner, repoName] = this.repo.split('/');
+        const url = new URL(`/repos/${owner}/${repoName}/pulls`, this.apiBaseUrl).href;
+
+        this.logger.info(`Creating Pull Request on ${this.repo}...`);
+
+        try {
+          const response = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Authorization': `token ${this.token}`,
+              'Accept': 'application/vnd.github.v3+json',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              title: opts.title,
+              head: opts.branch,
+              base: opts.base,
+              body: opts.body,
+            }),
+          });
+
+          const result = await response.json();
+          if (response.ok) {
+            this.logger.info(`Successfully created Pull Request: ${result.html_url}`);
+          } else if (response.status === 422) {
+            this.logger.warn(`Could not create PR (it may already exist): ${JSON.stringify(result.errors)}`);
+          } else {
+            this.logger.error(`GitHub API Error: ${response.status} ${response.statusText}`, result);
+          }
+        } catch (e) {
+          this.logger.error('Failed to create pull request via API.', e);
+          throw e;
+        }
+      }
+    }
+
+
+    class NotImplementedAdapter implements GitPlatformAdapter {
+      constructor(private provider: string) {}
+      async createPullRequest(): Promise<void> {
+        throw new Error(`Git Provider '${this.provider}' is not yet implemented.`);
+      }
+    }
+
+
+    // --- Local Git Implementation (Shell-based) ---
+
+    // Used for E2E testing and Air-gapped environments
+
+    async function execGit(args: string[], cwd: string, logger: Logger):
+    Promise<void> {
+      return new Promise((resolve, reject) => {
+        const proc = spawn('git', args, { cwd, stdio: 'pipe' });
+        let output = '';
+        proc.stdout.on('data', d => output += d.toString());
+        proc.stderr.on('data', d => output += d.toString());
+        
+        proc.on('close', (code) => {
+          if (code === 0) resolve();
+          else reject(new Error(`Git command failed: git ${args.join(' ')} in ${cwd}\nOutput: ${output}`));
+        });
+      });
+    }
+
+
+    function createLocalGitBackend(config: TGPConfig, logger: Logger):
+    GitBackend {
+      const dir = config.rootDir;
+      const { repo, branch } = config.git;
+
+      return {
+        async hydrate() {
+          const fs = await import('node:fs/promises');
+          const gitDirExists = await fs.stat(path.join(dir, '.git')).then(() => true).catch(() => false);
+          
+          if (!gitDirExists) {
+            logger.info(`[Local] Cloning ${repo} into ${dir}...`);
+            await fs.mkdir(path.dirname(dir), { recursive: true });
+            // Clone needs to happen in parent dir
+            // We assume 'repo' is an absolute path to a bare repo
+            await execGit(['clone', repo, path.basename(dir)], path.dirname(dir), logger);
+            
+            // Ensure we are on correct branch
+            try {
+                await execGit(['checkout', branch], dir, logger);
+            } catch {
+                logger.warn(`[Local] Failed to checkout ${branch}, assuming default.`);
+            }
+          } else {
+            logger.info(`[Local] Pulling latest from ${repo}...`);
+            await execGit(['pull', 'origin', branch], dir, logger);
+          }
+        },
+
+        async persist(message: string, files: string[]) {
+          if (files.length === 0) return;
+          logger.info(`[Local] Persisting ${files.length} files...`);
+          
+          for (const f of files) {
+            await execGit(['add', f], dir, logger);
+          }
+          
+          try {
+            await execGit(['commit', '-m', message], dir, logger);
+          } catch(e) {
+             // Commit might fail if no changes
+             logger.warn(`[Local] Commit failed (empty?):`, String(e));
+             return;
+          }
+
+          try {
+              await execGit(['push', 'origin', branch], dir, logger);
+          } catch (e) {
+              // Handle non-fast-forward by pulling first (simple auto-merge)
+              logger.warn(`[Local] Push failed. Attempting rebase...`);
+              await execGit(['pull', '--rebase', 'origin', branch], dir, logger);
+              await execGit(['push', 'origin', branch], dir, logger);
+          }
+        }
+      };
+    }
+
+
+    /**
+     * Factory to create the Git Backend based on configuration.
+     */
+    export function createGitBackend(deps: GitDependencies, config: TGPConfig,
+    logger: Logger): GitBackend {
+      const dir = config.rootDir;
+      const { repo, auth, branch, writeStrategy, apiBaseUrl, provider } = config.git;
+      const { fs, http } = deps;
+
+      if (provider === 'local') {
+        return createLocalGitBackend(config, logger);
+      }
+
+      // Configuration for isomorphic-git
+      const gitOpts = {
+        fs,
+        dir,
+        http,
+        onAuth: () => ({ username: auth.token }),
+      };
+
+      const author = {
+        name: auth.user,
+        email: auth.email,
+      };
+
+      // Select Platform Adapter
+      let platformAdapter: GitPlatformAdapter;
+      if (provider === 'github') {
+        platformAdapter = new GitHubAdapter(repo, auth.token, apiBaseUrl, logger);
+      } else {
+        platformAdapter = new NotImplementedAdapter(provider);
+      }
+
+      // --- Strategy Implementations ---
+
+      const directStrategy: GitWriteStrategy = {
+        async persist(message: string, filesToAdd: string[]) {
+          if (filesToAdd.length === 0) return;
+
+          // 1. Add files
+          for (const filepath of filesToAdd) {
+            try {
+               // check if file exists before adding
+               await git.add({ ...gitOpts, filepath });
+            } catch (e) {
+               logger.warn(`Git Add failed for ${filepath}`, e);
+               throw new Error(`Failed to stage file ${filepath}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+
+          try {
+            // 2. Commit
+            const sha = await git.commit({
+              ...gitOpts,
+              message,
+              author,
+            });
+            logger.info(`Committed ${sha.slice(0, 7)}: ${message}`);
+
+            // 3. Push
+            logger.info(`Pushing to ${branch}...`);
+            await git.push({
+              ...gitOpts,
+              remote: 'origin',
+              ref: branch,
+            });
+          } catch (e) {
+            logger.error(`Git Commit/Push failed:`, e);
+            throw new Error(`Failed to persist changes to Git: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      };
+
+      const prStrategy: GitWriteStrategy = {
+        async persist(message: string, files: string[]) {
+          if (files.length === 0) return;
+          
+          // 1. Get current branch
+          const currentBranch = await git.currentBranch({ ...gitOpts }) ?? 'HEAD';
+          
+          // 2. If we are on the protected branch (main/master), we must fork
+          let targetBranch = currentBranch;
+          
+          if (currentBranch === branch) {
+             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+             // Sanitize message for branch name
+             const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+             targetBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+             
+             logger.info(`Switching to new branch: ${targetBranch}`);
+             
+             await git.branch({ ...gitOpts, ref: targetBranch });
+             await git.checkout({ ...gitOpts, ref: targetBranch });
+          } else {
+             logger.info(`Already on feature branch: ${targetBranch}`);
+          }
+
+          for (const filepath of files) {
+            await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+          }
+
+          await git.commit({
+            ...gitOpts,
+            message: message,
+            author,
+          });
+          
+          logger.info(`Changes committed to ${targetBranch}.`);
+          
+          // Try to push the feature branch if auth is present
+          try {
+              await git.push({
+                ...gitOpts,
+                remote: 'origin',
+                ref: targetBranch,
+              });
+              logger.info(`Pushed ${targetBranch} to origin.`);
+              await platformAdapter.createPullRequest({
+                title: message,
+                branch: targetBranch,
+                base: branch,
+                body: `Forged by TGP.\nCommit Message: ${message}`,
+              });
+          } catch (e) {
+              logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+          }
+        }
+      };
+
+      // Select Strategy
+      const strategy = writeStrategy === 'pr' ? prStrategy : directStrategy;
+
+      return {
+        async hydrate() {
+          try {
+            // 1. Check if repo exists locally
+            const gitDirExists = (await fs.promises.stat(path.join(dir, '.git'))
+              .then(() => true)
+              .catch(() => false)) as boolean;
+
+            if (!gitDirExists) {
+              // Clone
+              logger.info(`Cloning ${repo} into ${dir}...`);
+              await git.clone({
+                ...gitOpts,
+                url: `https://github.com/${repo}.git`,
+                ref: branch,
+                singleBranch: true,
+                depth: 1,
+              });
+            } else {
+              // Pull
+              logger.info(`Pulling latest from ${repo}...`);
+              await git.pull({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+                singleBranch: true,
+                author,
+              });
+            }
+          } catch (error) {
+            logger.error(`Git Hydration Failed:`, error);
+            // Fail fast: The agent cannot operate without a consistent filesystem state.
+            throw error;
+          }
+        },
+
+        async persist(message: string, filesToAdd: string[]) {
+          return strategy.persist(message, filesToAdd);
+        }
+      };
+    }
+  src/kernel/registry.ts: |-
+    /* eslint-disable no-console */
+    import { VFSAdapter } from '../vfs/types.js';
+    import { RegistryState, ToolMetadata } from '../types.js';
+    import * as path from 'path';
+    import * as ts from 'typescript';
+
+    export interface Registry {
+      hydrate(): Promise<void>;
+      register(filePath: string, code: string): Promise<void>;
+      list(): ToolMetadata[];
+      sync(): Promise<void>;
+    }
+
+    export function createRegistry(vfs: VFSAdapter): Registry {
+      let state: RegistryState = { tools: {} };
+      const META_PATH = 'meta.json';
+
+      // Helper to parse JSDoc
+      function extractMetadata(filePath: string, code: string): ToolMetadata {
+        const name = path.basename(filePath, path.extname(filePath));
+        let description = "No description provided.";
+
+        try {
+          // Use TypeScript AST to safely locate comments (avoids matching inside strings/templates)
+          const sourceFile = ts.createSourceFile(
+            filePath,
+            code,
+            ts.ScriptTarget.ES2020,
+            true
+          );
+
+          const cleanJSDoc = (comment: string) => {
+            return comment
+              .replace(/^\/\*\*/, '')
+              .replace(/\*\/$/, '')
+              .split('\n')
+              .map(line => line.replace(/^\s*\*\s?/, '').trim())
+              .filter(line => !line.startsWith('@') && line.length > 0)
+              .join(' ');
+          };
+
+          const findComment = (pos: number) => {
+            const ranges = ts.getLeadingCommentRanges(code, pos);
+            if (ranges?.length) {
+              const range = ranges[ranges.length - 1]; // Closest to the node
+              if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
+                const text = code.substring(range.pos, range.end);
+                if (text.startsWith('/**')) return cleanJSDoc(text);
+              }
+            }
+            return null;
+          };
+
+          // 1. Try attached to first statement (e.g. export const...)
+          if (sourceFile.statements.length > 0) {
+            const extracted = findComment(sourceFile.statements[0].getFullStart());
+            if (extracted) description = extracted;
+          }
+          
+          // 2. Fallback: Try top of file (detached)
+          if (description === "No description provided.") {
+            const extracted = findComment(0);
+            if (extracted) description = extracted;
+          }
+
+        } catch (err) {
+          console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling back to default.`, err);
+        }
+
+        return {
+          name,
+          description: description || "No description provided.",
+          path: filePath
+        };
+      }
+
+      return {
+        async hydrate() {
+          if (await vfs.exists(META_PATH)) {
+            try {
+              const content = await vfs.readFile(META_PATH);
+              state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+            } catch (err) {
+              console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
+              state = { tools: {} };
+            }
+          }
+        },
+
+        async register(filePath: string, code: string) {
+          // Ignore non-tool files (e.g. config or hidden files)
+          if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+          const metadata = extractMetadata(filePath, code);
+          state.tools[filePath] = metadata;
+          
+          // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
+          // during tool creation.
+          await this.sync();
+        },
+
+        list() {
+          return Object.values(state.tools);
+        },
+
+        async sync() {
+          await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+        }
+      };
+    }
+  src/sandbox/bundler.ts: >-
+    import { buildSync } from 'esbuild';
+
+
+    // In-memory cache to avoid redundant bundling of the same dependency within
+    the kernel's lifetime.
+
+    const bundleCache = new Map<string, string>();
+
+
+    /**
+     * Synchronously bundles a node module into a single CommonJS string.
+     * This is used by the sandbox's 'require' shim to provide whitelisted dependencies.
+     * 
+     * @param dependency The name of the package to bundle (e.g., 'zod').
+     * @returns The bundled JavaScript code as a string.
+     */
+    export function bundleDependencySync(dependency: string): string {
+      if (bundleCache.has(dependency)) {
+        return bundleCache.get(dependency)!;
+      }
+
+      try {
+        const result = buildSync({
+          entryPoints: [dependency],
+          bundle: true,
+          format: 'cjs',
+          platform: 'node',
+          write: false, // Return the output in memory
+          logLevel: 'silent', // Suppress esbuild warnings in production logs
+        });
+
+        if (result.outputFiles && result.outputFiles.length > 0) {
+          const bundledCode = result.outputFiles[0].text;
+          bundleCache.set(dependency, bundledCode);
+          return bundledCode;
+        }
+
+        throw new Error(`esbuild did not produce an output file for '${dependency}'.`);
+
+      } catch (error) {
+        // Re-throw with a more informative message for the host application logs
+        const msg = error instanceof Error ? error.message : String(error);
+        throw new Error(`Failed to resolve or bundle dependency '${dependency}': ${msg}`);
+      }
+    }
+  src/sandbox/execute.ts: >-
+    import { Kernel } from '../kernel/core.js';
+
+    import { createSandbox } from './isolate.js';
+
+    import { createSandboxBridge } from './bridge.js';
+
+    import { bundleDependencySync } from './bundler.js';
+
+    import { transformSync } from 'esbuild';
+
+    import * as path from 'path';
+
+
+    export interface ExecutionResult {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      result: any;
+      logs: string[];
+      error?: string;
+    }
+
+
+    /**
+     * Resolves a module path within the VFS using standard Node.js resolution logic.
+     * Checks: path, path.ts, path.js, path/index.ts, path/index.js
+     */
+    function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath:
+    string): string | null {
+      const candidates: string[] = [];
+      
+      // Resolve absolute path based on import type
+      // If it starts with '/', it's absolute (from VFS root).
+      // Otherwise, it's relative to baseDir.
+      const target = importPath.startsWith('/') 
+        ? importPath 
+        : path.join(baseDir, importPath);
+
+      // 1. Exact match (e.g. require('./foo.ts'))
+      candidates.push(target);
+      
+      // 2. Extensions (e.g. require('./foo'))
+      candidates.push(`${target}.ts`);
+      candidates.push(`${target}.js`);
+      
+      // 3. Directory Indices
+      candidates.push(path.join(target, 'index.ts'));
+      candidates.push(path.join(target, 'index.js'));
+
+      for (const c of candidates) {
+        try {
+          // Synchronous check is required for the sync require shim
+          vfs.readSync(c);
+          return c;
+        } catch {
+          continue;
+        }
+      }
+      return null;
+    }
+
+
+    /**
+     * Executes a tool script within a secure sandbox.
+     * 
+     * @param kernel The TGP Kernel instance
+     * @param code The TypeScript source code of the tool
+     * @param args The arguments object to pass to the tool (as 'args' global)
+     * @param filePath Optional path of the tool being executed (used for relative imports)
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+    export async function executeTool(kernel: Kernel, code: string, args:
+    Record<string, any> = {}, filePath: string = 'root.ts'):
+    Promise<ExecutionResult> {
+      const sandbox = createSandbox({
+        memoryLimitMb: 128,
+        timeoutMs: 5000 // 5s hard limit
+      });
+      
+      const logs: string[] = [];
+
+      try {
+        // 1. Setup Bridge
+        // We pass the kernel directly.
+        const bridge = createSandboxBridge({
+          kernel,
+          onLog: (msg) => logs.push(msg)
+        });
+
+        // 2. Module Orchestration (The 'require' Bridge)
+        // This host function is called synchronously from the Guest.
+        const __tgp_load_module = (baseDir: string, importId: string) => {
+          // 1. Handle whitelisted node modules (bare specifiers)
+          if (!importId.startsWith('.') && !importId.startsWith('/')) {
+            if (!kernel.config.allowedImports.includes(importId)) {
+              throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
+            }
+            try {
+              const bundledCode = bundleDependencySync(importId);
+              return {
+                code: bundledCode,
+                path: `/__node_modules__/${importId}`, // Virtual path for caching
+                dirname: `/__node_modules__`,
+              };
+            } catch (err: unknown) {
+              const msg = err instanceof Error ? err.message : String(err);
+              throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
+            }
+          }
+
+          // 2. Resolve Local Modules (VFS)
+          const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
+
+          if (!resolvedPath) {
+            throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
+          }
+
+          try {
+            const raw = kernel.vfs.readSync(resolvedPath);
+            const transformed = transformSync(raw, {
+              loader: 'ts',
+              format: 'cjs',
+              target: 'es2020',
+            });
+            
+            return {
+              code: transformed.code,
+              path: resolvedPath,
+              dirname: path.dirname(resolvedPath)
+            };
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
+          }
+        };
+
+        // 3. Shim Injection
+        // We prepend a CommonJS loader shim to the user code.
+        // This allows 'require' to work by calling back to the host via __tgp_load_module.
+        // It includes a cache to prevent reloading the same module within a single execution.
+        const shim = `
+          const __moduleCache = {};
+
+          function __makeRequire(baseDir) {
+            return function(id) {
+              // HOST INTERACTION: Resolve module path and get its source code from the host.
+              // This is a synchronous call to the Node.js environment.
+              const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+
+              // CACHE CHECK: If the module has already been loaded, return it from the cache.
+              if (__moduleCache[mod.path]) {
+                return __moduleCache[mod.path].exports;
+              }
+
+              // MODULE EXECUTION: If it's a new module, execute its code.
+              const newModule = { exports: {} };
+
+              // Before executing, store the module object in the cache to handle circular dependencies.
+              __moduleCache[mod.path] = newModule;
+
+              // We provide the module with its own 'exports' object, a 'require' function
+              // scoped to its own directory, and other CommonJS globals.
+              const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+
+              // Execute the module's code.
+              fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+
+              // The 'newModule.exports' object is now populated.
+              return newModule.exports;
+            };
+          }
+
+          // Setup Global Require for the entry point
+          global.require = __makeRequire('${path.dirname(filePath)}');
+        `;
+
+        const context = {
+          ...bridge, // { tgp: { ... } }
+          args,
+          __tgp_load_module // Injected as Reference
+        };
+
+        // Combine Shim + User Code
+        // We wrap user code to provide top-level CommonJS variables if needed, 
+        // but standard TGP tools are just scripts. 
+        // We append the code. The 'shim' sets up 'global.require'.
+        const fullScript = shim + '\n' + code;
+
+        const result = await sandbox.compileAndRun(fullScript, context);
+        return { result, logs };
+
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        kernel.logger.error(`Tool Execution Failed:`, error);
+        return { result: null, logs, error: errMsg };
+      } finally {
+        sandbox.dispose();
+      }
+    }
+  src/tools/sql.ts: |-
+    import { z } from 'zod';
+    import { AgentTool, ToolSet } from './types.js';
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    export type DBExecutor = (sql: string, params: any[]) => Promise<any[]>;
+
+    export const ExecSqlParams = z.object({
+      sql: z.string().describe('The raw SQL query to execute.'),
+      params: z.array(z.any()).optional().describe('An array of parameters to substitute into the query.'),
+    });
+
+    /**
+     * Creates a ToolSet containing the `exec_sql` tool.
+     * This function allows the host application to inject its own database connection
+     * and execution logic into the TGP agent.
+     *
+     * @param executor A function that takes a SQL string and parameters and returns the result.
+     * @returns A ToolSet containing the `exec_sql` tool.
+     */
+    export function createSqlTools(executor: DBExecutor): ToolSet {
+      return {
+        exec_sql: {
+          description: 'Executes a raw SQL query against the database. Returns an array of rows.',
+          parameters: ExecSqlParams,
+          execute: async ({ sql, params }) => {
+            return executor(sql, params || []);
+          },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as AgentTool<typeof ExecSqlParams, any[]>,
+      };
+    }
+  tsconfig.json: |-
+    {
+      "compilerOptions": {
+        "target": "ES2022",
+        "module": "NodeNext",
+        "moduleResolution": "NodeNext",
+        "strict": true,
+        "noImplicitAny": true,
+        "strictNullChecks": true,
+        "strictFunctionTypes": true,
+        "noImplicitThis": true,
+        "noImplicitReturns": true,
+        "skipLibCheck": true,
+        "forceConsistentCasingInFileNames": true,
+        "outDir": "./dist",
+        "rootDir": "./src",
+        "declaration": true
+      },
+      "include": ["src/**/*", "test/**/*"]
+    }
+  package.json: |-
+    {
+      "name": "@tgp/core",
+      "version": "0.0.1",
+      "description": "The Tool Generation Protocol",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
+      "type": "module",
+      "scripts": {
+        "build": "tsc",
+        "dev": "tsx src/cli/index.ts",
+        "lint": "eslint src/**/*.ts",
+        "lint:fix": "eslint src/**/*.ts --fix",
+        "test": "vitest run",
+        "tgp": "node bin/tgp.js"
+      },
+      "keywords": [
+        "ai",
+        "agent",
+        "protocol",
+        "backend"
+      ],
+      "author": "",
+      "license": "MIT",
+      "bin": {
+        "tgp": "./bin/tgp.js"
+      },
+      "dependencies": {
+        "esbuild": "^0.19.12",
+        "isolated-vm": "^6.0.2",
+        "isomorphic-git": "^1.35.1",
+        "zod": "^3.25.76",
+        "zod-to-json-schema": "^3.22.4",
+        "typescript": "^5.9.3"
+      },
+      "devDependencies": {
+        "@types/node": "^20.19.25",
+        "@typescript-eslint/eslint-plugin": "^8.48.0",
+        "@typescript-eslint/parser": "^8.48.0",
+        "eslint": "^9.39.1",
+        "tsx": "^4.16.2",
+        "vitest": "^1.6.0"
+      }
+    }
+approved: true
+linesAdded: 11
+linesRemoved: 11
+linesDifference: 22
+gitCommittedAt: null
+status: committed
+id: 45

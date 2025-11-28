@@ -12,7 +12,7 @@ const bundleCache = new Map<string, string>();
  */
 export function bundleDependencySync(dependency: string): string {
   if (bundleCache.has(dependency)) {
-    return bundleCache.get(dependency)!;
+    return bundleCache.get(dependency) as string;
   }
 
   try {
@@ -25,7 +25,7 @@ export function bundleDependencySync(dependency: string): string {
       logLevel: 'silent', // Suppress esbuild warnings in production logs
     });
 
-    if (result.outputFiles && result.outputFiles.length > 0) {
+    if (result.outputFiles !== undefined && result.outputFiles.length > 0) {
       const bundledCode = result.outputFiles[0].text;
       bundleCache.set(dependency, bundledCode);
       return bundledCode;

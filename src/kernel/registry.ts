@@ -41,7 +41,7 @@ export function createRegistry(vfs: VFSAdapter): Registry {
 
       const findComment = (pos: number) => {
         const ranges = ts.getLeadingCommentRanges(code, pos);
-        if (ranges?.length) {
+        if (ranges && ranges.length > 0) {
           const range = ranges[ranges.length - 1]; // Closest to the node
           if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
             const text = code.substring(range.pos, range.end);
@@ -54,13 +54,13 @@ export function createRegistry(vfs: VFSAdapter): Registry {
       // 1. Try attached to first statement (e.g. export const...)
       if (sourceFile.statements.length > 0) {
         const extracted = findComment(sourceFile.statements[0].getFullStart());
-        if (extracted) description = extracted;
+        if (extracted !== null) description = extracted;
       }
       
       // 2. Fallback: Try top of file (detached)
       if (description === "No description provided.") {
         const extracted = findComment(0);
-        if (extracted) description = extracted;
+        if (extracted !== null) description = extracted;
       }
 
     } catch (err) {
