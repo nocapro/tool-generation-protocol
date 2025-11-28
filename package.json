@@ -11,7 +11,7 @@
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "pretest": "npm run build",
-    "test": "vitest run --passWithNoTests",
+    "test": "bun test",
     "tgp": "node bin/tgp.js"
   },
   "keywords": [
@@ -41,6 +41,6 @@
     "better-sqlite3": "^9.4.3",
     "eslint": "^9.39.1",
     "tsx": "^4.16.2",
-    "vitest": "^1.6.0"
+    "bun-types": "^1.1.12"
   }
 }
