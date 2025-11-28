@@ -22,6 +22,7 @@ export function createSqlTools(executor: DBExecutor): ToolSet {
     exec_sql: {
       description: 'Executes a raw SQL query against the database. Returns an array of rows.',
       parameters: ExecSqlParams,
+      inputSchema: ExecSqlParams,
       execute: async ({ sql, params }) => {
         return executor(sql, params ?? []);
       },

@@ -12,6 +12,7 @@ export function createValidationTools(kernel: Kernel) {
     check_tool: {
       description: 'Run JIT compilation and AST-based static analysis on a tool.',
       parameters: CheckToolParams,
+      inputSchema: CheckToolParams,
       execute: async ({ path }) => {
         const { allowedImports } = kernel.config;
         try {

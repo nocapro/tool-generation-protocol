@@ -13,6 +13,7 @@ export function createExecTools(kernel: Kernel) {
     exec_tool: {
       description: 'Execute a tool inside the secure Sandbox. Returns { result, logs, error }.',
       parameters: ExecToolParams,
+      inputSchema: ExecToolParams,
       execute: async ({ path, args }) => {
         // Security: Ensure args are serializable (no functions, no circular refs)
         // This prevents the agent from trying to pass internal objects to the guest.
