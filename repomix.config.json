@@ -22,7 +22,7 @@
       "includeDiffs": false
     }
   },
-  "include": [],
+  "include": ["README.md","test-docs/"],
   "ignore": {
     "useGitignore": true,
     "useDefaultPatterns": true,
