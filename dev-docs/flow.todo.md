@@ -23,11 +23,11 @@ we need test cases to verify end to end typesafety like tgpTools from '@tgp/core
 
 and many cases
 
-===
+=== DONE
 
 lets ditch vitest with bun:test for performance
 
-===
+=== 
 
 is the test/e2e/ cases already verify expectations of readme.md
 
@@ -71,7 +71,7 @@ Lets achieve readme.md requirements and expectations compliance and production r
 
 lets bring readme.md into production ready manifestation by developing codebase. I want HOFs, no OOP or classes, no casting as any or unknown. all should follows readme.md requirements
 
-===
+=== DONE
 
 give me diff patches fixing readme.md to achieve the goals and phylosohpy by eliminating inconsistencies
 

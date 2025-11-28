@@ -17,8 +17,6 @@ const projectRoot = isRunningInDist
   ? path.resolve(__dirname, '../../../') 
   : path.resolve(__dirname, '../../');
 
-const distConfigPath = path.join(projectRoot, 'dist/src/config.js').split(path.sep).join('/');
-
 // Track temp dirs for cleanup
 const tempDirs: string[] = [];
 
@@ -71,21 +69,22 @@ export async function createTgpConfig(workDir: string, remoteRepo: string, fileN
     const remotePath = remoteRepo.split(path.sep).join('/');
     const allowedDir = workDir.split(path.sep).join('/');
 
-    // We MUST import from the built distribution because:
-    // 1. 'node bin/tgp.js' does not have a TS loader, so it cannot import .ts files.
-    // 2. The generated config itself must be .js.
-    // 3. The import path inside it must resolve to a .js file that Node can understand.
-    
-    // Verify dist exists
+    // Resolve import source: prefer dist (prod behavior), fallback to source (test/dev behavior)
+    const distConfigPath = path.join(projectRoot, 'dist/src/config.js');
+    let importSource = distConfigPath;
+
     try {
-      await fs.access(path.join(projectRoot, 'dist/src/config.js'));
+      await fs.access(distConfigPath);
     } catch {
-      // Fallback for dev/watch mode if dist doesn't exist (though E2E usually implies build)
-      // console.warn("Warning: dist/src/config.js not found. E2E tests might fail if running via 'node bin/tgp.js'.");
+      // Dist missing, fallback to source
+      importSource = path.join(projectRoot, 'src/config.ts');
     }
+    
+    // Normalize path for string interpolation
+    importSource = importSource.split(path.sep).join('/');
 
     const configContent = `
-import { defineTGPConfig } from '${distConfigPath}';
+import { defineTGPConfig } from '${importSource}';
 
 export default defineTGPConfig({
   rootDir: '${rootDir}',
@@ -111,13 +110,20 @@ export default defineTGPConfig({
  * Executes the TGP CLI binary in the given directory.
  */
 export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
-    return new Promise((resolve) => {
-        // Points to the source bin wrapper, which imports from dist/
-        // Note: 'npm run build' must be run before testing CLI if using the bin script directly.
-        // For development tests, we might want to run with tsx, but here we test the "production" bin behavior logic.
-        const tgpBin = path.join(projectRoot, 'bin/tgp.js');
-        
-        const proc = spawn('node', [tgpBin, ...args], {
+    return new Promise(async (resolve) => {
+        const distCli = path.join(projectRoot, 'dist/cli.js');
+        let cmd = 'node';
+        let script = path.join(projectRoot, 'bin/tgp.js');
+
+        try {
+           await fs.access(distCli);
+        } catch {
+           // Fallback to running source via Bun if build is missing
+           cmd = 'bun';
+           script = path.join(projectRoot, 'src/cli/index.ts');
+        }
+
+        const proc = spawn(cmd, [script, ...args], {
             cwd,
             env: { ...process.env, NODE_ENV: 'test' }
         });
