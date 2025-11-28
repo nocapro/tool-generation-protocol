@@ -39,7 +39,7 @@
       "LICENSE",
       ".gitignore",
       "tsconfig.tsbuildinfo",
-	"test/",
+//	"test/",
 	"test-docs/"
 //        "test/e2e/",
 //	"src"

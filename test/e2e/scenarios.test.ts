@@ -339,7 +339,10 @@ describe('E2E Scenarios', () => {
   it('Scenario 8: CLI Bootstrap', async () => {
     // We assume the project has been built via 'npm run build' for bin/tgp.js to work
     // If not, this test might fail if dist/ doesn't exist.
-    const { code } = await runTgpCli(['init'], tempDir);
+    const { code, stderr } = await runTgpCli(['init'], tempDir);
+    if (code !== 0) {
+      console.error('CLI Bootstrap Failed:', stderr);
+    }
     expect(code).toBe(0);
     
     const configExists = await fs.access(path.join(tempDir, 'tgp.config.ts')).then(() => true).catch(() => false);
