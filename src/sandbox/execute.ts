@@ -1,9 +1,16 @@
-/* eslint-disable no-console */
+ 
 import { Kernel } from '../kernel/core.js';
 import { createSandbox } from './isolate.js';
 import { createSandboxBridge } from './bridge.js';
 import { transformSync } from 'esbuild';
 import * as path from 'path';
+
+export interface ExecutionResult {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  result: any;
+  logs: string[];
+  error?: string;
+}
 
 /**
  * Executes a tool script within a secure sandbox.
@@ -14,17 +21,21 @@ import * as path from 'path';
  * @param filePath Optional path of the tool being executed (used for relative imports)
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<any> {
+export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<ExecutionResult> {
   const sandbox = createSandbox({
     memoryLimitMb: 128,
     timeoutMs: 5000 // 5s hard limit
   });
+  
+  const logs: string[] = [];
 
   try {
     // 1. Setup Bridge
-    // We pass the kernel directly. The bridge uses kernel.db for queries.
-    // We no longer wrap in a transaction (agent manages logic, host runs raw query).
-    const bridge = createSandboxBridge(kernel);
+    // We pass the kernel directly.
+    const bridge = createSandboxBridge({
+      kernel,
+      onLog: (msg) => logs.push(msg)
+    });
 
     // 2. Module Orchestration (The 'require' Bridge)
     // This host function is called synchronously from the Guest.
@@ -62,9 +73,9 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
           path: targetPath,
           dirname: path.dirname(targetPath)
         };
-      } catch (err: any) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
       }
     };
 
@@ -118,11 +129,12 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
     const fullScript = shim + '\n' + code;
 
     const result = await sandbox.compileAndRun(fullScript, context);
-    return result;
+    return { result, logs };
 
   } catch (error) {
-    console.error(`[TGP] Tool Execution Failed:`, error);
-    throw new Error(`Tool execution failed: ${error instanceof Error ? error.message : String(error)}`);
+    const errMsg = error instanceof Error ? error.message : String(error);
+    kernel.logger.error(`Tool Execution Failed:`, error);
+    return { result: null, logs, error: errMsg };
   } finally {
     sandbox.dispose();
   }

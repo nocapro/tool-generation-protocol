@@ -1,0 +1,610 @@
+uuid: 4f1352a1-1284-48f0-b8c7-43a9f7e8a342
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T01:17:24.531Z'
+gitCommitMsg: >-
+  fix: resolve eslint errors and warnings
+
+  - Replace logical OR with nullish coalescing for safe defaults in kernel core
+  and git. - Enforce strict boolean checks in execution tools. - Refactor catch
+  blocks in sandbox to avoid 'any' and use type narrowing. - Suppress
+  unavoidable 'any' for generic execution results.
+promptSummary: >-
+  Fixed linting errors and warnings across the codebase, including replacing
+  `||` with `??` for default values, strict boolean checks, and removing `any`
+  usage in catch blocks.
+reasoning:
+  - >-
+    To resolve the linting errors and warnings, I will apply standard TypeScript
+    fixes:
+  - >-
+    1.  **Use `??` instead of `||`**: This fixes "Prefer nullish coalescing
+    operator" and "Unexpected nullable string value in conditional" (by avoiding
+    implicit truthiness checks on strings).
+  - >-
+    2.  **Explicit Boolean Checks**: Change `if (error)` to `if (error !==
+    undefined)` to satisfy strict boolean expressions.
+  - >-
+    3.  **Type Safety**: Remove `any` in `catch` blocks and use `unknown` with
+    narrowing. Explicitly suppress `any` where unavoidable (like the generic
+    `result` from the sandbox).
+  - Here are the changes for each file.
+  - '### 1. Fix `src/kernel/core.ts`'
+  - Replace logical OR (`||`) with nullish coalescing (`??`) for default values.
+  - '### 2. Fix `src/kernel/git.ts`'
+  - >-
+    Replace `||` with `??` when providing a default value for `currentBranch`,
+    which avoids the "nullable string in conditional" error.
+  - '### 3. Fix `src/tools/exec.ts`'
+  - Explicitly check `error !== undefined` instead of relying on truthiness.
+  - '### 4. Fix `src/sandbox/execute.ts`'
+  - 'Address `any` warnings:'
+  - 1.  Suppress explicit `any` for `result` (generic return type).
+  - >-
+    2.  Refactor `catch (err: any)` to `catch (err: unknown)` and properly
+    narrow the type.
+operations:
+  - type: write
+    path: src/kernel/core.ts
+    content: |
+      --- src/kernel/core.ts
+      +++ src/kernel/core.ts
+      @@ -44,8 +44,8 @@
+       export function createKernel(opts: KernelOptions): Kernel {
+         const { config, vfs, env } = opts;
+      -  const logger = opts.logger || defaultLogger;
+      +  const logger = opts.logger ?? defaultLogger;
+         
+         const git = createGitBackend(env, config, logger);
+      -  const db = opts.db || createDBBackend(config); 
+      +  const db = opts.db ?? createDBBackend(config); 
+         const registry = createRegistry(vfs);
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/git.ts
+    content: >
+      --- src/kernel/git.ts
+
+      +++ src/kernel/git.ts
+
+      @@ -93,7 +93,7 @@
+             
+             // 1. Get current branch
+      -      const currentBranch = await git.currentBranch({ ...gitOpts }) ||
+      'HEAD';
+
+      +      const currentBranch = await git.currentBranch({ ...gitOpts }) ??
+      'HEAD';
+             
+             // 2. If we are on the protected branch (main/master), we must fork
+             let targetBranch = currentBranch;
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tools/exec.ts
+    content: |
+      --- src/tools/exec.ts
+      +++ src/tools/exec.ts
+      @@ -28,7 +28,7 @@
+               const { result, logs, error } = await executeTool(kernel, code, args, path);
+               
+      -        if (error) {
+      +        if (error !== undefined) {
+                  return { success: false, error, logs };
+               }
+               return { success: true, result, logs };
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/execute.ts
+    content: >
+      --- src/sandbox/execute.ts
+
+      +++ src/sandbox/execute.ts
+
+      @@ -7,7 +7,8 @@
+       
+       export interface ExecutionResult {
+      -  result: any;
+
+      +  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+      +  result: any;
+         logs: string[];
+         error?: string;
+       }
+      @@ -73,9 +74,9 @@
+                 dirname: path.dirname(targetPath)
+               };
+      -      } catch (err: any) {
+
+      -        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+      -        throw new Error(`Failed to load module '${importId}' from
+      '${baseDir}': ${err.message}`);
+
+      +      } catch (err: unknown) {
+
+      +        const msg = err instanceof Error ? err.message : String(err);
+
+      +        throw new Error(`Failed to load module '${importId}' from
+      '${baseDir}': ${msg}`);
+             }
+           };
+    patchStrategy: standard-diff
+snapshot:
+  src/kernel/git.ts: >2
+     
+    import * as git from 'isomorphic-git';
+
+    import { TGPConfig, Logger } from '../types.js';
+
+    import * as path from 'path';
+
+
+    /**
+     * The Git Interface required by the Kernel.
+     * We rely on the 'fs' interface compatible with isomorphic-git.
+     */
+    export interface GitBackend {
+      hydrate(): Promise<void>;
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    export interface GitDependencies {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http: any;
+    }
+
+
+    /**
+     * Strategy interface for persisting changes to the upstream repository.
+     */
+    interface GitWriteStrategy {
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    /**
+     * Factory to create the Git Backend based on configuration.
+     */
+    export function createGitBackend(deps: GitDependencies, config: TGPConfig,
+    logger: Logger): GitBackend {
+      const dir = config.rootDir;
+      const { repo, auth, branch, writeStrategy } = config.git;
+      const { fs, http } = deps;
+
+      // Configuration for isomorphic-git
+      const gitOpts = {
+        fs,
+        dir,
+        http,
+        onAuth: () => ({ username: auth.token }),
+      };
+
+      const author = {
+        name: auth.user,
+        email: auth.email,
+      };
+
+      // --- Strategy Implementations ---
+
+      const directStrategy: GitWriteStrategy = {
+        async persist(message: string, filesToAdd: string[]) {
+          if (filesToAdd.length === 0) return;
+
+          // 1. Add files
+          for (const filepath of filesToAdd) {
+            try {
+               // check if file exists before adding
+               await git.add({ ...gitOpts, filepath });
+            } catch (e) {
+               logger.warn(`Git Add failed for ${filepath}`, e);
+               throw new Error(`Failed to stage file ${filepath}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+
+          try {
+            // 2. Commit
+            const sha = await git.commit({
+              ...gitOpts,
+              message,
+              author,
+            });
+            logger.info(`Committed ${sha.slice(0, 7)}: ${message}`);
+
+            // 3. Push
+            logger.info(`Pushing to ${branch}...`);
+            await git.push({
+              ...gitOpts,
+              remote: 'origin',
+              ref: branch,
+            });
+          } catch (e) {
+            logger.error(`Git Commit/Push failed:`, e);
+            throw new Error(`Failed to persist changes to Git: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      };
+
+      const prStrategy: GitWriteStrategy = {
+        async persist(message: string, files: string[]) {
+          if (files.length === 0) return;
+          
+          // 1. Get current branch
+          const currentBranch = await git.currentBranch({ ...gitOpts }) || 'HEAD';
+          
+          // 2. If we are on the protected branch (main/master), we must fork
+          let targetBranch = currentBranch;
+          
+          if (currentBranch === branch) {
+             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+             // Sanitize message for branch name
+             const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+             targetBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+             
+             logger.info(`Switching to new branch: ${targetBranch}`);
+             
+             await git.branch({ ...gitOpts, ref: targetBranch });
+             await git.checkout({ ...gitOpts, ref: targetBranch });
+          } else {
+             logger.info(`Already on feature branch: ${targetBranch}`);
+          }
+
+          for (const filepath of files) {
+            await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+          }
+
+          await git.commit({
+            ...gitOpts,
+            message: message,
+            author,
+          });
+          
+          logger.info(`Changes committed to ${targetBranch}.`);
+          
+          // Try to push the feature branch if auth is present
+          try {
+              await git.push({
+                ...gitOpts,
+                remote: 'origin',
+                ref: targetBranch,
+              });
+              logger.info(`Pushed ${targetBranch} to origin.`);
+          } catch (e) {
+              logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+          }
+        }
+      };
+
+      // Select Strategy
+      const strategy = writeStrategy === 'pr' ? prStrategy : directStrategy;
+
+      return {
+        async hydrate() {
+          try {
+            // 1. Check if repo exists locally
+            const gitDirExists = (await fs.promises.stat(path.join(dir, '.git'))
+              .then(() => true)
+              .catch(() => false)) as boolean;
+
+            if (!gitDirExists) {
+              // Clone
+              logger.info(`Cloning ${repo} into ${dir}...`);
+              await git.clone({
+                ...gitOpts,
+                url: `https://github.com/${repo}.git`,
+                ref: branch,
+                singleBranch: true,
+                depth: 1,
+              });
+            } else {
+              // Pull
+              logger.info(`Pulling latest from ${repo}...`);
+              await git.pull({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+                singleBranch: true,
+                author,
+              });
+            }
+          } catch (error) {
+            logger.error(`Git Hydration Failed:`, error);
+            // We might want to throw here to stop boot, but for now we log.
+            throw error;
+          }
+        },
+
+        async persist(message: string, filesToAdd: string[]) {
+          return strategy.persist(message, filesToAdd);
+        }
+      };
+    }
+  src/kernel/core.ts: |-
+    /* eslint-disable no-console */
+    import { TGPConfig, Logger } from '../types.js';
+    import { VFSAdapter } from '../vfs/types.js';
+    import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+    import { createDBBackend, DBBackend } from './db.js';
+    import { createRegistry, Registry } from './registry.js';
+
+    // We inject the platform-specific environment dependencies here.
+    // This allows the Kernel to run in Node, Edge, or Browser environments.
+    export interface KernelEnvironment extends GitDependencies {
+      // We can extend this if Kernel needs more platform specific components later
+    }
+
+    export interface KernelOptions {
+      config: TGPConfig;
+      vfs: VFSAdapter; 
+      env: KernelEnvironment;
+      logger?: Logger;
+      db?: DBBackend;
+    }
+
+    export interface Kernel {
+      boot(): Promise<void>;
+      shutdown(): Promise<void>;
+      config: TGPConfig;
+      vfs: VFSAdapter;
+      git: GitBackend;
+      db: DBBackend;
+      registry: Registry;
+      logger: Logger;
+    }
+
+    const defaultLogger: Logger = {
+      debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
+      info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
+      warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
+      error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
+    };
+
+    /**
+     * Factory to create a TGP Kernel.
+     * This wires up the configuration, the filesystem, and the git backend.
+     */
+    export function createKernel(opts: KernelOptions): Kernel {
+      const { config, vfs, env } = opts;
+      const logger = opts.logger || defaultLogger;
+      
+      const git = createGitBackend(env, config, logger);
+      const db = opts.db || createDBBackend(config); 
+      const registry = createRegistry(vfs);
+
+      let isBooted = false;
+
+      return {
+        config,
+        vfs,
+        git,
+        db,
+        registry,
+        logger,
+
+        async boot() {
+          if (isBooted) return;
+          logger.info(`Kernel booting...`);
+          
+          try {
+            // Hydrate the filesystem from Git
+            await git.hydrate().catch(err => {
+              logger.error(`Git hydration failed.`, err);
+              throw err;
+            });
+            
+            // Hydrate registry from meta.json
+            await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
+            
+            isBooted = true;
+            logger.info(`Kernel ready.`);
+          } catch (error) {
+            logger.error(`Boot failed:`, error);
+            throw error;
+          }
+        },
+
+        async shutdown() {
+          logger.info(`Kernel shutting down...`);
+          // Cleanup tasks (close db connections, etc) can go here
+          isBooted = false;
+        }
+      };
+    }
+  src/tools/exec.ts: |-
+    import { z } from 'zod';
+    import { Kernel } from '../kernel/core.js';
+    import { executeTool } from '../sandbox/execute.js';
+    import { AgentTool } from './types.js';
+
+    export const ExecToolParams = z.object({
+      path: z.string().describe('The relative path of the tool to execute'),
+      args: z.record(z.any()).describe('The arguments to pass to the tool'),
+    });
+
+    export function createExecTools(kernel: Kernel) {
+      return {
+        exec_tool: {
+          description: 'Execute a tool inside the secure Sandbox. Returns { result, logs, error }.',
+          parameters: ExecToolParams,
+          execute: async ({ path, args }) => {
+            // Security: Ensure args are serializable (no functions, no circular refs)
+            // This prevents the agent from trying to pass internal objects to the guest.
+            try {
+              JSON.stringify(args);
+            } catch {
+              throw new Error("Arguments must be serializable JSON.");
+            }
+
+            const code = await kernel.vfs.readFile(path);
+            
+            // The sandbox takes care of safety, timeout, and memory limits
+            const { result, logs, error } = await executeTool(kernel, code, args, path);
+            
+            if (error) {
+               return { success: false, error, logs };
+            }
+            return { success: true, result, logs };
+          },
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as AgentTool<typeof ExecToolParams, any>,
+      };
+    }
+  src/sandbox/execute.ts: >2-
+     
+    import { Kernel } from '../kernel/core.js';
+
+    import { createSandbox } from './isolate.js';
+
+    import { createSandboxBridge } from './bridge.js';
+
+    import { transformSync } from 'esbuild';
+
+    import * as path from 'path';
+
+
+    export interface ExecutionResult {
+      result: any;
+      logs: string[];
+      error?: string;
+    }
+
+
+    /**
+     * Executes a tool script within a secure sandbox.
+     * 
+     * @param kernel The TGP Kernel instance
+     * @param code The TypeScript source code of the tool
+     * @param args The arguments object to pass to the tool (as 'args' global)
+     * @param filePath Optional path of the tool being executed (used for relative imports)
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+
+    export async function executeTool(kernel: Kernel, code: string, args:
+    Record<string, any> = {}, filePath: string = 'root.ts'):
+    Promise<ExecutionResult> {
+      const sandbox = createSandbox({
+        memoryLimitMb: 128,
+        timeoutMs: 5000 // 5s hard limit
+      });
+      
+      const logs: string[] = [];
+
+      try {
+        // 1. Setup Bridge
+        // We pass the kernel directly.
+        const bridge = createSandboxBridge({
+          kernel,
+          onLog: (msg) => logs.push(msg)
+        });
+
+        // 2. Module Orchestration (The 'require' Bridge)
+        // This host function is called synchronously from the Guest.
+        const __tgp_load_module = (baseDir: string, importId: string) => {
+          // Security: Ensure we don't traverse out of sandbox (handled by VFS)
+          // Resolution Logic:
+          // - Starts with '.': Relative to baseDir
+          // - Otherwise: Absolute from root (or relative to root)
+          
+          let targetPath = '';
+          if (importId.startsWith('.')) {
+            targetPath = path.join(baseDir, importId);
+          } else {
+            targetPath = importId;
+          }
+
+          // Normalize extension (assume .ts if missing)
+          if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
+              // Check if it exists with .ts
+              // We can't easily check existence sync in VFS without try/catch read
+              // Let's assume .ts for TGP tools
+              targetPath += '.ts';
+          }
+
+          try {
+            const raw = kernel.vfs.readSync(targetPath);
+            const transformed = transformSync(raw, {
+              loader: 'ts',
+              format: 'cjs',
+              target: 'es2020',
+            });
+            
+            return {
+              code: transformed.code,
+              path: targetPath,
+              dirname: path.dirname(targetPath)
+            };
+          } catch (err: any) {
+             
+            throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${err.message}`);
+          }
+        };
+
+        // 3. Shim Injection
+        // We prepend a CommonJS loader shim to the user code.
+        // This allows 'require' to work by calling back to __tgp_load_module.
+        const shim = `
+          const __moduleCache = {};
+
+          function __makeRequire(baseDir) {
+            return function(id) {
+              // Check Cache (Global)
+              // In a real system, cache keys should be absolute paths.
+              // Here we rely on the host to return consistent paths if we wanted perfect caching.
+              // For now, we skip cache or use simple ID (flawed for relatives).
+              // Let's implement correct caching by asking Host for absolute path first?
+              // Simpler: Just reload for now (Stateless).
+              
+              // Call Host Sync
+              const mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+              
+              if (__moduleCache[mod.path]) return __moduleCache[mod.path];
+
+              // Wrap in CommonJS Function
+              const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+              const newModule = { exports: {} };
+              
+              // Execute
+              fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+              
+              __moduleCache[mod.path] = newModule.exports;
+              return newModule.exports;
+            };
+          }
+          
+          // Setup Global Require for the entry point
+          // We assume the entry point is at 'filePath'
+          global.require = __makeRequire('${path.dirname(filePath)}');
+        `;
+
+        const context = {
+          ...bridge, // { tgp: { ... } }
+          args,
+          __tgp_load_module // Injected as Reference
+        };
+
+        // Combine Shim + User Code
+        // We wrap user code to provide top-level CommonJS variables if needed, 
+        // but standard TGP tools are just scripts. 
+        // We append the code. The 'shim' sets up 'global.require'.
+        const fullScript = shim + '\n' + code;
+
+        const result = await sandbox.compileAndRun(fullScript, context);
+        return { result, logs };
+
+      } catch (error) {
+        const errMsg = error instanceof Error ? error.message : String(error);
+        kernel.logger.error(`Tool Execution Failed:`, error);
+        return { result: null, logs, error: errMsg };
+      } finally {
+        sandbox.dispose();
+      }
+    }
+approved: true
+linesAdded: 8
+linesRemoved: 7
+linesDifference: 15
+gitCommittedAt: null
+status: committed
+id: 29

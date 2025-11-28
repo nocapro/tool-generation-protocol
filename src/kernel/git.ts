@@ -1,6 +1,6 @@
-/* eslint-disable no-console */
+ 
 import * as git from 'isomorphic-git';
-import { TGPConfig } from '../types.js';
+import { TGPConfig, Logger } from '../types.js';
 import * as path from 'path';
 
 /**
@@ -29,7 +29,7 @@ interface GitWriteStrategy {
 /**
  * Factory to create the Git Backend based on configuration.
  */
-export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitBackend {
+export function createGitBackend(deps: GitDependencies, config: TGPConfig, logger: Logger): GitBackend {
   const dir = config.rootDir;
   const { repo, auth, branch, writeStrategy } = config.git;
   const { fs, http } = deps;
@@ -59,7 +59,7 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitB
            // check if file exists before adding
            await git.add({ ...gitOpts, filepath });
         } catch (e) {
-           console.warn(`[TGP] Git Add failed for ${filepath}`, e);
+           logger.warn(`Git Add failed for ${filepath}`, e);
            throw new Error(`Failed to stage file ${filepath}: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
@@ -71,17 +71,17 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitB
           message,
           author,
         });
-        console.log(`[TGP] Committed ${sha.slice(0, 7)}: ${message}`);
+        logger.info(`Committed ${sha.slice(0, 7)}: ${message}`);
 
         // 3. Push
-        console.log(`[TGP] Pushing to ${branch}...`);
+        logger.info(`Pushing to ${branch}...`);
         await git.push({
           ...gitOpts,
           remote: 'origin',
           ref: branch,
         });
       } catch (e) {
-        console.error(`[TGP] Git Commit/Push failed:`, e);
+        logger.error(`Git Commit/Push failed:`, e);
         throw new Error(`Failed to persist changes to Git: ${e instanceof Error ? e.message : String(e)}`);
       }
     }
@@ -89,26 +89,51 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitB
 
   const prStrategy: GitWriteStrategy = {
     async persist(message: string, files: string[]) {
-      // TODO: Implement PR creation logic for 'pr' strategy using Octokit or similar.
-      // For now, we fallback to direct commit but without push (or simulate it), 
-      // OR we just warn and do nothing to prevent unauthorized pushes in prod.
-      
-      console.warn(`[TGP] 'pr' Strategy selected but not fully implemented. Committing locally.`);
-      
-      // We reuse the add/commit logic but skip the push
       if (files.length === 0) return;
+      
+      // 1. Get current branch
+      const currentBranch = await git.currentBranch({ ...gitOpts }) ?? 'HEAD';
+      
+      // 2. If we are on the protected branch (main/master), we must fork
+      let targetBranch = currentBranch;
+      
+      if (currentBranch === branch) {
+         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+         // Sanitize message for branch name
+         const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+         targetBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+         
+         logger.info(`Switching to new branch: ${targetBranch}`);
+         
+         await git.branch({ ...gitOpts, ref: targetBranch });
+         await git.checkout({ ...gitOpts, ref: targetBranch });
+      } else {
+         logger.info(`Already on feature branch: ${targetBranch}`);
+      }
 
       for (const filepath of files) {
-        await git.add({ ...gitOpts, filepath }).catch(e => console.warn(`[TGP] Git Add failed ${filepath}`, e));
+        await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
       }
 
       await git.commit({
         ...gitOpts,
-        message: `[PR-Draft] ${message}`,
+        message: message,
         author,
       });
       
-      console.log(`[TGP] Changes committed locally. PR logic pending.`);
+      logger.info(`Changes committed to ${targetBranch}.`);
+      
+      // Try to push the feature branch if auth is present
+      try {
+          await git.push({
+            ...gitOpts,
+            remote: 'origin',
+            ref: targetBranch,
+          });
+          logger.info(`Pushed ${targetBranch} to origin.`);
+      } catch (e) {
+          logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+      }
     }
   };
 
@@ -125,7 +150,7 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitB
 
         if (!gitDirExists) {
           // Clone
-          console.log(`[TGP] Cloning ${repo} into ${dir}...`);
+          logger.info(`Cloning ${repo} into ${dir}...`);
           await git.clone({
             ...gitOpts,
             url: `https://github.com/${repo}.git`,
@@ -135,7 +160,7 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitB
           });
         } else {
           // Pull
-          console.log(`[TGP] Pulling latest from ${repo}...`);
+          logger.info(`Pulling latest from ${repo}...`);
           await git.pull({
             ...gitOpts,
             remote: 'origin',
@@ -145,7 +170,7 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig): GitB
           });
         }
       } catch (error) {
-        console.error(`[TGP] Git Hydration Failed:`, error);
+        logger.error(`Git Hydration Failed:`, error);
         // We might want to throw here to stop boot, but for now we log.
         throw error;
       }
