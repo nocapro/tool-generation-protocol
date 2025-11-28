@@ -183,9 +183,13 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
       ${shim}
 
       // Setup CJS Environment for the entry point
-      global.exports = {};
-      global.module = { exports: global.exports };
-      global.require = __makeRequire('${path.dirname(filePath)}');
+      var exports = {};
+      var module = { exports: exports };
+      var require = __makeRequire('${path.dirname(filePath)}');
+
+      global.exports = exports;
+      global.module = module;
+      global.require = require;
 
       // Execute User Code
       (function() {
