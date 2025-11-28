@@ -11,7 +11,7 @@
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "pretest": "npm run build",
-    "test": "bun test",
+    "test": "bun test test/",
     "tgp": "node bin/tgp.js"
   },
   "keywords": [

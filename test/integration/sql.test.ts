@@ -20,8 +20,7 @@ interface TestDB {
 }
 
 async function createTestDB(): Promise<TestDB> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const isBun = typeof process !== 'undefined' && (process.versions as any).bun;
+  const isBun = typeof Bun !== 'undefined';
 
   if (isBun) {
     // Dynamic import to avoid build-time errors/resolutions in Node

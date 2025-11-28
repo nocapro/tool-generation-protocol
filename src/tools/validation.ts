@@ -88,8 +88,8 @@ export function createValidationTools(kernel: Kernel) {
             }
 
             // [Standard 1] No Magic Numbers
-            if (ts.isNumericLiteral(node)) {
-                const text = node.text;
+            if (node.kind === ts.SyntaxKind.NumericLiteral) {
+                const text = (node as ts.NumericLiteral).text;
                 const val = Number(text); // Handle hex, etc.
                 const allowed = [0, 1, 2, -1, 100, 1000];
                 if (!isNaN(val) && !allowed.includes(val)) {

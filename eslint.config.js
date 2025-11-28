@@ -13,6 +13,7 @@ export default [
       },
       globals: {
         console: 'readonly',
+        Bun: 'readonly',
         process: 'readonly',
         Buffer: 'readonly',
         __dirname: 'readonly',
