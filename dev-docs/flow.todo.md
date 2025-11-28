@@ -1,3 +1,5 @@
+lets ditch vitest with bun:test for performance
+
 ===
 
 is the test/e2e/ cases already verify expectations of readme.md

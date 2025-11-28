@@ -36,7 +36,8 @@
       "dev-docs",
       "LICENSE",
       ".gitignore",
-      "tsconfig.tsbuildinfo"
+      "tsconfig.tsbuildinfo",
+        "test/e2e/"
     ]
   },
   "security": {

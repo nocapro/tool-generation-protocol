@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { AgentTool, ToolSet } from './types.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type DBExecutor = (sql: string, params: any[]) => Promise<any[]>;
+export type DBExecutor = (sql: string, params: any[]) => Promise<any>;
 
 export const ExecSqlParams = z.object({
   sql: z.string().describe('The raw SQL query to execute.'),
@@ -26,6 +26,6 @@ export function createSqlTools(executor: DBExecutor): ToolSet {
         return executor(sql, params ?? []);
       },
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as AgentTool<typeof ExecSqlParams, any[]>,
+    } as AgentTool<typeof ExecSqlParams, any>,
   };
 }

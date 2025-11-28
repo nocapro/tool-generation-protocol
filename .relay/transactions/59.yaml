@@ -1,0 +1,235 @@
+uuid: c8f3a9d2-1b4e-4e5f-9a1b-7c8d9e0f1a2b
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T07:36:19.391Z'
+gitCommitMsg: >-
+  fix(types): relax DBExecutor return type and harden test teardown
+
+  - Changed DBExecutor return type from any[] to any to support INSERT/UPDATE
+  results. - Added null check for db in sql.test.ts afterEach to prevent
+  undefined access on failure.
+promptSummary: >-
+  Relaxed DBExecutor return types to support non-array results and added null
+  checks to SQL test teardown to prevent crashes on setup failure.
+reasoning:
+  - >-
+    Step 1: Relax the `DBExecutor` return type in `src/tools/sql.ts` to allow
+    returning non-array results (like `RunResult` from `better-sqlite3`). This
+    fixes the TypeScript errors in `test/integration/sql.test.ts` where the mock
+    executor returns an object for write operations.
+  - >-
+    Step 2: Update `test/integration/sql.test.ts` to prevent the test runner
+    from crashing during teardown if the setup failed (e.g., due to native
+    module issues). We add a check to ensure `db` exists before calling
+    `close()`.
+  - >-
+    Step 3: I am unable to apply the fix for `test/e2e/scenarios.test.ts` as the
+    file was not provided in the input context. I have addressed the SQL type
+    errors and the integration test teardown crash, which were the primary
+    blockers visible in the provided files.
+operations:
+  - type: write
+    path: src/tools/sql.ts
+    content: |
+      --- src/tools/sql.ts
+      +++ src/tools/sql.ts
+      @@ -4,7 +4,7 @@
+       
+       // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      -export type DBExecutor = (sql: string, params: any[]) => Promise<any[]>;
+      +export type DBExecutor = (sql: string, params: any[]) => Promise<any>;
+       
+       export const ExecSqlParams = z.object({
+         sql: z.string().describe('The raw SQL query to execute.'),
+      @@ -25,6 +25,6 @@
+               return executor(sql, params ?? []);
+             },
+           // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      -    } as AgentTool<typeof ExecSqlParams, any[]>,
+      +    } as AgentTool<typeof ExecSqlParams, any>,
+         };
+       }
+    patchStrategy: standard-diff
+  - type: write
+    path: test/integration/sql.test.ts
+    content: |
+      --- test/integration/sql.test.ts
+      +++ test/integration/sql.test.ts
+      @@ -23,7 +23,7 @@
+       
+         afterEach(async () => {
+      -    db.close();
+      +    if (db) db.close();
+           await cleanupDir(tempDir);
+           await cleanupDir(remoteRepo);
+         });
+    patchStrategy: standard-diff
+snapshot:
+  src/tools/sql.ts: |-
+    import { z } from 'zod';
+    import { AgentTool, ToolSet } from './types.js';
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    export type DBExecutor = (sql: string, params: any[]) => Promise<any[]>;
+
+    export const ExecSqlParams = z.object({
+      sql: z.string().describe('The raw SQL query to execute.'),
+      params: z.array(z.any()).optional().describe('An array of parameters to substitute into the query.'),
+    });
+
+    /**
+     * Creates a ToolSet containing the `exec_sql` tool.
+     * This function allows the host application to inject its own database connection
+     * and execution logic into the TGP agent.
+     *
+     * @param executor A function that takes a SQL string and parameters and returns the result.
+     * @returns A ToolSet containing the `exec_sql` tool.
+     */
+    export function createSqlTools(executor: DBExecutor): ToolSet {
+      return {
+        exec_sql: {
+          description: 'Executes a raw SQL query against the database. Returns an array of rows.',
+          parameters: ExecSqlParams,
+          execute: async ({ sql, params }) => {
+            return executor(sql, params ?? []);
+          },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as AgentTool<typeof ExecSqlParams, any[]>,
+      };
+    }
+  test/integration/sql.test.ts: >-
+    import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+    import Database from 'better-sqlite3';
+
+    import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from
+    '../e2e/utils.js';
+
+    import { TGP } from '../../src/tgp.js';
+
+    import { tgpTools, createSqlTools } from '../../src/tools/index.js';
+
+
+    describe('Integration: SQL Adapter (Real SQLite)', () => {
+      let tempDir: string;
+      let remoteRepo: string;
+      let db: Database.Database;
+
+      beforeEach(async () => {
+        tempDir = await createTempDir('tgp-int-sql-');
+        remoteRepo = await createTempDir('tgp-remote-');
+        await initBareRepo(remoteRepo);
+        
+        // Setup Real SQLite DB (In-memory for speed/isolation)
+        db = new Database(':memory:');
+        db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');
+        db.exec("INSERT INTO users (name) VALUES ('Alice')");
+        db.exec("INSERT INTO users (name) VALUES ('Bob')");
+      });
+
+      afterEach(async () => {
+        db.close();
+        await cleanupDir(tempDir);
+        await cleanupDir(remoteRepo);
+      });
+
+      it('Query Execution: Tool can query real database', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        
+        // Executor that bridges TGP -> Real DB
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const executor = async (sql: string, params: any[]) => {
+          const stmt = db.prepare(sql);
+          if (sql.trim().toLowerCase().startsWith('select')) {
+            return stmt.all(params);
+          }
+          return stmt.run(params);
+        };
+
+        const kernel = new TGP({ 
+          configFile: configPath,
+          sandboxAPI: { exec_sql: executor } // Inject for internal usage if needed
+        });
+        await kernel.boot();
+
+        // Compose tools
+        const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+        const toolName = 'tools/get_users.ts';
+        await tools.write_file.execute({
+          path: toolName,
+          content: `
+            export default async function() {
+              return await tgp.exec_sql('SELECT name FROM users ORDER BY name', []);
+            }
+          `
+        });
+
+        const res = await tools.exec_tool.execute({ path: toolName, args: {} });
+        
+        expect(res.success).toBe(true);
+        expect(res.result).toEqual([{ name: 'Alice' }, { name: 'Bob' }]);
+      });
+
+      it('Transaction Rollback: Host can rollback if tool throws', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        
+        // Executor
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const executor = async (sql: string, params: any[]) => {
+          return db.prepare(sql).run(params);
+        };
+
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+        // Create a buggy tool that writes then crashes
+        const buggyTool = 'tools/buggy_insert.ts';
+        await tools.write_file.execute({
+          path: buggyTool,
+          content: `
+            export default async function() {
+               // 1. Write
+               await tgp.exec_sql("INSERT INTO users (name) VALUES ('Charlie')", []);
+               // 2. Crash
+               throw new Error('Logic Bomb');
+            }
+          `
+        });
+
+        // Emulate Host Application Transaction Wrapper
+        // Since better-sqlite3 is synchronous, we manage transaction via raw SQL commands
+        // surrounding the async tool execution.
+        
+        db.exec('BEGIN');
+        let errorCaught = false;
+        
+        try {
+          const res = await tools.exec_tool.execute({ path: buggyTool, args: {} });
+          if (!res.success) {
+            throw new Error(res.error);
+          }
+          db.exec('COMMIT');
+        } catch (e) {
+          errorCaught = true;
+          db.exec('ROLLBACK');
+        }
+
+        expect(errorCaught).toBe(true);
+
+        // Verify 'Charlie' was NOT added
+        const rows = db.prepare('SELECT * FROM users WHERE name = ?').all('Charlie');
+        expect(rows.length).toBe(0);
+        
+        // Verify existing data remains
+        const count = db.prepare('SELECT count(*) as c FROM users').get() as { c: number };
+        expect(count.c).toBe(2);
+      });
+    });
+approved: true
+linesAdded: 3
+linesRemoved: 3
+linesDifference: 6
+gitCommittedAt: null
+status: committed
+id: 59
