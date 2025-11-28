@@ -41,13 +41,12 @@ describe('Integration: Vercel AI SDK Compatibility', () => {
         rawCall: { raw: 'call' },
         finishReason: 'tool-calls',
         usage: { promptTokens: 10, completionTokens: 10 },
-        toolCalls: [
+        content: [
           {
-            toolCallType: 'function',
+            type: 'tool-call',
             toolCallId: 'call_1',
             toolName: 'write_file',
-            // Vercel SDK expects args as a JSON string
-            args: JSON.stringify({ path: 'tools/hello-vercel.ts', content: 'export default "compat"' }),
+            args: { path: 'tools/hello-vercel.ts', content: 'export default "compat"' },
           }
         ]
       }),
@@ -63,7 +62,7 @@ describe('Integration: Vercel AI SDK Compatibility', () => {
           rawCall: { raw: 'response' },
           finishReason: 'stop',
           usage: { promptTokens: 20, completionTokens: 5 },
-          text: 'File created successfully.'
+          content: [{ type: 'text', text: 'File created successfully.' }]
         };
       }
     ]);

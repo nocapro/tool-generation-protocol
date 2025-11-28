@@ -55,138 +55,6 @@ tsconfig.json
 
 # Files
 
-## File: test/fixtures/fake-model.ts
-````typescript
-import { 
-  LanguageModelV1, 
-  LanguageModelV1CallResult, 
-  LanguageModelV1CallOptions 
-} from 'ai';
-
-/**
- * A deterministic Mock LLM that implements the Vercel AI SDK LanguageModelV1 interface.
- * Used to verify tool execution without network calls or spies.
- */
-export class MockLanguageModelV1 implements LanguageModelV1 {
-  readonly specificationVersion = 'v1';
-  readonly provider = 'tgp-mock';
-  readonly modelId = 'mock-v1';
-  readonly defaultObjectGenerationMode = 'json';
-  
-  constructor(private queue: Array<(args: LanguageModelV1CallOptions) => LanguageModelV1CallResult>) {}
-
-  async doGenerate(options: LanguageModelV1CallOptions): Promise<LanguageModelV1CallResult> {
-    const next = this.queue.shift();
-    if (!next) {
-      throw new Error(`MockLanguageModelV1: Unexpected call to doGenerate. History: ${JSON.stringify(options.prompt, null, 2)}`);
-    }
-    return next(options);
-  }
-
-  async doStream(): Promise<any> {
-    throw new Error('MockLanguageModelV1: doStream is not implemented for this test.');
-  }
-}
-````
-
-## File: test/integration/vercel.test.ts
-````typescript
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import * as fs from 'fs/promises';
-import * as path from 'path';
-import { generateText } from 'ai';
-import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
-import { TGP } from '../../src/tgp.js';
-import { tgpTools } from '../../src/tools/index.js';
-import { MockLanguageModelV1 } from '../fixtures/fake-model.js';
-
-describe('Integration: Vercel AI SDK Compatibility', () => {
-  let tempDir: string;
-  let remoteRepo: string;
-
-  beforeEach(async () => {
-    tempDir = await createTempDir('tgp-int-vercel-');
-    remoteRepo = await createTempDir('tgp-remote-');
-    await initBareRepo(remoteRepo);
-  });
-
-  afterEach(async () => {
-    await cleanupDir(tempDir);
-    await cleanupDir(remoteRepo);
-  });
-
-  it('End-to-End: generateText executes TGP tools correctly', async () => {
-    // 1. Setup Kernel
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-
-    // 2. Prepare Toolset
-    const tools = tgpTools(kernel);
-
-    // 3. Setup Fake Model Interaction
-    // The interaction simulates:
-    // Turn 1: Model receives user prompt -> Calls 'write_file'
-    // Turn 2: Model receives tool result -> Returns final text
-    const mockModel = new MockLanguageModelV1([
-      // Response 1: Request Tool Execution
-      () => ({
-        rawCall: { raw: 'call' },
-        finishReason: 'tool-calls',
-        usage: { promptTokens: 10, completionTokens: 10 },
-        toolCalls: [
-          {
-            toolCallType: 'function',
-            toolCallId: 'call_1',
-            toolName: 'write_file',
-            // Vercel SDK expects args as a JSON string
-            args: JSON.stringify({ path: 'tools/hello-vercel.ts', content: 'export default "compat"' }),
-          }
-        ]
-      }),
-      // Response 2: Final Summary
-      (opts) => {
-        // Assert that the SDK fed the tool result back to the model
-        const lastMsg = opts.prompt[opts.prompt.length - 1];
-        if (lastMsg.role !== 'tool' || lastMsg.content[0].type !== 'tool-result') {
-          throw new Error('Expected last message to be a tool result');
-        }
-        
-        return {
-          rawCall: { raw: 'response' },
-          finishReason: 'stop',
-          usage: { promptTokens: 20, completionTokens: 5 },
-          text: 'File created successfully.'
-        };
-      }
-    ]);
-
-    // 4. Execute using Vercel AI SDK
-    const result = await generateText({
-      model: mockModel,
-      tools: tools, // Type Check: This must compile
-      maxSteps: 2,  // Allow tool roundtrips
-      prompt: 'Create a file named tools/hello-vercel.ts',
-    });
-
-    // 5. Verify Results
-    expect(result.text).toBe('File created successfully.');
-    expect(result.toolCalls.length).toBe(1);
-    expect(result.toolCalls[0].toolName).toBe('write_file');
-
-    // 6. Verify Side Effects (Real Filesystem Check)
-    // The VFS root is at .tgp inside tempDir (configured by createTgpConfig)
-    const targetFile = path.join(tempDir, '.tgp/tools/hello-vercel.ts');
-    const exists = await fs.access(targetFile).then(() => true).catch(() => false);
-    
-    expect(exists).toBe(true);
-    
-    const content = await fs.readFile(targetFile, 'utf-8');
-    expect(content).toBe('export default "compat"');
-  });
-});
-````
-
 ## File: bin/tgp.js
 ````javascript
 #!/usr/bin/env node
@@ -197,41 +65,6 @@ cli().catch((err) => {
   console.error('TGP CLI Error:', err);
   process.exit(1);
 });
-````
-
-## File: src/adapter.ts
-````typescript
-import { z } from 'zod';
-import { zodToJsonSchema } from 'zod-to-json-schema';
-import { ToolSet } from './tools/types.js';
-
-/**
- * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
- * 
- * @param tools The TGP ToolSet (from tgpTools(kernel))
- * @returns An object structurally compatible with the `tools` parameter of `generateText`.
- */
-export function formatTools(tools: ToolSet) {
-  // TGP's AgentTool interface is designed to be structurally compatible 
-  // with Vercel AI SDK's CoreTool interface. 
-  // We return identity here, but explicit validation/adapter logic can be added if interfaces diverge.
-  return tools;
-}
-
-/**
- * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
- * Useful if using the raw OpenAI SDK.
- */
-export function toOpenAITools(tools: ToolSet) {
-  return Object.entries(tools).map(([name, tool]) => ({
-    type: 'function',
-    function: {
-      name,
-      description: tool.description,
-      parameters: zodToJsonSchema(tool.parameters),
-    },
-  }));
-}
 ````
 
 ## File: src/config.ts
@@ -296,6 +129,133 @@ export * from './config.js';
 export * from './tools/index.js';
 export * from './tgp.js';
 export * from './adapter.js';
+````
+
+## File: test/fixtures/fake-model.ts
+````typescript
+/**
+ * A deterministic Mock LLM that implements the Vercel AI SDK LanguageModelV2 interface.
+ * Used to verify tool execution without network calls or spies.
+ */
+export class MockLanguageModelV2 {
+  readonly specificationVersion = 'v2';
+  readonly provider = 'tgp-mock';
+  readonly modelId = 'mock-v2';
+  readonly defaultObjectGenerationMode = 'json';
+  
+  constructor(private queue: Array<(args: any) => any>) {}
+
+  async doGenerate(options: any): Promise<any> {
+    const next = this.queue.shift();
+    if (!next) {
+      const history = options && options.prompt ? JSON.stringify(options.prompt, null, 2) : 'unknown';
+      throw new Error(`MockLanguageModelV2: Unexpected call to doGenerate. History: ${history}`);
+    }
+    return next(options);
+  }
+
+  async doStream(): Promise<any> {
+    throw new Error('MockLanguageModelV2: doStream is not implemented for this test.');
+  }
+}
+````
+
+## File: test/integration/vercel.test.ts
+````typescript
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { generateText } from 'ai';
+import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools } from '../../src/tools/index.js';
+import { MockLanguageModelV2 } from '../fixtures/fake-model.js';
+
+describe('Integration: Vercel AI SDK Compatibility', () => {
+  let tempDir: string;
+  let remoteRepo: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('tgp-int-vercel-');
+    remoteRepo = await createTempDir('tgp-remote-');
+    await initBareRepo(remoteRepo);
+  });
+
+  afterEach(async () => {
+    await cleanupDir(tempDir);
+    await cleanupDir(remoteRepo);
+  });
+
+  it('End-to-End: generateText executes TGP tools correctly', async () => {
+    // 1. Setup Kernel
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+
+    // 2. Prepare Toolset
+    const tools = tgpTools(kernel);
+
+    // 3. Setup Fake Model Interaction
+    // The interaction simulates:
+    // Turn 1: Model receives user prompt -> Calls 'write_file'
+    // Turn 2: Model receives tool result -> Returns final text
+    const mockModel = new MockLanguageModelV2([
+      // Response 1: Request Tool Execution
+      () => ({
+        rawCall: { raw: 'call' },
+        finishReason: 'tool-calls',
+        usage: { promptTokens: 10, completionTokens: 10 },
+        toolCalls: [
+          {
+            toolCallType: 'function',
+            toolCallId: 'call_1',
+            toolName: 'write_file',
+            // Vercel SDK expects args as a JSON string
+            args: JSON.stringify({ path: 'tools/hello-vercel.ts', content: 'export default "compat"' }),
+          }
+        ]
+      }),
+      // Response 2: Final Summary
+      (opts) => {
+        // Assert that the SDK fed the tool result back to the model
+        const lastMsg = opts.prompt[opts.prompt.length - 1];
+        if (lastMsg.role !== 'tool' || lastMsg.content[0].type !== 'tool-result') {
+          throw new Error('Expected last message to be a tool result');
+        }
+        
+        return {
+          rawCall: { raw: 'response' },
+          finishReason: 'stop',
+          usage: { promptTokens: 20, completionTokens: 5 },
+          text: 'File created successfully.'
+        };
+      }
+    ]);
+
+    // 4. Execute using Vercel AI SDK
+    const result = await generateText({
+      model: mockModel,
+      tools: tools, // Type Check: This must compile
+      maxSteps: 2,  // Allow tool roundtrips
+      prompt: 'Create a file named tools/hello-vercel.ts',
+    });
+
+    // 5. Verify Results
+    expect(result.text).toBe('File created successfully.');
+    expect(result.toolCalls.length).toBe(1);
+    expect(result.toolCalls[0].toolName).toBe('write_file');
+
+    // 6. Verify Side Effects (Real Filesystem Check)
+    // The VFS root is at .tgp inside tempDir (configured by createTgpConfig)
+    const targetFile = path.join(tempDir, '.tgp/tools/hello-vercel.ts');
+    const exists = await fs.access(targetFile).then(() => true).catch(() => false);
+    
+    expect(exists).toBe(true);
+    
+    const content = await fs.readFile(targetFile, 'utf-8');
+    expect(content).toBe('export default "compat"');
+  });
+});
 ````
 
 ## File: test/unit/utils.ts
@@ -759,6 +719,41 @@ export interface VFSAdapter {
    * @returns Array of relative paths (e.g., ['tools/a.ts', 'tools/sub/b.ts'])
    */
   listFiles: (dir: string, recursive?: boolean) => Promise<string[]>;
+}
+````
+
+## File: src/adapter.ts
+````typescript
+import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
+import { ToolSet } from './tools/types.js';
+
+/**
+ * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
+ * 
+ * @param tools The TGP ToolSet (from tgpTools(kernel))
+ * @returns An object structurally compatible with the `tools` parameter of `generateText`.
+ */
+export function formatTools(tools: ToolSet) {
+  // TGP's AgentTool interface is designed to be structurally compatible 
+  // with Vercel AI SDK's CoreTool interface. 
+  // We return identity here, but explicit validation/adapter logic can be added if interfaces diverge.
+  return tools;
+}
+
+/**
+ * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
+ * Useful if using the raw OpenAI SDK.
+ */
+export function toOpenAITools(tools: ToolSet) {
+  return Object.entries(tools).map(([name, tool]) => ({
+    type: 'function',
+    function: {
+      name,
+      description: tool.description,
+      parameters: zodToJsonSchema(tool.parameters),
+    },
+  }));
 }
 ````
 

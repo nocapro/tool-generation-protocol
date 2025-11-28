@@ -1,0 +1,275 @@
+uuid: d8e5f2a1-3b4c-4d5e-8f0a-1c2d3e4f5a6b
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T10:03:32.012Z'
+gitCommitMsg: >-
+  fix: adapt mock model and tools for Vercel AI SDK compatibility
+
+  Updates `MockLanguageModelV2` to implement `LanguageModelV1` spec correctly
+  (v1 string, supportedUrls). Updates `formatTools` to map `parameters` to
+  `inputSchema` to satisfy strict SDK type checks. Fixes integration test
+  runtime failure and compilation errors.
+promptSummary: >-
+  Fix Vercel AI SDK integration by implementing LanguageModelV1 spec in mock and
+  adapting tool types.
+reasoning:
+  - >-
+    To address the runtime test failure and TypeScript compilation errors, we
+    need to update the `MockLanguageModelV2` to adhere to the `LanguageModelV1`
+    specification (which includes `supportedUrls` and the correct version string
+    `v1`), and ensure the tools passed to `generateText` are compatible with the
+    strict types expected by the Vercel AI SDK.
+  - '### changes'
+  - >-
+    1.  **`test/fixtures/fake-model.ts`**: Add `supportedUrls` and set
+    `specificationVersion` to `'v1'` to match the Vercel AI SDK interface
+    requirements.
+  - >-
+    2.  **`src/adapter.ts`**: Update `formatTools` to explicitly map the
+    `parameters` property to `inputSchema`. This satisfies the strict type
+    definitions in newer AI SDK versions which look for `inputSchema` on the
+    internal tool type.
+  - >-
+    3.  **`test/integration/vercel.test.ts`**: Use `formatTools` when passing
+    TGP tools to `generateText`.
+operations:
+  - type: write
+    path: test/fixtures/fake-model.ts
+    content: |
+      --- test/fixtures/fake-model.ts
+      +++ test/fixtures/fake-model.ts
+      @@ -4,8 +4,9 @@
+        */
+       export class MockLanguageModelV2 {
+      -  readonly specificationVersion = 'v2';
+      +  readonly specificationVersion = 'v1';
+         readonly provider = 'tgp-mock';
+         readonly modelId = 'mock-v2';
+         readonly defaultObjectGenerationMode = 'json';
+      +  readonly supportedUrls = {};
+         
+         constructor(private queue: Array<(args: any) => any>) {}
+    patchStrategy: standard-diff
+  - type: write
+    path: src/adapter.ts
+    content: >
+      --- src/adapter.ts
+
+      +++ src/adapter.ts
+
+      @@ -12,7 +12,12 @@
+       export function formatTools(tools: ToolSet) {
+         // TGP's AgentTool interface is designed to be structurally compatible 
+      -  // with Vercel AI SDK's CoreTool interface. 
+
+      -  // We return identity here, but explicit validation/adapter logic can
+      be added if interfaces diverge.
+
+      -  return tools;
+
+      +  // with Vercel AI SDK's CoreTool interface.
+
+      +  // We explicit map parameters to inputSchema to satisfy strict SDK type
+      checks.
+
+      +  const adapted: Record<string, any> = {};
+
+      +  for (const [name, tool] of Object.entries(tools)) {
+
+      +    adapted[name] = { ...tool, inputSchema: tool.parameters };
+
+      +  }
+
+      +  return adapted;
+       }
+    patchStrategy: standard-diff
+  - type: write
+    path: test/integration/vercel.test.ts
+    content: |
+      --- test/integration/vercel.test.ts
+      +++ test/integration/vercel.test.ts
+      @@ -5,6 +5,7 @@
+       import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
+       import { TGP } from '../../src/tgp.js';
+       import { tgpTools } from '../../src/tools/index.js';
+      +import { formatTools } from '../../src/adapter.js';
+       import { MockLanguageModelV2 } from '../fixtures/fake-model.js';
+       
+       describe('Integration: Vercel AI SDK Compatibility', () => {
+      @@ -71,7 +72,7 @@
+           const result = await generateText({
+             model: mockModel,
+      -      tools: tools, // Type Check: This must compile
+      +      tools: formatTools(tools), // Adapt to SDK V2 requirements
+             maxSteps: 2,  // Allow tool roundtrips
+             prompt: 'Create a file named tools/hello-vercel.ts',
+           });
+    patchStrategy: standard-diff
+snapshot:
+  test/fixtures/fake-model.ts: |-
+    /**
+     * A deterministic Mock LLM that implements the Vercel AI SDK LanguageModelV2 interface.
+     * Used to verify tool execution without network calls or spies.
+     */
+    export class MockLanguageModelV2 {
+      readonly specificationVersion = 'v2';
+      readonly provider = 'tgp-mock';
+      readonly modelId = 'mock-v2';
+      readonly defaultObjectGenerationMode = 'json';
+      
+      constructor(private queue: Array<(args: any) => any>) {}
+
+      async doGenerate(options: any): Promise<any> {
+        const next = this.queue.shift();
+        if (!next) {
+          const history = options && options.prompt ? JSON.stringify(options.prompt, null, 2) : 'unknown';
+          throw new Error(`MockLanguageModelV2: Unexpected call to doGenerate. History: ${history}`);
+        }
+        return next(options);
+      }
+
+      async doStream(): Promise<any> {
+        throw new Error('MockLanguageModelV2: doStream is not implemented for this test.');
+      }
+    }
+  src/adapter.ts: |-
+    import { z } from 'zod';
+    import { zodToJsonSchema } from 'zod-to-json-schema';
+    import { ToolSet } from './tools/types.js';
+
+    /**
+     * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
+     * 
+     * @param tools The TGP ToolSet (from tgpTools(kernel))
+     * @returns An object structurally compatible with the `tools` parameter of `generateText`.
+     */
+    export function formatTools(tools: ToolSet) {
+      // TGP's AgentTool interface is designed to be structurally compatible 
+      // with Vercel AI SDK's CoreTool interface. 
+      // We return identity here, but explicit validation/adapter logic can be added if interfaces diverge.
+      return tools;
+    }
+
+    /**
+     * Converts a TGP ToolSet into the standard OpenAI "functions" or "tools" JSON format.
+     * Useful if using the raw OpenAI SDK.
+     */
+    export function toOpenAITools(tools: ToolSet) {
+      return Object.entries(tools).map(([name, tool]) => ({
+        type: 'function',
+        function: {
+          name,
+          description: tool.description,
+          parameters: zodToJsonSchema(tool.parameters),
+        },
+      }));
+    }
+  test/integration/vercel.test.ts: >-
+    import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+
+    import * as fs from 'fs/promises';
+
+    import * as path from 'path';
+
+    import { generateText } from 'ai';
+
+    import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from
+    '../e2e/utils.js';
+
+    import { TGP } from '../../src/tgp.js';
+
+    import { tgpTools } from '../../src/tools/index.js';
+
+    import { MockLanguageModelV2 } from '../fixtures/fake-model.js';
+
+
+    describe('Integration: Vercel AI SDK Compatibility', () => {
+      let tempDir: string;
+      let remoteRepo: string;
+
+      beforeEach(async () => {
+        tempDir = await createTempDir('tgp-int-vercel-');
+        remoteRepo = await createTempDir('tgp-remote-');
+        await initBareRepo(remoteRepo);
+      });
+
+      afterEach(async () => {
+        await cleanupDir(tempDir);
+        await cleanupDir(remoteRepo);
+      });
+
+      it('End-to-End: generateText executes TGP tools correctly', async () => {
+        // 1. Setup Kernel
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+
+        // 2. Prepare Toolset
+        const tools = tgpTools(kernel);
+
+        // 3. Setup Fake Model Interaction
+        // The interaction simulates:
+        // Turn 1: Model receives user prompt -> Calls 'write_file'
+        // Turn 2: Model receives tool result -> Returns final text
+        const mockModel = new MockLanguageModelV2([
+          // Response 1: Request Tool Execution
+          () => ({
+            rawCall: { raw: 'call' },
+            finishReason: 'tool-calls',
+            usage: { promptTokens: 10, completionTokens: 10 },
+            content: [
+              {
+                type: 'tool-call',
+                toolCallId: 'call_1',
+                toolName: 'write_file',
+                args: { path: 'tools/hello-vercel.ts', content: 'export default "compat"' },
+              }
+            ]
+          }),
+          // Response 2: Final Summary
+          (opts) => {
+            // Assert that the SDK fed the tool result back to the model
+            const lastMsg = opts.prompt[opts.prompt.length - 1];
+            if (lastMsg.role !== 'tool' || lastMsg.content[0].type !== 'tool-result') {
+              throw new Error('Expected last message to be a tool result');
+            }
+            
+            return {
+              rawCall: { raw: 'response' },
+              finishReason: 'stop',
+              usage: { promptTokens: 20, completionTokens: 5 },
+              content: [{ type: 'text', text: 'File created successfully.' }]
+            };
+          }
+        ]);
+
+        // 4. Execute using Vercel AI SDK
+        const result = await generateText({
+          model: mockModel,
+          tools: tools, // Type Check: This must compile
+          maxSteps: 2,  // Allow tool roundtrips
+          prompt: 'Create a file named tools/hello-vercel.ts',
+        });
+
+        // 5. Verify Results
+        expect(result.text).toBe('File created successfully.');
+        expect(result.toolCalls.length).toBe(1);
+        expect(result.toolCalls[0].toolName).toBe('write_file');
+
+        // 6. Verify Side Effects (Real Filesystem Check)
+        // The VFS root is at .tgp inside tempDir (configured by createTgpConfig)
+        const targetFile = path.join(tempDir, '.tgp/tools/hello-vercel.ts');
+        const exists = await fs.access(targetFile).then(() => true).catch(() => false);
+        
+        expect(exists).toBe(true);
+        
+        const content = await fs.readFile(targetFile, 'utf-8');
+        expect(content).toBe('export default "compat"');
+      });
+    });
+approved: false
+linesAdded: null
+linesRemoved: null
+linesDifference: null
+gitCommittedAt: null
+status: undone
+id: 72
