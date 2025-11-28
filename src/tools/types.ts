@@ -9,6 +9,8 @@ export interface AgentTool<TParams extends z.ZodTypeAny = any, TResult = any> {
   description: string;
   parameters: TParams;
   execute: (args: z.infer<TParams>) => Promise<TResult>;
+  // For Vercel AI SDK compatibility - use the schema directly
+  inputSchema: TParams;
 }
 
 export type ToolSet = Record<string, AgentTool>;

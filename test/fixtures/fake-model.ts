@@ -7,7 +7,8 @@ export class MockLanguageModelV2 {
   readonly provider = 'tgp-mock';
   readonly modelId = 'mock-v2';
   readonly defaultObjectGenerationMode = 'json';
-  
+  readonly supportedUrls = {};
+
   constructor(private queue: Array<(args: any) => any>) {}
 
   async doGenerate(options: any): Promise<any> {

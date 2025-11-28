@@ -1,3 +1,8 @@
+
+implement relaycode-core
+
+===
+
 we need test cases that runs on docker containers to see wether the npm published tgp version has all passed tests. because I dont want to say "it works on my machine" when npm devs user submit issues 
 
 === 

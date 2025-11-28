@@ -26,6 +26,7 @@ export function createFsTools(kernel: Kernel) {
     list_files: {
       description: 'Recursively list available tools or definitions in the VFS.',
       parameters: ListFilesParams,
+      inputSchema: ListFilesParams,
       execute: async ({ dir }) => {
         return kernel.vfs.listFiles(dir, true);
       },
@@ -34,6 +35,7 @@ export function createFsTools(kernel: Kernel) {
     read_file: {
       description: 'Read the content of an existing tool or file.',
       parameters: ReadFileParams,
+      inputSchema: ReadFileParams,
       execute: async ({ path }) => {
         return kernel.vfs.readFile(path);
       },
@@ -42,9 +44,10 @@ export function createFsTools(kernel: Kernel) {
     write_file: {
       description: 'Create a new tool or overwrite a draft. Ensures parent directories exist.',
       parameters: WriteFileParams,
+      inputSchema: WriteFileParams,
       execute: async ({ path, content }) => {
         await kernel.vfs.writeFile(path, content);
-        
+
         // Register the new tool in the Registry (updates meta.json)
         await kernel.registry.register(path, content);
 
@@ -58,9 +61,10 @@ export function createFsTools(kernel: Kernel) {
     patch_file: {
       description: 'Surgical search-and-replace for refactoring code.',
       parameters: PatchFileParams,
+      inputSchema: PatchFileParams,
       execute: async ({ path, search, replace }) => {
         const content = await kernel.vfs.readFile(path);
-        
+
         if (!content.includes(search)) {
           throw new Error(`Patch failed: Search text not found in '${path}'. Please read the file again to ensure you have the exact content.`);
         }
@@ -68,7 +72,7 @@ export function createFsTools(kernel: Kernel) {
         // We replace the first occurrence to be surgical.
         // If the agent needs global replace, it can do so in a loop or we can expand this tool later.
         const newContent = content.replace(search, replace);
-        
+
         await kernel.vfs.writeFile(path, newContent);
 
         // Update registry in case descriptions changed
