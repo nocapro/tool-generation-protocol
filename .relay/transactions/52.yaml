@@ -1,0 +1,841 @@
+uuid: c88b7250-9a4d-4e94-9b2f-7633c5e036e1
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T06:30:45.186Z'
+gitCommitMsg: 'feat: add dynamic sandbox API injection for host capabilities support'
+promptSummary: >-
+  Extended the Sandbox Bridge to support dynamic injection of host API
+  capabilities (like SQL execution) into the Guest environment and updated E2E
+  tests to verify this behavior.
+reasoning:
+  - >-
+    I will now implement Part 2 of the plan to extend the Sandbox Bridge with
+    dynamic API capabilities, enabling SQL support and fixing the related E2E
+    test.
+  - '### Step 1: Add SandboxAPI to Kernel'
+  - >-
+    I will update the `Kernel` interface and factory to support a `sandboxAPI`
+    registry. This allows the host application to inject custom functions into
+    the restricted Guest environment.
+  - '### Step 2: Update TGP Class to accept SandboxAPI'
+  - >-
+    I will expose this new capability in the main `TGP` class options, allowing
+    consumers (like the CLI or Tests) to pass in their API implementations.
+  - '### Step 3: Inject API into Bridge'
+  - >-
+    Now I will update the bridge factory to merge these injected functions into
+    the `tgp` object that gets exposed to the Sandbox.
+  - '### Step 4: Update SQL Test Scenario'
+  - >-
+    Finally, I will update the E2E test to actually inject the `exec_sql` mock
+    implementation when booting the Kernel. This closes the loop for Scenario 6.
+operations:
+  - type: write
+    path: src/kernel/core.ts
+    content: |
+      --- src/kernel/core.ts
+      +++ src/kernel/core.ts
+      @@ -16,6 +16,7 @@
+         vfs: VFSAdapter; 
+         env: KernelEnvironment;
+         logger?: Logger;
+      +  sandboxAPI?: Record<string, any>;
+       }
+       
+       export interface Kernel {
+      @@ -26,6 +27,7 @@
+         git: GitBackend;
+         registry: Registry;
+         logger: Logger;
+      +  sandboxAPI: Record<string, any>;
+       }
+       
+       const defaultLogger: Logger = {
+      @@ -40,11 +42,12 @@
+        * This wires up the configuration, the filesystem, and the git backend.
+        */
+       export function createKernel(opts: KernelOptions): Kernel {
+      -  const { config, vfs, env } = opts;
+      +  const { config, vfs, env, sandboxAPI } = opts;
+         const logger = opts.logger ?? defaultLogger;
+         
+         const git = createGitBackend(env, config, logger);
+         const registry = createRegistry(vfs);
+      +  const api = sandboxAPI || {};
+       
+         let isBooted = false;
+       
+      @@ -54,6 +57,7 @@
+           git,
+           registry,
+           logger,
+      +    sandboxAPI: api,
+       
+           async boot() {
+             if (isBooted) return;
+    patchStrategy: standard-diff
+  - type: write
+    path: src/tgp.ts
+    content: |
+      --- src/tgp.ts
+      +++ src/tgp.ts
+      @@ -42,6 +42,12 @@
+          */
+         // eslint-disable-next-line @typescript-eslint/no-explicit-any
+         http?: any;
+      +
+      +  /**
+      +   * Custom functions to inject into the Sandbox global 'tgp' object.
+      +   * e.g. { exec_sql: (sql) => db.query(sql) }
+      +   */
+      +  sandboxAPI?: Record<string, any>;
+       }
+       
+       /**
+      @@ -54,6 +60,7 @@
+         public git: GitBackend;
+         public registry: Registry;
+         public logger: Logger;
+      +  public sandboxAPI: Record<string, any>;
+         
+         private _isBooted = false;
+       
+      @@ -67,6 +74,9 @@
+           // Use injected VFS or default to Node VFS
+           this.vfs = opts.vfs || createNodeVFS(this.config.rootDir);
+       
+      +    // 3. Setup Sandbox API
+      +    this.sandboxAPI = opts.sandboxAPI || {};
+      +
+           // 3. Initialize Kernel Components
+           // Construct Environment with defaults if not provided
+           const env: KernelEnvironment = {
+      @@ -78,7 +88,8 @@
+             config: this.config,
+             vfs: this.vfs,
+             env,
+      -      logger: opts.logger
+      +      logger: opts.logger,
+      +      sandboxAPI: this.sandboxAPI
+           });
+       
+           this.git = kernel.git;
+      @@ -116,7 +127,8 @@
+               config: this.config,
+               vfs: this.vfs,
+               env,
+      -        logger: this.opts.logger
+      +        logger: this.opts.logger,
+      +        sandboxAPI: this.sandboxAPI
+             });
+             
+             this.git = kernel.git;
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/bridge.ts
+    content: |
+      --- src/sandbox/bridge.ts
+      +++ src/sandbox/bridge.ts
+      @@ -7,6 +7,7 @@
+         kernel: {
+           vfs: Kernel['vfs'];
+           config: TGPConfig;
+      +    sandboxAPI: Kernel['sandboxAPI'];
+         };
+         onLog?: (message: string) => void;
+       }
+      @@ -19,7 +20,7 @@
+        */
+       export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
+         const { vfs, config } = kernel;
+      -  const { allowedDirs } = config.fs;
+      +  const { allowedDirs } = config.fs || { allowedDirs: [] };
+         const { allowedFetchUrls } = config;
+       
+         const isAllowedWrite = (target: string): boolean => {
+      @@ -83,7 +84,10 @@
+               } else {
+                   console.log('[TGP-TOOL]', msg);
+               }
+      -      }
+      +      },
+      +
+      +      // --- Dynamic API Injection ---
+      +      ...kernel.sandboxAPI
+           }
+         };
+       }
+    patchStrategy: standard-diff
+  - type: write
+    path: test/e2e/scenarios.test.ts
+    content: |
+      --- test/e2e/scenarios.test.ts
+      +++ test/e2e/scenarios.test.ts
+      @@ -198,16 +198,19 @@
+         it('Scenario 6: SQL Error Propagation', async () => {
+           const configPath = await createTgpConfig(tempDir, remoteRepo);
+      -    const kernel = new TGP({ configFile: configPath });
+      -    await kernel.boot();
+       
+           // Mock DB executor
+           // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      -    const mockExecutor = async (sql: string, _params: any[]) => {
+      +    const mockExecutor = async (sql: string, _params: any[] = []) => {
+             if (sql.includes('fail')) {
+               throw new Error('Database Error');
+             }
+             return [];
+           };
+      +
+      +    const kernel = new TGP({ 
+      +      configFile: configPath,
+      +      sandboxAPI: { exec_sql: mockExecutor }
+      +    });
+      +    await kernel.boot();
+       
+           const tools = { ...tgpTools(kernel), ...createSqlTools(mockExecutor) };
+    patchStrategy: standard-diff
+snapshot:
+  src/kernel/core.ts: |-
+    /* eslint-disable no-console */
+    import { TGPConfig, Logger } from '../types.js';
+    import { VFSAdapter } from '../vfs/types.js';
+    import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+    import { createRegistry, Registry } from './registry.js';
+
+    // We inject the platform-specific environment dependencies here.
+    // This allows the Kernel to run in Node, Edge, or Browser environments.
+    export interface KernelEnvironment extends GitDependencies {
+      // We can extend this if Kernel needs more platform specific components later
+    }
+
+    export interface KernelOptions {
+      config: TGPConfig;
+      vfs: VFSAdapter; 
+      env: KernelEnvironment;
+      logger?: Logger;
+    }
+
+    export interface Kernel {
+      boot(): Promise<void>;
+      shutdown(): Promise<void>;
+      config: TGPConfig;
+      vfs: VFSAdapter;
+      git: GitBackend;
+      registry: Registry;
+      logger: Logger;
+    }
+
+    const defaultLogger: Logger = {
+      debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
+      info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
+      warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
+      error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
+    };
+
+    /**
+     * Factory to create a TGP Kernel.
+     * This wires up the configuration, the filesystem, and the git backend.
+     */
+    export function createKernel(opts: KernelOptions): Kernel {
+      const { config, vfs, env } = opts;
+      const logger = opts.logger ?? defaultLogger;
+      
+      const git = createGitBackend(env, config, logger);
+      const registry = createRegistry(vfs);
+
+      let isBooted = false;
+
+      return {
+        config,
+        vfs,
+        git,
+        registry,
+        logger,
+
+        async boot() {
+          if (isBooted) return;
+          logger.info(`Kernel booting...`);
+          
+          try {
+            // Hydrate the filesystem from Git
+            await git.hydrate().catch(err => {
+              logger.error(`Git hydration failed.`, err);
+              throw err;
+            });
+            
+            // Hydrate registry from meta.json
+            await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
+            
+            isBooted = true;
+            logger.info(`Kernel ready.`);
+          } catch (error) {
+            logger.error(`Boot failed:`, error);
+            throw error;
+          }
+        },
+
+        async shutdown() {
+          logger.info(`Kernel shutting down...`);
+          // Cleanup tasks (close db connections, etc) can go here
+          isBooted = false;
+        }
+      };
+    }
+  src/tgp.ts: >-
+    import * as fs from 'node:fs';
+
+    import * as http from 'isomorphic-git/http/node';
+
+    import { createKernel, Kernel, KernelEnvironment } from './kernel/core.js';
+
+    import { loadTGPConfig } from './config.js';
+
+    import { createNodeVFS } from './vfs/node.js';
+
+    import { TGPConfigSchema, TGPConfig, Logger } from './types.js';
+
+    import { VFSAdapter } from './vfs/types.js';
+
+    import { GitBackend } from './kernel/git.js';
+
+    import { Registry } from './kernel/registry.js';
+
+
+    export interface TGPOptions {
+      /**
+       * Path to the configuration file.
+       * @default "./tgp.config.ts"
+       */
+      configFile?: string;
+
+      /**
+       * Override the Virtual Filesystem Adapter.
+       * Useful for using MemoryVFS in tests or Edge environments.
+       * If omitted, defaults to NodeVFS rooted at config.rootDir.
+       */
+      vfs?: VFSAdapter;
+
+      /**
+       * Inject a custom logger. Defaults to console.
+       */
+      logger?: Logger;
+
+      /**
+       * Override the raw filesystem used by Git.
+       * If omitted, defaults to 'node:fs'.
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs?: any;
+
+      /**
+       * Override the HTTP client used by Git.
+       * If omitted, defaults to 'isomorphic-git/http/node'.
+       */
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http?: any;
+    }
+
+
+    /**
+     * The TGP Kernel Class.
+     * Manages the lifecycle of the Agent's runtime environment, including
+     * configuration, filesystem (VFS), Git persistence, and the Tool Registry.
+     */
+    export class TGP implements Kernel {
+      public config: TGPConfig;
+      public vfs: VFSAdapter;
+      public git: GitBackend;
+      public registry: Registry;
+      public logger: Logger;
+      
+      private _isBooted = false;
+
+      constructor(private opts: TGPOptions = {}) {
+        // 1. Initialize with Defaults (Sync)
+        // We use the default schema to ensure the kernel is usable immediately (e.g. for tooling)
+        // even before the async config load completes.
+        this.config = TGPConfigSchema.parse({});
+        
+        // 2. Setup VFS
+        // Use injected VFS or default to Node VFS
+        this.vfs = opts.vfs || createNodeVFS(this.config.rootDir);
+
+        // 3. Initialize Kernel Components
+        // Construct Environment with defaults if not provided
+        const env: KernelEnvironment = {
+          fs: opts.fs || fs,
+          http: opts.http || http
+        };
+
+        const kernel = createKernel({
+          config: this.config,
+          vfs: this.vfs,
+          env,
+          logger: opts.logger
+        });
+
+        this.git = kernel.git;
+        this.registry = kernel.registry;
+        this.logger = kernel.logger;
+      }
+
+      /**
+       * Hydrates the Kernel from the configuration file and Git.
+       * This must be awaited before executing tools in production.
+       */
+      async boot(): Promise<void> {
+        if (this._isBooted) return;
+
+        const configPath = this.opts.configFile || './tgp.config.ts';
+
+        try {
+          // 1. Load Real Configuration
+          const loadedConfig = await loadTGPConfig(configPath);
+          this.config = loadedConfig;
+
+          // 2. Re-initialize VFS if RootDir changed AND user didn't inject a custom VFS
+          // If the user injected a VFS, we assume they configured it correctly.
+          if (!this.opts.vfs) {
+            this.vfs = createNodeVFS(this.config.rootDir);
+          }
+
+          // 3. Re-initialize Kernel Components with new Config/VFS
+          const env: KernelEnvironment = {
+            fs: this.opts.fs || fs,
+            http: this.opts.http || http
+          };
+
+          const kernel = createKernel({
+            config: this.config,
+            vfs: this.vfs,
+            env,
+            logger: this.opts.logger
+          });
+          
+          this.git = kernel.git;
+          this.registry = kernel.registry;
+
+          // 4. Hydrate State (Git Clone/Pull + Registry Build)
+          await kernel.boot();
+          
+          this._isBooted = true;
+        } catch (error) {
+          // If config loading fails, we might still be in a valid default state,
+          // but we should warn the user.
+          console.warn(`[TGP] Boot warning:`, error);
+          throw error;
+        }
+      }
+
+      async shutdown(): Promise<void> {
+        // Passthrough to internal kernel shutdown if needed
+        this._isBooted = false;
+      }
+
+      /**
+       * Generates the System Prompt enforcing the "8 Standards" and TGP protocol.
+       */
+      getSystemPrompt(): string {
+        return `
+    You are an autonomous AI Engineer running on the Tool Generation Protocol
+    (TGP).
+
+    Your goal is to build, validate, and execute tools to solve the user's
+    request.
+
+
+    # THE PROTOCOL
+
+
+    1.  **Reuse or Forge**: Check if a tool exists. If not, write it.
+
+    2.  **No One-Offs**: Do not execute arbitrary scripts. Create a reusable
+    tool in 'tools/'.
+
+    3.  **Strict Typing**: All tools must be written in TypeScript. No 'any', no
+    'unknown'.
+
+    4.  **Database Interaction**: You MUST use the 'exec_sql' tool to interact
+    with the database. Do not write tools that attempt to connect to a database
+    themselves.
+
+
+    # CODING STANDARDS (The 8 Commandments)
+
+
+    1.  **Abstract**: Logic must be separated from data. (e.g., args.taxRate,
+    not 0.05).
+
+    2.  **Composable**: Functions should return results usable by others.
+
+    3.  **HOFs**: Use map/reduce/filter over imperative loops.
+
+    4.  **Stateless**: No global state. No reliance on previous execution.
+
+    5.  **Reusable**: Generic enough for multiple use cases.
+
+    6.  **General by Params**: Behavior controlled by arguments.
+
+    7.  **No Hardcoded Values**: No magic numbers or IDs.
+
+    8.  **Orchestrator**: Tools can import other tools via 'require'.
+
+
+    # EXECUTION FLOW
+
+
+    1.  List files to see what you have.
+
+    2.  Read file content to understand the tool.
+
+    3.  If missing, write_file to create a new tool.
+
+    4.  Use check_tool to validate syntax.
+
+    5.  Use exec_tool to run it.
+
+    `;
+      }
+    }
+  src/sandbox/bridge.ts: >-
+    /* eslint-disable no-console */
+
+    import { Kernel } from '../kernel/core.js';
+
+    import * as path from 'path';
+
+    import { TGPConfig } from '../types.js';
+
+
+    export interface SandboxBridgeOptions {
+      kernel: {
+        vfs: Kernel['vfs'];
+        config: TGPConfig;
+      };
+      onLog?: (message: string) => void;
+    }
+
+
+    /**
+     * Creates the Bridge Object exposed to the Sandbox.
+     * This maps secure Kernel methods to the Guest environment.
+     * 
+     * We expose a structured 'tgp' object to the guest.
+     */
+    export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions)
+    {
+      const { vfs, config } = kernel;
+      const { allowedDirs } = config.fs;
+      const { allowedFetchUrls } = config;
+
+      const isAllowedWrite = (target: string): boolean => {
+        // Normalize target to ensure clean comparison (remove leading ./, etc)
+        const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
+        
+        return allowedDirs.some(dir => {
+          const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
+          // Check if target is inside the allowed dir
+          return normalizedTarget.startsWith(normalizedDir);
+        });
+      };
+
+      return {
+        tgp: {
+          // --- Filesystem Bridge (Jailed) ---
+          read_file: async (path: string) => {
+            return vfs.readFile(path);
+          },
+
+          write_file: async (path: string, content: string) => {
+            if (!isAllowedWrite(path)) {
+              throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
+            }
+            return vfs.writeFile(path, content);
+          },
+
+          list_files: async (dir: string) => {
+            return vfs.listFiles(dir, false);
+          },
+
+          // --- Network Bridge (Allowed Only) ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          fetch: async (url: string, init?: any) => {
+            // Security: Enforce URL allow-list
+            if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
+              throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
+            }
+            const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
+            if (!isAllowed) {
+              throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
+            }
+
+            const response = await fetch(url, init);
+
+            // Return a serializable, safe subset of the Response object.
+            // The methods must be wrapped to be transferred correctly.
+            return {
+              status: response.status,
+              statusText: response.statusText,
+              headers: Object.fromEntries(response.headers.entries()),
+              text: () => response.text(),
+              json: () => response.json(),
+            };
+          },
+
+          // --- Logger ---
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          log: (...args: any[]) => {
+            const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+            if (onLog) {
+                onLog(msg);
+            } else {
+                console.log('[TGP-TOOL]', msg);
+            }
+          }
+        }
+      };
+    }
+  test/e2e/scenarios.test.ts: >-
+    import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+
+    import * as fs from 'fs/promises';
+
+    import * as path from 'path';
+
+    import { createTempDir, initBareRepo, createTgpConfig, runTgpCli, cleanupDir
+    } from './utils.js';
+
+    import { TGP } from '../../src/tgp.js';
+
+    import { tgpTools } from '../../src/tools/index.js';
+
+    import { createSqlTools } from '../../src/tools/sql.js';
+
+
+    describe('E2E Scenarios', () => {
+      let tempDir: string;
+      let remoteRepo: string;
+
+      beforeEach(async () => {
+        tempDir = await createTempDir();
+        remoteRepo = await createTempDir('tgp-remote-');
+        await initBareRepo(remoteRepo);
+      });
+
+      afterEach(async () => {
+        await cleanupDir(tempDir);
+        await cleanupDir(remoteRepo);
+      });
+
+      it('Scenario 1: Cold Start (Hydration, Fabrication, Execution)', async () => {
+        // 1. Setup Config
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        
+        // 2. Boot Kernel
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        
+        const tools = tgpTools(kernel);
+
+        // 3. Create a Tool (Fibonacci)
+        const fibPath = 'tools/math/fib.ts';
+        const fibCode = `
+          export default function fib(args: { n: number }) {
+            const n = args.n;
+            if (n <= 1) return n;
+            let a = 0, b = 1;
+            for (let i = 2; i <= n; i++) {
+              const temp = a + b;
+              a = b;
+              b = temp;
+            }
+            return b;
+          }
+        `;
+
+        const writeRes = await tools.write_file.execute({ path: fibPath, content: fibCode });
+        expect(writeRes.success).toBe(true);
+
+        // 4. Validate Tool
+        const checkRes = await tools.check_tool.execute({ path: fibPath });
+        expect(checkRes.valid).toBe(true);
+
+        // 5. Execute Tool
+        const execRes = await tools.exec_tool.execute({ path: fibPath, args: { n: 10 } });
+        expect(execRes.success).toBe(true);
+        expect(execRes.result).toBe(55);
+
+        // 6. Verify Persistence
+        // Clone remote repo to a new dir and check file existence
+        const verifyDir = await createTempDir('tgp-verify-');
+        const { execSync } = await import('node:child_process');
+        execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+        
+        const exists = await fs.access(path.join(verifyDir, fibPath)).then(() => true).catch(() => false);
+        expect(exists).toBe(true);
+
+        await cleanupDir(verifyDir);
+      });
+
+      it('Scenario 2: Concurrency (The Merge Test)', async () => {
+        // Agent A
+        const dirA = await createTempDir('tgp-agent-a-');
+        const configA = await createTgpConfig(dirA, remoteRepo);
+        const kernelA = new TGP({ configFile: configA });
+        await kernelA.boot();
+
+        // Agent B
+        const dirB = await createTempDir('tgp-agent-b-');
+        const configB = await createTgpConfig(dirB, remoteRepo);
+        const kernelB = new TGP({ configFile: configB });
+        await kernelB.boot();
+
+        const toolsA = tgpTools(kernelA);
+        const toolsB = tgpTools(kernelB);
+
+        // Both agents create different tools simultaneously
+        // This forces one to fail the push, auto-rebase, and push again.
+        await Promise.all([
+          toolsA.write_file.execute({ 
+            path: 'tools/tool_A.ts', 
+            content: 'export default () => "A"' 
+          }),
+          toolsB.write_file.execute({ 
+            path: 'tools/tool_B.ts', 
+            content: 'export default () => "B"' 
+          })
+        ]);
+        
+        // Verify using a fresh Agent C
+        const dirC = await createTempDir('tgp-agent-c-');
+        const configC = await createTgpConfig(dirC, remoteRepo);
+        const kernelC = new TGP({ configFile: configC });
+        await kernelC.boot();
+        
+        const files = await kernelC.vfs.listFiles('tools');
+        expect(files).toContain('tools/tool_A.ts');
+        expect(files).toContain('tools/tool_B.ts');
+
+        await cleanupDir(dirA);
+        await cleanupDir(dirB);
+        await cleanupDir(dirC);
+      });
+
+      it('Scenario 3: Refactor (Search & Replace)', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = tgpTools(kernel);
+
+        const toolName = 'tools/greet.ts';
+        await tools.write_file.execute({ 
+          path: toolName, 
+          content: `export default function(args: { name: string }) { return "hello " + args.name; }`
+        });
+
+        let res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+        expect(res.result).toBe('hello world');
+
+        await tools.patch_file.execute({
+          path: toolName,
+          search: 'return "hello " + args.name;',
+          replace: 'return "greetings " + args.name;'
+        });
+
+        res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+        expect(res.result).toBe('greetings world');
+      });
+
+      it('Scenario 4: Resilience (Infinite Loop)', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = tgpTools(kernel);
+
+        const badTool = 'tools/freeze.ts';
+        await tools.write_file.execute({
+          path: badTool,
+          content: `export default function() { while(true) {} }`
+        });
+
+        const res = await tools.exec_tool.execute({ path: badTool, args: {} });
+        expect(res.success).toBe(false);
+        expect(res.error).toMatch(/timed out/i);
+      });
+
+      it('Scenario 5: Security (Jailbreak)', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+        const tools = tgpTools(kernel);
+
+        const hackTool = 'tools/hack.ts';
+        await tools.write_file.execute({
+          path: hackTool,
+          content: `
+            export default async function() {
+               return await tgp.read_file('../../package.json');
+            }
+          `
+        });
+
+        const res = await tools.exec_tool.execute({ path: hackTool, args: {} });
+        expect(res.success).toBe(false);
+        expect(res.error).toMatch(/Security Violation/i);
+      });
+
+      it('Scenario 6: SQL Error Propagation', async () => {
+        const configPath = await createTgpConfig(tempDir, remoteRepo);
+        const kernel = new TGP({ configFile: configPath });
+        await kernel.boot();
+
+        // Mock DB executor
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const mockExecutor = async (sql: string, _params: any[]) => {
+          if (sql.includes('fail')) {
+            throw new Error('Database Error');
+          }
+          return [];
+        };
+
+        const tools = { ...tgpTools(kernel), ...createSqlTools(mockExecutor) };
+
+        const dbTool = 'tools/db_ops.ts';
+        await tools.write_file.execute({
+          path: dbTool,
+          content: `
+            export default async function(args: { crash: boolean }) {
+               if (args.crash) {
+                  await tgp.exec_sql('SELECT * FROM users WHERE name = "fail"', []);
+               }
+            }
+          `
+        });
+
+        const res = await tools.exec_tool.execute({ path: dbTool, args: { crash: true } });
+        expect(res.success).toBe(false);
+        expect(res.error).toContain('Database Error');
+      });
+
+      // Note: Scenario 7 (SIGTERM) is skipped as the CLI currently does not have a long-running 'serve' mode to test against.
+
+      it('Scenario 8: CLI Bootstrap', async () => {
+        // We assume the project has been built via 'npm run build' for bin/tgp.js to work
+        // If not, this test might fail if dist/ doesn't exist.
+        const { code } = await runTgpCli(['init'], tempDir);
+        expect(code).toBe(0);
+        
+        const configExists = await fs.access(path.join(tempDir, 'tgp.config.ts')).then(() => true).catch(() => false);
+        expect(configExists).toBe(true);
+        
+        const metaExists = await fs.access(path.join(tempDir, '.tgp/meta.json')).then(() => true).catch(() => false);
+        expect(metaExists).toBe(true);
+      });
+    });
+approved: true
+linesAdded: 32
+linesRemoved: 8
+linesDifference: 40
+gitCommittedAt: null
+status: committed
+id: 52

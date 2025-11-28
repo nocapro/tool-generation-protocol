@@ -40,6 +40,12 @@ export interface TGPOptions {
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   http?: any;
+
+  /**
+   * Custom functions to inject into the Sandbox global 'tgp' object.
+   * e.g. { exec_sql: (sql) => db.query(sql) }
+   */
+  sandboxAPI?: Record<string, any>;
 }
 
 /**
@@ -53,6 +59,7 @@ export class TGP implements Kernel {
   public git: GitBackend;
   public registry: Registry;
   public logger: Logger;
+  public sandboxAPI: Record<string, any>;
   
   private _isBooted = false;
 
@@ -66,6 +73,9 @@ export class TGP implements Kernel {
     // Use injected VFS or default to Node VFS
     this.vfs = opts.vfs || createNodeVFS(this.config.rootDir);
 
+    // 3. Setup Sandbox API
+    this.sandboxAPI = opts.sandboxAPI || {};
+
     // 3. Initialize Kernel Components
     // Construct Environment with defaults if not provided
     const env: KernelEnvironment = {
@@ -77,7 +87,8 @@ export class TGP implements Kernel {
       config: this.config,
       vfs: this.vfs,
       env,
-      logger: opts.logger
+      logger: opts.logger,
+      sandboxAPI: this.sandboxAPI
     });
 
     this.git = kernel.git;
@@ -115,7 +126,8 @@ export class TGP implements Kernel {
         config: this.config,
         vfs: this.vfs,
         env,
-        logger: this.opts.logger
+        logger: this.opts.logger,
+        sandboxAPI: this.sandboxAPI
       });
       
       this.git = kernel.git;

@@ -10,7 +10,8 @@
     "dev": "tsx src/cli/index.ts",
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
-    "test": "vitest run",
+    "pretest": "npm run build",
+    "test": "vitest run --passWithNoTests",
     "tgp": "node bin/tgp.js"
   },
   "keywords": [

@@ -155,7 +155,7 @@ function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
 
       try {
           await execGit(['push', 'origin', branch], dir, logger);
-      } catch (_e) {
+      } catch {
           // Handle non-fast-forward by pulling first (simple auto-merge)
           logger.warn(`[Local] Push failed. Attempting merge...`);
           // We use standard merge (no-rebase) as it handles 'meta.json' append conflicts slightly better 

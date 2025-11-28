@@ -180,17 +180,21 @@ describe('E2E Scenarios', () => {
 
   it('Scenario 6: SQL Error Propagation', async () => {
     const configPath = await createTgpConfig(tempDir, remoteRepo);
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
 
     // Mock DB executor
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const mockExecutor = async (sql: string, _params: any[]) => {
+    const mockExecutor = async (sql: string, _params: any[] = []) => {
       if (sql.includes('fail')) {
         throw new Error('Database Error');
       }
       return [];
     };
+
+    const kernel = new TGP({ 
+      configFile: configPath,
+      sandboxAPI: { exec_sql: mockExecutor }
+    });
+    await kernel.boot();
 
     const tools = { ...tgpTools(kernel), ...createSqlTools(mockExecutor) };
 

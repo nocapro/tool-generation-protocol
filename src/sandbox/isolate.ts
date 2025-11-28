@@ -35,7 +35,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
       try {
         // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
         ivm = (await import('isolated-vm')).default;
-      } catch (err) {
+      } catch {
         useFallback = true;
       }
 
@@ -63,12 +63,14 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
          }
       }
 
-      if (!isolate) {
-        isolate = new ivm.Isolate({ memoryLimit });
-      }
+      // Initialize isolate if not already created (reuse across executions)
+      const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
+      // Update state
+      isolate = currentIsolate;
 
       // 2. Create a fresh Context for this execution
-      const ivmContext = await isolate.createContext();
+      // We use currentIsolate which is guaranteed to be defined
+      const ivmContext = await currentIsolate.createContext();
 
       try {
         // 3. Bridge the Global Scope (Host -> Guest)
@@ -82,7 +84,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
             // Special handling for the 'tgp' namespace object
             if (key === 'tgp' && typeof value === 'object' && value !== null) {
                 // Initialize the namespace in the guest
-                await isolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
+                await currentIsolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
                 const tgpHandle = await jail.get('tgp');
                 
                 // Populate the namespace
@@ -107,7 +109,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
         }
 
         // 4. Compile the Script inside the Isolate
-        const script = await isolate.compileScript(jsCode);
+        const script = await currentIsolate.compileScript(jsCode);
 
         // 5. Execute
         const result = await script.run(ivmContext, { timeout });

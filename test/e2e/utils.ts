@@ -7,7 +7,17 @@ import { fileURLToPath } from 'node:url';
 // ESM Polyfills
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '../../');
+
+// Robust Project Root Detection
+// If running from dist/test/e2e, we are 3 levels deep from root (dist/test/e2e -> dist/test -> dist -> root)
+// If running from test/e2e, we are 2 levels deep (test/e2e -> test -> root)
+const isRunningInDist = __dirname.includes(path.join('dist', 'test', 'e2e'));
+
+const projectRoot = isRunningInDist 
+  ? path.resolve(__dirname, '../../../') 
+  : path.resolve(__dirname, '../../');
+
+const distConfigPath = path.join(projectRoot, 'dist/src/config.js').split(path.sep).join('/');
 
 // Track temp dirs for cleanup
 const tempDirs: string[] = [];
@@ -37,7 +47,18 @@ export async function cleanupDir(dir: string): Promise<void> {
 export async function initBareRepo(dir: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
   execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
-  // Set default branch to main to avoid 'master' vs 'main' confusion
+  
+  // Setup: Create an initial commit so all clones share a history.
+  // This prevents "fatal: refusing to merge unrelated histories" during concurrent pushes.
+  const initDir = await createTempDir('tgp-init-');
+  execSync(`git init`, { cwd: initDir, stdio: 'ignore' });
+  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
+  execSync(`git add .`, { cwd: initDir, stdio: 'ignore' });
+  execSync(`git commit -m "Initial commit"`, { cwd: initDir, stdio: 'ignore' });
+  execSync(`git remote add origin ${dir}`, { cwd: initDir, stdio: 'ignore' });
+  execSync(`git push origin master:main`, { cwd: initDir, stdio: 'ignore' }); // push master to main
+  await cleanupDir(initDir);
+
   execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
 }
 
@@ -45,15 +66,26 @@ export async function initBareRepo(dir: string): Promise<void> {
  * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
  * We use an absolute path for rootDir to ensure tests don't pollute the project root.
  */
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
+export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.js'): Promise<string> {
     const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
     const remotePath = remoteRepo.split(path.sep).join('/');
     const allowedDir = workDir.split(path.sep).join('/');
 
-    const configModulePath = path.join(projectRoot, 'src/config.ts').split(path.sep).join('/');
+    // We MUST import from the built distribution because:
+    // 1. 'node bin/tgp.js' does not have a TS loader, so it cannot import .ts files.
+    // 2. The generated config itself must be .js.
+    // 3. The import path inside it must resolve to a .js file that Node can understand.
+    
+    // Verify dist exists
+    try {
+      await fs.access(path.join(projectRoot, 'dist/src/config.js'));
+    } catch {
+      // Fallback for dev/watch mode if dist doesn't exist (though E2E usually implies build)
+      // console.warn("Warning: dist/src/config.js not found. E2E tests might fail if running via 'node bin/tgp.js'.");
+    }
 
     const configContent = `
-import { defineTGPConfig } from '${configModulePath}';
+import { defineTGPConfig } from '${distConfigPath}';
 
 export default defineTGPConfig({
   rootDir: '${rootDir}',

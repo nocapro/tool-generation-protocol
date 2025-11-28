@@ -15,6 +15,7 @@ export interface KernelOptions {
   vfs: VFSAdapter; 
   env: KernelEnvironment;
   logger?: Logger;
+  sandboxAPI?: Record<string, unknown>;
 }
 
 export interface Kernel {
@@ -25,6 +26,7 @@ export interface Kernel {
   git: GitBackend;
   registry: Registry;
   logger: Logger;
+  sandboxAPI: Record<string, unknown>;
 }
 
 const defaultLogger: Logger = {
@@ -39,11 +41,12 @@ const defaultLogger: Logger = {
  * This wires up the configuration, the filesystem, and the git backend.
  */
 export function createKernel(opts: KernelOptions): Kernel {
-  const { config, vfs, env } = opts;
+  const { config, vfs, env, sandboxAPI } = opts;
   const logger = opts.logger ?? defaultLogger;
   
   const git = createGitBackend(env, config, logger);
   const registry = createRegistry(vfs);
+  const api = sandboxAPI ?? {};
 
   let isBooted = false;
 
@@ -53,6 +56,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     git,
     registry,
     logger,
+    sandboxAPI: api,
 
     async boot() {
       if (isBooted) return;

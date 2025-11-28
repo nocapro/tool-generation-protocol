@@ -1,3 +1,4 @@
+make sure to follow 5 test rules while also doing fixes without bandaids fake fixing... should has architectural paradigm 
 
 ===
 
