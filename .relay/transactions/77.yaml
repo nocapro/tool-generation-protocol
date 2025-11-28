@@ -1,0 +1,104 @@
+uuid: 17b2b620-3375-45d6-a212-005116757c91
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T13:15:43.237Z'
+gitCommitMsg: >-
+  fix: make cli entry point self-executing when run directly
+
+  Adds a check to `src/cli/index.ts` to execute the `cli()` function if the file
+  is being run as the main module (e.g. via `bun src/cli/index.ts`). This fixes
+  the E2E tests in dev mode where the build artifacts are missing and the test
+  runner falls back to executing the source code.
+promptSummary: >-
+  Make src/cli/index.ts self-executing when run directly to support test
+  fallback.
+reasoning:
+  - >-
+    To fix the issue where the CLI test passes with exit code 0 but fails to
+    produce output (because the CLI entry point wasn't executed), I will update
+    `src/cli/index.ts` to auto-execute the `cli()` function when the file is run
+    directly (e.g., via `bun src/cli/index.ts`).
+  - >-
+    This ensures that the test harness logic added in the previous step—which
+    falls back to running the source file when `dist/` is missing—actually
+    triggers the CLI logic.
+operations:
+  - type: write
+    path: src/cli/index.ts
+    content: >
+      --- src/cli/index.ts
+
+      +++ src/cli/index.ts
+
+      @@ -1,5 +1,6 @@
+       /* eslint-disable no-console */
+       import { initCommand } from './init.js';
+      +import { fileURLToPath } from 'node:url';
+       
+       export async function cli() {
+         const args = process.argv.slice(2);
+      @@ -28,3 +29,11 @@
+         tgp help    Show this message.
+       `);
+       }
+      +
+
+      +// Self-execution check: Run cli() if this file is the entry point.
+
+      +// This enables running the CLI from source (e.g. `bun src/cli/index.ts`)
+      for tests/dev.
+
+      +if (process.argv[1] === fileURLToPath(import.meta.url)) {
+
+      +  cli().catch((err) => {
+
+      +    console.error(err);
+
+      +    process.exit(1);
+
+      +  });
+
+      +}
+    patchStrategy: standard-diff
+snapshot:
+  src/cli/index.ts: |-
+    /* eslint-disable no-console */
+    import { initCommand } from './init.js';
+
+    export async function cli() {
+      const args = process.argv.slice(2);
+      const command = args[0];
+
+      switch (command) {
+        case 'init':
+          await initCommand();
+          break;
+
+        case 'help':
+        case '--help':
+        case '-h':
+          printHelp();
+          break;
+
+        default:
+          console.log(`Unknown command: ${command}`);
+          printHelp();
+          process.exit(1);
+      }
+    }
+
+    function printHelp() {
+      console.log(`
+    Tool Generation Protocol (TGP) CLI
+
+    Usage:
+      tgp init    Initialize a new TGP environment in the current directory.
+      tgp help    Show this message.
+    `);
+    }
+approved: true
+linesAdded: 10
+linesRemoved: 0
+linesDifference: 10
+gitCommittedAt: null
+status: committed
+id: 77
