@@ -27,11 +27,76 @@ interface GitWriteStrategy {
 }
 
 /**
+ * Adapter interface for Git Hosting Platforms.
+ * Handles platform-specific API calls like creating Pull Requests.
+ */
+interface GitPlatformAdapter {
+  createPullRequest(opts: {
+    title: string;
+    branch: string;
+    base: string;
+    body: string;
+  }): Promise<void>;
+}
+
+class GitHubAdapter implements GitPlatformAdapter {
+  constructor(
+    private repo: string,
+    private token: string,
+    private apiBaseUrl: string,
+    private logger: Logger
+  ) {}
+
+  async createPullRequest(opts: { title: string; branch: string; base: string; body: string }): Promise<void> {
+    const [owner, repoName] = this.repo.split('/');
+    const url = new URL(`/repos/${owner}/${repoName}/pulls`, this.apiBaseUrl).href;
+
+    this.logger.info(`Creating Pull Request on ${this.repo}...`);
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `token ${this.token}`,
+          'Accept': 'application/vnd.github.v3+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          title: opts.title,
+          head: opts.branch,
+          base: opts.base,
+          body: opts.body,
+        }),
+      });
+
+      const result = await response.json();
+      if (response.ok) {
+        this.logger.info(`Successfully created Pull Request: ${result.html_url}`);
+      } else if (response.status === 422) {
+        this.logger.warn(`Could not create PR (it may already exist): ${JSON.stringify(result.errors)}`);
+      } else {
+        this.logger.error(`GitHub API Error: ${response.status} ${response.statusText}`, result);
+      }
+    } catch (e) {
+      this.logger.error('Failed to create pull request via API.', e);
+      throw e;
+    }
+  }
+}
+
+class NotImplementedAdapter implements GitPlatformAdapter {
+  constructor(private provider: string) {}
+  async createPullRequest(): Promise<void> {
+    throw new Error(`Git Provider '${this.provider}' is not yet implemented.`);
+  }
+}
+
+/**
  * Factory to create the Git Backend based on configuration.
  */
 export function createGitBackend(deps: GitDependencies, config: TGPConfig, logger: Logger): GitBackend {
   const dir = config.rootDir;
-  const { repo, auth, branch, writeStrategy, apiBaseUrl } = config.git;
+  const { repo, auth, branch, writeStrategy, apiBaseUrl, provider } = config.git;
   const { fs, http } = deps;
 
   // Configuration for isomorphic-git
@@ -46,6 +111,14 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
     name: auth.user,
     email: auth.email,
   };
+
+  // Select Platform Adapter
+  let platformAdapter: GitPlatformAdapter;
+  if (provider === 'github') {
+    platformAdapter = new GitHubAdapter(repo, auth.token, apiBaseUrl, logger);
+  } else {
+    platformAdapter = new NotImplementedAdapter(provider);
+  }
 
   // --- Strategy Implementations ---
 
@@ -111,40 +184,6 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
          logger.info(`Already on feature branch: ${targetBranch}`);
       }
 
-      const createPullRequest = async () => {
-        const [owner, repoName] = repo.split('/');
-        const url = new URL(`/repos/${owner}/${repoName}/pulls`, apiBaseUrl).href;
-        
-        logger.info(`Creating Pull Request on ${repo}...`);
-
-        try {
-          // We use native fetch here, which is available in modern Node.
-          const response = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Authorization': `token ${auth.token}`,
-              'Accept': 'application/vnd.github.v3+json',
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({
-              title: message,
-              head: targetBranch,
-              base: branch,
-              body: `Forged by TGP.\nCommit Message: ${message}`,
-            }),
-          });
-          
-          const result = await response.json();
-          if (response.ok) {
-            logger.info(`Successfully created Pull Request: ${result.html_url}`);
-          } else if (response.status === 422) { // Unprocessable Entity - often means PR exists
-            logger.warn(`Could not create PR (it may already exist): ${JSON.stringify(result.errors)}`);
-          }
-        } catch (e) {
-          logger.error('Failed to create pull request via API.', e);
-        }
-      };
-
       for (const filepath of files) {
         await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
       }
@@ -165,7 +204,12 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
             ref: targetBranch,
           });
           logger.info(`Pushed ${targetBranch} to origin.`);
-          await createPullRequest();
+          await platformAdapter.createPullRequest({
+            title: message,
+            branch: targetBranch,
+            base: branch,
+            body: `Forged by TGP.\nCommit Message: ${message}`,
+          });
       } catch (e) {
           logger.warn(`Failed to push feature branch. Changes are local only.`, e);
       }

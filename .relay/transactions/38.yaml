@@ -1,0 +1,750 @@
+uuid: 0b837d02-c266-4747-8cbe-a8d6ee5fc04f
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T01:59:12.757Z'
+gitCommitMsg: >-
+  refactor(kernel): implement AST parsing for registry and Adapter pattern for
+  git providers
+promptSummary: >
+  Refactored stubbed implementations for production readiness:
+
+  1. Replaced Regex JSDoc extraction with TypeScript AST in registry.ts.
+
+  2. Implemented Adapter Pattern for Git Providers in git.ts, extracting
+  hardcoded GitHub logic.
+reasoning:
+  - >-
+    Here is the step-by-step refactoring to prepare the kernel for production
+    usage.
+  - '### Step 1: Refactor Registry Parsing (Switch to AST)'
+  - >-
+    I will modify `src/kernel/registry.ts` to replace the fragile regex-based
+    JSDoc extraction with a robust `typescript` AST implementation. This ensures
+    we correctly identify JSDoc comments attached to code or at the file
+    top-level, ignoring comments inside strings or templates.
+  - '### Step 2: Refactor Git Providers (Adapter Pattern)'
+  - >-
+    I will refactor `src/kernel/git.ts` to introduce a `GitPlatformAdapter`
+    interface. I'll extract the existing GitHub logic into a dedicated adapter
+    and create stubs for GitLab and Bitbucket. This makes the `prStrategy`
+    agnostic to the underlying provider.
+operations:
+  - type: write
+    path: src/kernel/registry.ts
+    content: >
+      --- src/kernel/registry.ts
+
+      +++ src/kernel/registry.ts
+
+      @@ -3,4 +3,5 @@
+       import { RegistryState, ToolMetadata } from '../types.js';
+       import * as path from 'path';
+      +import * as ts from 'typescript';
+       
+       export interface Registry {
+      @@ -15,16 +16,42 @@
+         function extractMetadata(filePath: string, code: string): ToolMetadata {
+           const name = path.basename(filePath, path.extname(filePath));
+      -    
+
+      -    // Simple JSDoc Regex: /** ... */
+
+      -    const jsDocMatch = code.match(/\/\*\*([\s\S]*?)\*\//);
+           let description = "No description provided.";
+      -    
+
+      -    if (jsDocMatch) {
+
+      -      const content = jsDocMatch[1];
+
+      -      // Clean up stars and whitespace
+
+      -      description = content
+
+      -        .split('\n')
+
+      -        .map(line => line.replace(/^\s*\*\s?/, '').trim())
+
+      -        .filter(line => !line.startsWith('@') && line.length > 0) //
+      Remove param tags and empty lines
+
+      -        .join(' ');
+
+      +
+
+      +    try {
+
+      +      // Use TypeScript AST to safely locate comments (avoids matching
+      inside strings/templates)
+
+      +      const sourceFile = ts.createSourceFile(
+
+      +        filePath,
+
+      +        code,
+
+      +        ts.ScriptTarget.ES2020,
+
+      +        true
+
+      +      );
+
+      +
+
+      +      const cleanJSDoc = (comment: string) => {
+
+      +        return comment
+
+      +          .replace(/^\/\*\*/, '')
+
+      +          .replace(/\*\/$/, '')
+
+      +          .split('\n')
+
+      +          .map(line => line.replace(/^\s*\*\s?/, '').trim())
+
+      +          .filter(line => !line.startsWith('@') && line.length > 0)
+
+      +          .join(' ');
+
+      +      };
+
+      +
+
+      +      const findComment = (pos: number) => {
+
+      +        const ranges = ts.getLeadingCommentRanges(code, pos);
+
+      +        if (ranges?.length) {
+
+      +          const range = ranges[ranges.length - 1]; // Closest to the node
+
+      +          if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
+
+      +            const text = code.substring(range.pos, range.end);
+
+      +            if (text.startsWith('/**')) return cleanJSDoc(text);
+
+      +          }
+
+      +        }
+
+      +        return null;
+
+      +      };
+
+      +
+
+      +      // 1. Try attached to first statement (e.g. export const...)
+
+      +      if (sourceFile.statements.length > 0) {
+
+      +        const extracted =
+      findComment(sourceFile.statements[0].getFullStart());
+
+      +        if (extracted) description = extracted;
+
+      +      }
+
+      +      
+
+      +      // 2. Fallback: Try top of file (detached)
+
+      +      if (description === "No description provided.") {
+
+      +        const extracted = findComment(0);
+
+      +        if (extracted) description = extracted;
+
+      +      }
+
+      +
+
+      +    } catch (err) {
+
+      +      console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling
+      back to default.`, err);
+           }
+    patchStrategy: standard-diff
+  - type: write
+    path: src/kernel/git.ts
+    content: >
+      --- src/kernel/git.ts
+
+      +++ src/kernel/git.ts
+
+      @@ -29,4 +29,66 @@
+       }
+       
+      +/**
+
+      + * Adapter interface for Git Hosting Platforms.
+
+      + * Handles platform-specific API calls like creating Pull Requests.
+
+      + */
+
+      +interface GitPlatformAdapter {
+
+      +  createPullRequest(opts: {
+
+      +    title: string;
+
+      +    branch: string;
+
+      +    base: string;
+
+      +    body: string;
+
+      +  }): Promise<void>;
+
+      +}
+
+      +
+
+      +class GitHubAdapter implements GitPlatformAdapter {
+
+      +  constructor(
+
+      +    private repo: string,
+
+      +    private token: string,
+
+      +    private apiBaseUrl: string,
+
+      +    private logger: Logger
+
+      +  ) {}
+
+      +
+
+      +  async createPullRequest(opts: { title: string; branch: string; base:
+      string; body: string }): Promise<void> {
+
+      +    const [owner, repoName] = this.repo.split('/');
+
+      +    const url = new URL(`/repos/${owner}/${repoName}/pulls`,
+      this.apiBaseUrl).href;
+
+      +
+
+      +    this.logger.info(`Creating Pull Request on ${this.repo}...`);
+
+      +
+
+      +    try {
+
+      +      const response = await fetch(url, {
+
+      +        method: 'POST',
+
+      +        headers: {
+
+      +          'Authorization': `token ${this.token}`,
+
+      +          'Accept': 'application/vnd.github.v3+json',
+
+      +          'Content-Type': 'application/json',
+
+      +        },
+
+      +        body: JSON.stringify({
+
+      +          title: opts.title,
+
+      +          head: opts.branch,
+
+      +          base: opts.base,
+
+      +          body: opts.body,
+
+      +        }),
+
+      +      });
+
+      +
+
+      +      const result = await response.json();
+
+      +      if (response.ok) {
+
+      +        this.logger.info(`Successfully created Pull Request:
+      ${result.html_url}`);
+
+      +      } else if (response.status === 422) {
+
+      +        this.logger.warn(`Could not create PR (it may already exist):
+      ${JSON.stringify(result.errors)}`);
+
+      +      } else {
+
+      +        this.logger.error(`GitHub API Error: ${response.status}
+      ${response.statusText}`, result);
+
+      +      }
+
+      +    } catch (e) {
+
+      +      this.logger.error('Failed to create pull request via API.', e);
+
+      +      throw e;
+
+      +    }
+
+      +  }
+
+      +}
+
+      +
+
+      +class NotImplementedAdapter implements GitPlatformAdapter {
+
+      +  constructor(private provider: string) {}
+
+      +  async createPullRequest(): Promise<void> {
+
+      +    throw new Error(`Git Provider '${this.provider}' is not yet
+      implemented.`);
+
+      +  }
+
+      +}
+
+      +
+       /**
+        * Factory to create the Git Backend based on configuration.
+        */
+       export function createGitBackend(deps: GitDependencies, config: TGPConfig, logger: Logger): GitBackend {
+         const dir = config.rootDir;
+      -  const { repo, auth, branch, writeStrategy, apiBaseUrl } = config.git;
+
+      +  const { repo, auth, branch, writeStrategy, apiBaseUrl, provider } =
+      config.git;
+         const { fs, http } = deps;
+       
+      @@ -47,4 +109,13 @@
+         };
+       
+      +  // Select Platform Adapter
+
+      +  let platformAdapter: GitPlatformAdapter;
+
+      +  if (provider === 'github') {
+
+      +    platformAdapter = new GitHubAdapter(repo, auth.token, apiBaseUrl,
+      logger);
+
+      +  } else {
+
+      +    platformAdapter = new NotImplementedAdapter(provider);
+
+      +  }
+
+      +
+         // --- Strategy Implementations ---
+       
+      @@ -109,38 +180,10 @@
+                logger.info(`Already on feature branch: ${targetBranch}`);
+             }
+       
+      -      const createPullRequest = async () => {
+
+      -        const [owner, repoName] = repo.split('/');
+
+      -        const url = new URL(`/repos/${owner}/${repoName}/pulls`,
+      apiBaseUrl).href;
+
+      -        
+
+      -        logger.info(`Creating Pull Request on ${repo}...`);
+
+      -
+
+      -        try {
+
+      -          // We use native fetch here, which is available in modern Node.
+
+      -          const response = await fetch(url, {
+
+      -            method: 'POST',
+
+      -            headers: {
+
+      -              'Authorization': `token ${auth.token}`,
+
+      -              'Accept': 'application/vnd.github.v3+json',
+
+      -              'Content-Type': 'application/json',
+
+      -            },
+
+      -            body: JSON.stringify({
+
+      -              title: message,
+
+      -              head: targetBranch,
+
+      -              base: branch,
+
+      -              body: `Forged by TGP.\nCommit Message: ${message}`,
+
+      -            }),
+
+      -          });
+
+      -          
+
+      -          const result = await response.json();
+
+      -          if (response.ok) {
+
+      -            logger.info(`Successfully created Pull Request:
+      ${result.html_url}`);
+
+      -          } else if (response.status === 422) { // Unprocessable Entity -
+      often means PR exists
+
+      -            logger.warn(`Could not create PR (it may already exist):
+      ${JSON.stringify(result.errors)}`);
+
+      -          }
+
+      -        } catch (e) {
+
+      -          logger.error('Failed to create pull request via API.', e);
+
+      -        }
+
+      -      };
+
+      -
+             for (const filepath of files) {
+               await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+      @@ -162,5 +205,10 @@
+                 });
+                 logger.info(`Pushed ${targetBranch} to origin.`);
+      -          await createPullRequest();
+
+      +          await platformAdapter.createPullRequest({
+
+      +            title: message,
+
+      +            branch: targetBranch,
+
+      +            base: branch,
+
+      +            body: `Forged by TGP.\nCommit Message: ${message}`,
+
+      +          });
+             } catch (e) {
+                 logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+    patchStrategy: standard-diff
+snapshot:
+  src/kernel/registry.ts: |-
+    /* eslint-disable no-console */
+    import { VFSAdapter } from '../vfs/types.js';
+    import { RegistryState, ToolMetadata } from '../types.js';
+    import * as path from 'path';
+
+    export interface Registry {
+      hydrate(): Promise<void>;
+      register(filePath: string, code: string): Promise<void>;
+      list(): ToolMetadata[];
+      sync(): Promise<void>;
+    }
+
+    export function createRegistry(vfs: VFSAdapter): Registry {
+      let state: RegistryState = { tools: {} };
+      const META_PATH = 'meta.json';
+
+      // Helper to parse JSDoc
+      function extractMetadata(filePath: string, code: string): ToolMetadata {
+        const name = path.basename(filePath, path.extname(filePath));
+        
+        // Simple JSDoc Regex: /** ... */
+        const jsDocMatch = code.match(/\/\*\*([\s\S]*?)\*\//);
+        let description = "No description provided.";
+        
+        if (jsDocMatch) {
+          const content = jsDocMatch[1];
+          // Clean up stars and whitespace
+          description = content
+            .split('\n')
+            .map(line => line.replace(/^\s*\*\s?/, '').trim())
+            .filter(line => !line.startsWith('@') && line.length > 0) // Remove param tags and empty lines
+            .join(' ');
+        }
+
+        return {
+          name,
+          description: description || "No description provided.",
+          path: filePath
+        };
+      }
+
+      return {
+        async hydrate() {
+          if (await vfs.exists(META_PATH)) {
+            try {
+              const content = await vfs.readFile(META_PATH);
+              state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+            } catch (err) {
+              console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
+              state = { tools: {} };
+            }
+          }
+        },
+
+        async register(filePath: string, code: string) {
+          // Ignore non-tool files (e.g. config or hidden files)
+          if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+          const metadata = extractMetadata(filePath, code);
+          state.tools[filePath] = metadata;
+          
+          // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
+          // during tool creation.
+          await this.sync();
+        },
+
+        list() {
+          return Object.values(state.tools);
+        },
+
+        async sync() {
+          await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+        }
+      };
+    }
+  src/kernel/git.ts: >2
+     
+    import * as git from 'isomorphic-git';
+
+    import { TGPConfig, Logger } from '../types.js';
+
+    import * as path from 'path';
+
+
+    /**
+     * The Git Interface required by the Kernel.
+     * We rely on the 'fs' interface compatible with isomorphic-git.
+     */
+    export interface GitBackend {
+      hydrate(): Promise<void>;
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    export interface GitDependencies {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      fs: any;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      http: any;
+    }
+
+
+    /**
+     * Strategy interface for persisting changes to the upstream repository.
+     */
+    interface GitWriteStrategy {
+      persist(message: string, files: string[]): Promise<void>;
+    }
+
+
+    /**
+     * Factory to create the Git Backend based on configuration.
+     */
+    export function createGitBackend(deps: GitDependencies, config: TGPConfig,
+    logger: Logger): GitBackend {
+      const dir = config.rootDir;
+      const { repo, auth, branch, writeStrategy, apiBaseUrl } = config.git;
+      const { fs, http } = deps;
+
+      // Configuration for isomorphic-git
+      const gitOpts = {
+        fs,
+        dir,
+        http,
+        onAuth: () => ({ username: auth.token }),
+      };
+
+      const author = {
+        name: auth.user,
+        email: auth.email,
+      };
+
+      // --- Strategy Implementations ---
+
+      const directStrategy: GitWriteStrategy = {
+        async persist(message: string, filesToAdd: string[]) {
+          if (filesToAdd.length === 0) return;
+
+          // 1. Add files
+          for (const filepath of filesToAdd) {
+            try {
+               // check if file exists before adding
+               await git.add({ ...gitOpts, filepath });
+            } catch (e) {
+               logger.warn(`Git Add failed for ${filepath}`, e);
+               throw new Error(`Failed to stage file ${filepath}: ${e instanceof Error ? e.message : String(e)}`);
+            }
+          }
+
+          try {
+            // 2. Commit
+            const sha = await git.commit({
+              ...gitOpts,
+              message,
+              author,
+            });
+            logger.info(`Committed ${sha.slice(0, 7)}: ${message}`);
+
+            // 3. Push
+            logger.info(`Pushing to ${branch}...`);
+            await git.push({
+              ...gitOpts,
+              remote: 'origin',
+              ref: branch,
+            });
+          } catch (e) {
+            logger.error(`Git Commit/Push failed:`, e);
+            throw new Error(`Failed to persist changes to Git: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
+      };
+
+      const prStrategy: GitWriteStrategy = {
+        async persist(message: string, files: string[]) {
+          if (files.length === 0) return;
+          
+          // 1. Get current branch
+          const currentBranch = await git.currentBranch({ ...gitOpts }) ?? 'HEAD';
+          
+          // 2. If we are on the protected branch (main/master), we must fork
+          let targetBranch = currentBranch;
+          
+          if (currentBranch === branch) {
+             const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+             // Sanitize message for branch name
+             const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+             targetBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+             
+             logger.info(`Switching to new branch: ${targetBranch}`);
+             
+             await git.branch({ ...gitOpts, ref: targetBranch });
+             await git.checkout({ ...gitOpts, ref: targetBranch });
+          } else {
+             logger.info(`Already on feature branch: ${targetBranch}`);
+          }
+
+          const createPullRequest = async () => {
+            const [owner, repoName] = repo.split('/');
+            const url = new URL(`/repos/${owner}/${repoName}/pulls`, apiBaseUrl).href;
+            
+            logger.info(`Creating Pull Request on ${repo}...`);
+
+            try {
+              // We use native fetch here, which is available in modern Node.
+              const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `token ${auth.token}`,
+                  'Accept': 'application/vnd.github.v3+json',
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                  title: message,
+                  head: targetBranch,
+                  base: branch,
+                  body: `Forged by TGP.\nCommit Message: ${message}`,
+                }),
+              });
+              
+              const result = await response.json();
+              if (response.ok) {
+                logger.info(`Successfully created Pull Request: ${result.html_url}`);
+              } else if (response.status === 422) { // Unprocessable Entity - often means PR exists
+                logger.warn(`Could not create PR (it may already exist): ${JSON.stringify(result.errors)}`);
+              }
+            } catch (e) {
+              logger.error('Failed to create pull request via API.', e);
+            }
+          };
+
+          for (const filepath of files) {
+            await git.add({ ...gitOpts, filepath }).catch(e => logger.warn(`Git Add failed ${filepath}`, e));
+          }
+
+          await git.commit({
+            ...gitOpts,
+            message: message,
+            author,
+          });
+          
+          logger.info(`Changes committed to ${targetBranch}.`);
+          
+          // Try to push the feature branch if auth is present
+          try {
+              await git.push({
+                ...gitOpts,
+                remote: 'origin',
+                ref: targetBranch,
+              });
+              logger.info(`Pushed ${targetBranch} to origin.`);
+              await createPullRequest();
+          } catch (e) {
+              logger.warn(`Failed to push feature branch. Changes are local only.`, e);
+          }
+        }
+      };
+
+      // Select Strategy
+      const strategy = writeStrategy === 'pr' ? prStrategy : directStrategy;
+
+      return {
+        async hydrate() {
+          try {
+            // 1. Check if repo exists locally
+            const gitDirExists = (await fs.promises.stat(path.join(dir, '.git'))
+              .then(() => true)
+              .catch(() => false)) as boolean;
+
+            if (!gitDirExists) {
+              // Clone
+              logger.info(`Cloning ${repo} into ${dir}...`);
+              await git.clone({
+                ...gitOpts,
+                url: `https://github.com/${repo}.git`,
+                ref: branch,
+                singleBranch: true,
+                depth: 1,
+              });
+            } else {
+              // Pull
+              logger.info(`Pulling latest from ${repo}...`);
+              await git.pull({
+                ...gitOpts,
+                remote: 'origin',
+                ref: branch,
+                singleBranch: true,
+                author,
+              });
+            }
+          } catch (error) {
+            logger.error(`Git Hydration Failed:`, error);
+            // Fail fast: The agent cannot operate without a consistent filesystem state.
+            throw error;
+          }
+        },
+
+        async persist(message: string, filesToAdd: string[]) {
+          return strategy.persist(message, filesToAdd);
+        }
+      };
+    }
+approved: true
+linesAdded: 127
+linesRemoved: 48
+linesDifference: 175
+gitCommittedAt: null
+status: committed
+id: 38

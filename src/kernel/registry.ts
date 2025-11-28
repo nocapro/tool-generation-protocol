@@ -2,6 +2,7 @@
 import { VFSAdapter } from '../vfs/types.js';
 import { RegistryState, ToolMetadata } from '../types.js';
 import * as path from 'path';
+import * as ts from 'typescript';
 
 export interface Registry {
   hydrate(): Promise<void>;
@@ -17,19 +18,53 @@ export function createRegistry(vfs: VFSAdapter): Registry {
   // Helper to parse JSDoc
   function extractMetadata(filePath: string, code: string): ToolMetadata {
     const name = path.basename(filePath, path.extname(filePath));
-    
-    // Simple JSDoc Regex: /** ... */
-    const jsDocMatch = code.match(/\/\*\*([\s\S]*?)\*\//);
     let description = "No description provided.";
-    
-    if (jsDocMatch) {
-      const content = jsDocMatch[1];
-      // Clean up stars and whitespace
-      description = content
-        .split('\n')
-        .map(line => line.replace(/^\s*\*\s?/, '').trim())
-        .filter(line => !line.startsWith('@') && line.length > 0) // Remove param tags and empty lines
-        .join(' ');
+
+    try {
+      // Use TypeScript AST to safely locate comments (avoids matching inside strings/templates)
+      const sourceFile = ts.createSourceFile(
+        filePath,
+        code,
+        ts.ScriptTarget.ES2020,
+        true
+      );
+
+      const cleanJSDoc = (comment: string) => {
+        return comment
+          .replace(/^\/\*\*/, '')
+          .replace(/\*\/$/, '')
+          .split('\n')
+          .map(line => line.replace(/^\s*\*\s?/, '').trim())
+          .filter(line => !line.startsWith('@') && line.length > 0)
+          .join(' ');
+      };
+
+      const findComment = (pos: number) => {
+        const ranges = ts.getLeadingCommentRanges(code, pos);
+        if (ranges?.length) {
+          const range = ranges[ranges.length - 1]; // Closest to the node
+          if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
+            const text = code.substring(range.pos, range.end);
+            if (text.startsWith('/**')) return cleanJSDoc(text);
+          }
+        }
+        return null;
+      };
+
+      // 1. Try attached to first statement (e.g. export const...)
+      if (sourceFile.statements.length > 0) {
+        const extracted = findComment(sourceFile.statements[0].getFullStart());
+        if (extracted) description = extracted;
+      }
+      
+      // 2. Fallback: Try top of file (detached)
+      if (description === "No description provided.") {
+        const extracted = findComment(0);
+        if (extracted) description = extracted;
+      }
+
+    } catch (err) {
+      console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling back to default.`, err);
     }
 
     return {

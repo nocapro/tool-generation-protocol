@@ -7,6 +7,8 @@ generate e2e, integration, unit test cases plan based on readme.md
 
 spot any unimplemented, todo, stub, placeholder etc... we need production ready codebase
 
+analyse codebase to spot mock, unimplemented, todo, stub, placeholders.. because I want production ready
+
 === DONE
 
 Lets achieve readme.md requirements compliance
