@@ -59,6 +59,70 @@ tsup.config.ts
 
 # Files
 
+## File: src/config.ts
+````typescript
+import { pathToFileURL } from 'url';
+import { TGPConfig, TGPConfigSchema } from './types.js';
+
+/**
+ * Identity function to provide type inference for configuration files.
+ * usage: export default defineTGPConfig({ ... })
+ */
+export function defineTGPConfig(config: TGPConfig): TGPConfig {
+  return config;
+}
+
+/**
+ * Dynamically loads a TGP configuration file, validates it against the schema,
+ * and returns the typed configuration object.
+ * 
+ * @param configPath - Absolute or relative path to the config file (e.g., ./tgp.config.ts)
+ */
+export async function loadTGPConfig(configPath: string): Promise<TGPConfig> {
+  try {
+    // Convert path to file URL to ensure compatibility with ESM imports
+    // We assume the host environment (Node) can handle the import.
+    // In Serverless environments, the config might be injected differently, 
+    // but this loader is primarily for the CLI/Node runtime.
+    const importPath = pathToFileURL(configPath).href;
+    
+    const module = await import(importPath);
+    
+    // Support both default export and named export 'config'
+    const rawConfig = module.default || module.config;
+
+    if (!rawConfig) {
+      throw new Error(`No default export found in ${configPath}`);
+    }
+
+    // Runtime Validation: Ensure the user provided valid configuration
+    const parsed = TGPConfigSchema.safeParse(rawConfig);
+
+    if (!parsed.success) {
+      const errors = parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('\n');
+      throw new Error(`Invalid TGP Configuration:\n${errors}`);
+    }
+
+    return parsed.data;
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new Error(`Failed to load TGP config from ${configPath}: ${error.message}`);
+    }
+    throw error;
+  }
+}
+````
+
+## File: src/index.ts
+````typescript
+// Exporting the Core DNA for consumers
+export * from './types.js';
+export * from './config.js';
+export * from './tools/index.js';
+export * from './tgp.js';
+export * from './adapter.js';
+````
+
 ## File: test/docker/npm-compat.test.ts
 ````typescript
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
@@ -263,6 +327,7 @@ export async function createTarball(cwd: string): Promise<string> {
   // Ensure we have a clean build. 'npm pack' relies on the presence of dist/ 
   // if 'dist' is in the 'files' list in package.json.
   try {
+      // Use 'inherit' so we see the build output
       execSync('npm run build', { cwd, stdio: 'inherit' });
   } catch (e) {
       throw new Error('Build failed before packing');
@@ -289,9 +354,26 @@ export class Container {
   constructor(public image: string) {}
 
   /**
+   * Ensures the image exists locally. If not, pulls it with visibility.
+   */
+  async ensureImage(): Promise<void> {
+    const inspect = spawnSync('docker', ['inspect', '--type=image', this.image], { stdio: 'ignore' });
+    if (inspect.status === 0) return; // Image exists
+
+    console.log(`[Docker] Pulling image ${this.image}... (this may take a while)`);
+    // Use inherit to show progress bars
+    const pull = spawnSync('docker', ['pull', this.image], { stdio: 'inherit' });
+    if (pull.status !== 0) {
+      throw new Error(`Failed to pull image ${this.image}`);
+    }
+  }
+
+  /**
    * Starts the container in detached mode with TTY to keep it alive.
    */
   async start(): Promise<void> {
+    await this.ensureImage();
+
     const res = spawnSync('docker', ['run', '-d', '--rm', '-t', this.image, 'bash'], { encoding: 'utf-8' });
     if (res.status !== 0) {
         throw new Error(`Failed to start container: ${res.stderr}`);
@@ -357,70 +439,6 @@ export class Container {
     }
   }
 }
-````
-
-## File: src/config.ts
-````typescript
-import { pathToFileURL } from 'url';
-import { TGPConfig, TGPConfigSchema } from './types.js';
-
-/**
- * Identity function to provide type inference for configuration files.
- * usage: export default defineTGPConfig({ ... })
- */
-export function defineTGPConfig(config: TGPConfig): TGPConfig {
-  return config;
-}
-
-/**
- * Dynamically loads a TGP configuration file, validates it against the schema,
- * and returns the typed configuration object.
- * 
- * @param configPath - Absolute or relative path to the config file (e.g., ./tgp.config.ts)
- */
-export async function loadTGPConfig(configPath: string): Promise<TGPConfig> {
-  try {
-    // Convert path to file URL to ensure compatibility with ESM imports
-    // We assume the host environment (Node) can handle the import.
-    // In Serverless environments, the config might be injected differently, 
-    // but this loader is primarily for the CLI/Node runtime.
-    const importPath = pathToFileURL(configPath).href;
-    
-    const module = await import(importPath);
-    
-    // Support both default export and named export 'config'
-    const rawConfig = module.default || module.config;
-
-    if (!rawConfig) {
-      throw new Error(`No default export found in ${configPath}`);
-    }
-
-    // Runtime Validation: Ensure the user provided valid configuration
-    const parsed = TGPConfigSchema.safeParse(rawConfig);
-
-    if (!parsed.success) {
-      const errors = parsed.error.errors.map(e => `${e.path.join('.')}: ${e.message}`).join('\n');
-      throw new Error(`Invalid TGP Configuration:\n${errors}`);
-    }
-
-    return parsed.data;
-  } catch (error) {
-    if (error instanceof Error) {
-      throw new Error(`Failed to load TGP config from ${configPath}: ${error.message}`);
-    }
-    throw error;
-  }
-}
-````
-
-## File: src/index.ts
-````typescript
-// Exporting the Core DNA for consumers
-export * from './types.js';
-export * from './config.js';
-export * from './tools/index.js';
-export * from './tgp.js';
-export * from './adapter.js';
 ````
 
 ## File: test/unit/utils.ts
@@ -4284,9 +4302,9 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
   "type": "module",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
-      "require": "./dist/index.cjs",
-      "types": "./dist/index.d.ts"
+      "require": "./dist/index.cjs"
     }
   },
   "files": [
