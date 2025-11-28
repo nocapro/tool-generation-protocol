@@ -1,3 +1,14 @@
+we need test cases that runs on docker containers to see wether the npm published tgp version has all passed tests. because I dont want to say "it works on my machine" when npm devs user submit issues 
+
+=== 
+
+we need test cases to verify end to end typesafety like tgpTools from '@tgp/core' accepted by import { generateText } from 'ai';
+
+and many cases
+
+
+===
+
 lets ditch vitest with bun:test for performance
 
 ===
