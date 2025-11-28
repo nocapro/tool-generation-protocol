@@ -341,85 +341,6 @@ Usage:
 }
 ````
 
-## File: src/kernel/registry.ts
-````typescript
-/* eslint-disable no-console */
-import { VFSAdapter } from '../vfs/types.js';
-import { RegistryState, ToolMetadata } from '../types.js';
-import * as path from 'path';
-
-export interface Registry {
-  hydrate(): Promise<void>;
-  register(filePath: string, code: string): Promise<void>;
-  list(): ToolMetadata[];
-  sync(): Promise<void>;
-}
-
-export function createRegistry(vfs: VFSAdapter): Registry {
-  let state: RegistryState = { tools: {} };
-  const META_PATH = 'meta.json';
-
-  // Helper to parse JSDoc
-  function extractMetadata(filePath: string, code: string): ToolMetadata {
-    const name = path.basename(filePath, path.extname(filePath));
-    
-    // Simple JSDoc Regex: /** ... */
-    const jsDocMatch = code.match(/\/\*\*([\s\S]*?)\*\//);
-    let description = "No description provided.";
-    
-    if (jsDocMatch) {
-      const content = jsDocMatch[1];
-      // Clean up stars and whitespace
-      description = content
-        .split('\n')
-        .map(line => line.replace(/^\s*\*\s?/, '').trim())
-        .filter(line => !line.startsWith('@') && line.length > 0) // Remove param tags and empty lines
-        .join(' ');
-    }
-
-    return {
-      name,
-      description: description || "No description provided.",
-      path: filePath
-    };
-  }
-
-  return {
-    async hydrate() {
-      if (await vfs.exists(META_PATH)) {
-        try {
-          const content = await vfs.readFile(META_PATH);
-          state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
-        } catch (err) {
-          console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
-          state = { tools: {} };
-        }
-      }
-    },
-
-    async register(filePath: string, code: string) {
-      // Ignore non-tool files (e.g. config or hidden files)
-      if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
-
-      const metadata = extractMetadata(filePath, code);
-      state.tools[filePath] = metadata;
-      
-      // We don't sync on every register to avoid IO storm if called in loop, 
-      // but for write_file it is fine.
-      await this.sync();
-    },
-
-    list() {
-      return Object.values(state.tools);
-    },
-
-    async sync() {
-      await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
-    }
-  };
-}
-````
-
 ## File: src/tools/fs.ts
 ````typescript
 import { z } from 'zod';
@@ -687,6 +608,85 @@ export interface VFSAdapter {
 }
 ````
 
+## File: src/kernel/registry.ts
+````typescript
+/* eslint-disable no-console */
+import { VFSAdapter } from '../vfs/types.js';
+import { RegistryState, ToolMetadata } from '../types.js';
+import * as path from 'path';
+
+export interface Registry {
+  hydrate(): Promise<void>;
+  register(filePath: string, code: string): Promise<void>;
+  list(): ToolMetadata[];
+  sync(): Promise<void>;
+}
+
+export function createRegistry(vfs: VFSAdapter): Registry {
+  let state: RegistryState = { tools: {} };
+  const META_PATH = 'meta.json';
+
+  // Helper to parse JSDoc
+  function extractMetadata(filePath: string, code: string): ToolMetadata {
+    const name = path.basename(filePath, path.extname(filePath));
+    
+    // Simple JSDoc Regex: /** ... */
+    const jsDocMatch = code.match(/\/\*\*([\s\S]*?)\*\//);
+    let description = "No description provided.";
+    
+    if (jsDocMatch) {
+      const content = jsDocMatch[1];
+      // Clean up stars and whitespace
+      description = content
+        .split('\n')
+        .map(line => line.replace(/^\s*\*\s?/, '').trim())
+        .filter(line => !line.startsWith('@') && line.length > 0) // Remove param tags and empty lines
+        .join(' ');
+    }
+
+    return {
+      name,
+      description: description || "No description provided.",
+      path: filePath
+    };
+  }
+
+  return {
+    async hydrate() {
+      if (await vfs.exists(META_PATH)) {
+        try {
+          const content = await vfs.readFile(META_PATH);
+          state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+        } catch (err) {
+          console.warn('[TGP] Failed to parse meta.json, starting fresh.', err);
+          state = { tools: {} };
+        }
+      }
+    },
+
+    async register(filePath: string, code: string) {
+      // Ignore non-tool files (e.g. config or hidden files)
+      if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+      const metadata = extractMetadata(filePath, code);
+      state.tools[filePath] = metadata;
+      
+      // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
+      // during tool creation.
+      await this.sync();
+    },
+
+    list() {
+      return Object.values(state.tools);
+    },
+
+    async sync() {
+      await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+    }
+  };
+}
+````
+
 ## File: src/sandbox/isolate.ts
 ````typescript
 import ivm from 'isolated-vm';
@@ -792,87 +792,6 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
         isolate.dispose();
       }
     }
-  };
-}
-````
-
-## File: src/tools/validation.ts
-````typescript
-import { z } from 'zod';
-import { transform } from 'esbuild';
-import { Kernel } from '../kernel/core.js';
-import { AgentTool } from './types.js';
-
-export const CheckToolParams = z.object({
-  path: z.string().describe('The relative path of the tool to validate'),
-});
-
-export function createValidationTools(kernel: Kernel) {
-  return {
-    check_tool: {
-      description: 'Run JIT compilation and syntax check on a tool.',
-      parameters: CheckToolParams,
-      execute: async ({ path }) => {
-        try {
-          const code = await kernel.vfs.readFile(path);
-          
-          // Dry-run transformation to catch syntax errors
-          await transform(code, {
-            loader: 'ts',
-            format: 'cjs',
-            target: 'es2020',
-          });
-
-          // LINTING: Enforce the "8 Standards" via Static Analysis
-          const errors: string[] = [];
-
-          // 1. Strict Typing: No 'any'
-          if (/\bany\b/.test(code)) {
-            errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
-          }
-
-          // 2. Safety: No 'eval' or 'Function' constructor
-          if (/\beval\(/.test(code) || /\bnew Function\(/.test(code)) {
-            errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
-          }
-
-          // 3. Stateless: No process global access (except inside standard library wrappers which are hidden)
-          if (/\bprocess\./.test(code) && !code.includes('process.env.NODE_ENV')) {
-            errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
-          }
-
-          // 4. Abstract / No Magic Numbers (Heuristic)
-          // We look for 'const x = 0.05' type patterns.
-          // This matches: const name = number; (with optional decimals)
-          // We skip common integers like 0, 1, -1, 100 which are often used for loops or percentages base.
-          const magicNumMatch = code.match(/\bconst\s+[a-zA-Z0-9_]+\s*=\s*(\d+(?:\.\d+)?)\s*;/);
-          if (magicNumMatch) {
-            const val = parseFloat(magicNumMatch[1]);
-            if (val !== 0 && val !== 1 && val !== -1 && val !== 100) {
-               errors.push(`Violation [Standard 1]: Found potential magic number '${magicNumMatch[0]}'. Abstract logic from data (e.g., args.taxRate, not 0.05).`);
-            }
-          }
-
-          // 5. No Hardcoded Secrets/IDs
-          // Emails
-          if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(code)) {
-            errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
-          }
-          // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
-          if (/['"][a-zA-Z0-9-]{24,}['"]/.test(code)) {
-             errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
-          }
-
-          return { valid: errors.length === 0, errors };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } catch (error: any) {
-          // esbuild errors are usually descriptive
-          const msg = error.message ?? String(error);
-          // Return valid: false so the model can reason about the error, rather than crashing the tool call
-          return { valid: false, errors: [msg] };
-        }
-      },
-    } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
   };
 }
 ````
@@ -1015,6 +934,128 @@ export function createExecTools(kernel: Kernel) {
       },
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as AgentTool<typeof ExecToolParams, any>,
+  };
+}
+````
+
+## File: src/tools/validation.ts
+````typescript
+import { z } from 'zod';
+import * as ts from 'typescript';
+import { Kernel } from '../kernel/core.js';
+import { AgentTool } from './types.js';
+
+export const CheckToolParams = z.object({
+  path: z.string().describe('The relative path of the tool to validate'),
+});
+
+export function createValidationTools(kernel: Kernel) {
+  return {
+    check_tool: {
+      description: 'Run JIT compilation and AST-based static analysis on a tool.',
+      parameters: CheckToolParams,
+      execute: async ({ path }) => {
+        try {
+          const code = await kernel.vfs.readFile(path);
+          
+          // 1. Parse AST
+          // We use ES2020 as target to match the sandbox environment
+          const sourceFile = ts.createSourceFile(
+            path,
+            code,
+            ts.ScriptTarget.ES2020,
+            true
+          );
+
+          const errors: string[] = [];
+
+          // 2. Recursive AST Visitor
+          const visit = (node: ts.Node) => {
+            // [Standard 3] Strict Typing: No 'any'
+            if (node.kind === ts.SyntaxKind.AnyKeyword) {
+               errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+            }
+
+            // [Safety] No 'eval'
+            if (ts.isCallExpression(node)) {
+                if (ts.isIdentifier(node.expression) && node.expression.text === 'eval') {
+                    errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+                }
+            }
+
+            // [Safety] No 'new Function(...)'
+            if (ts.isNewExpression(node)) {
+                if (ts.isIdentifier(node.expression) && node.expression.text === 'Function') {
+                    errors.push("Violation [Safety]: Dynamic code execution ('Function' constructor) is prohibited.");
+                }
+            }
+
+            // [Standard 4] Stateless: No process global access (except process.env.NODE_ENV)
+            if (ts.isIdentifier(node) && node.text === 'process') {
+                // Check context to see if allowed.
+                // We allow strict access to `process.env.NODE_ENV`.
+                // AST Structure: PropertyAccess(NODE_ENV) -> PropertyAccess(env) -> Identifier(process)
+                
+                let isAllowed = false;
+                
+                // Ensure parent is property access 'env'
+                if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && node.parent.name.text === 'env') {
+                     // Ensure grandparent is property access 'NODE_ENV'
+                     if (ts.isPropertyAccessExpression(node.parent.parent) && node.parent.parent.expression === node.parent && node.parent.parent.name.text === 'NODE_ENV') {
+                         isAllowed = true;
+                     }
+                }
+                
+                if (!isAllowed) {
+                     // We check if this identifier is being used as a property access base or standalone.
+                     // To avoid noise, we only report if it's the base of a property access OR used standalone.
+                     // If it's a property of something else (e.g. myObj.process), parent is PropertyAccess but expression is NOT node.
+                     if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
+                         // This is something.process - Allowed
+                     } else {
+                         errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+                     }
+                }
+            }
+
+            // [Standard 1] No Magic Numbers
+            if (ts.isNumericLiteral(node)) {
+                const val = parseFloat(node.text);
+                const allowed = [0, 1, -1, 100, 1000]; 
+                if (!allowed.includes(val)) {
+                    // Filter out array indices? Hard to detect without type checker.
+                    // We enforce strictness: abstract data to args.
+                    errors.push(`Violation [Standard 1]: Found potential magic number '${node.text}'. Abstract logic from data.`);
+                }
+            }
+
+            // [Standard 7] No Hardcoded Secrets
+            if (ts.isStringLiteral(node)) {
+                const text = node.text;
+                // Emails
+                if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(text)) {
+                     errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+                }
+                // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+                // Must be 24+ chars, alphanumeric mixed, no spaces.
+                if (/[a-zA-Z0-9-]{24,}/.test(text) && !text.includes(' ')) {
+                     errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+                }
+            }
+
+            ts.forEachChild(node, visit);
+          };
+
+          visit(sourceFile);
+
+          return { valid: errors.length === 0, errors };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } catch (error: any) {
+          const msg = error.message ?? String(error);
+          return { valid: false, errors: [msg] };
+        }
+      },
+    } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
   };
 }
 ````
@@ -1191,53 +1232,6 @@ export interface Logger {
   info(message: string, ...args: any[]): void;
   warn(message: string, ...args: any[]): void;
   error(message: string, ...args: any[]): void;
-}
-````
-
-## File: package.json
-````json
-{
-  "name": "@tgp/core",
-  "version": "0.0.1",
-  "description": "The Tool Generation Protocol",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
-  "type": "module",
-  "scripts": {
-    "build": "tsc",
-    "dev": "tsx src/cli/index.ts",
-    "lint": "eslint src/**/*.ts",
-    "lint:fix": "eslint src/**/*.ts --fix",
-    "test": "vitest run",
-    "tgp": "node bin/tgp.js"
-  },
-  "keywords": [
-    "ai",
-    "agent",
-    "protocol",
-    "backend"
-  ],
-  "author": "",
-  "license": "MIT",
-  "bin": {
-    "tgp": "./bin/tgp.js"
-  },
-  "dependencies": {
-    "esbuild": "^0.19.12",
-    "isolated-vm": "^6.0.2",
-    "isomorphic-git": "^1.35.1",
-    "zod": "^3.25.76",
-    "zod-to-json-schema": "^3.22.4"
-  },
-  "devDependencies": {
-    "@types/node": "^20.19.25",
-    "@typescript-eslint/eslint-plugin": "^8.48.0",
-    "@typescript-eslint/parser": "^8.48.0",
-    "eslint": "^9.39.1",
-    "tsx": "^4.16.2",
-    "typescript": "^5.9.3",
-    "vitest": "^1.6.0"
-  }
 }
 ````
 
@@ -1516,6 +1510,142 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 }
 ````
 
+## File: package.json
+````json
+{
+  "name": "@tgp/core",
+  "version": "0.0.1",
+  "description": "The Tool Generation Protocol",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli/index.ts",
+    "lint": "eslint src/**/*.ts",
+    "lint:fix": "eslint src/**/*.ts --fix",
+    "test": "vitest run",
+    "tgp": "node bin/tgp.js"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "protocol",
+    "backend"
+  ],
+  "author": "",
+  "license": "MIT",
+  "bin": {
+    "tgp": "./bin/tgp.js"
+  },
+  "dependencies": {
+    "esbuild": "^0.19.12",
+    "isolated-vm": "^6.0.2",
+    "isomorphic-git": "^1.35.1",
+    "zod": "^3.25.76",
+    "zod-to-json-schema": "^3.22.4",
+    "typescript": "^5.9.3"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.25",
+    "@typescript-eslint/eslint-plugin": "^8.48.0",
+    "@typescript-eslint/parser": "^8.48.0",
+    "eslint": "^9.39.1",
+    "tsx": "^4.16.2",
+    "vitest": "^1.6.0"
+  }
+}
+````
+
+## File: src/kernel/core.ts
+````typescript
+/* eslint-disable no-console */
+import { TGPConfig, Logger } from '../types.js';
+import { VFSAdapter } from '../vfs/types.js';
+import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+import { createRegistry, Registry } from './registry.js';
+
+// We inject the platform-specific environment dependencies here.
+// This allows the Kernel to run in Node, Edge, or Browser environments.
+export interface KernelEnvironment extends GitDependencies {
+  // We can extend this if Kernel needs more platform specific components later
+}
+
+export interface KernelOptions {
+  config: TGPConfig;
+  vfs: VFSAdapter; 
+  env: KernelEnvironment;
+  logger?: Logger;
+}
+
+export interface Kernel {
+  boot(): Promise<void>;
+  shutdown(): Promise<void>;
+  config: TGPConfig;
+  vfs: VFSAdapter;
+  git: GitBackend;
+  registry: Registry;
+  logger: Logger;
+}
+
+const defaultLogger: Logger = {
+  debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
+  info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
+  warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
+  error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
+};
+
+/**
+ * Factory to create a TGP Kernel.
+ * This wires up the configuration, the filesystem, and the git backend.
+ */
+export function createKernel(opts: KernelOptions): Kernel {
+  const { config, vfs, env } = opts;
+  const logger = opts.logger ?? defaultLogger;
+  
+  const git = createGitBackend(env, config, logger);
+  const registry = createRegistry(vfs);
+
+  let isBooted = false;
+
+  return {
+    config,
+    vfs,
+    git,
+    registry,
+    logger,
+
+    async boot() {
+      if (isBooted) return;
+      logger.info(`Kernel booting...`);
+      
+      try {
+        // Hydrate the filesystem from Git
+        await git.hydrate().catch(err => {
+          logger.error(`Git hydration failed.`, err);
+          throw err;
+        });
+        
+        // Hydrate registry from meta.json
+        await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
+        
+        isBooted = true;
+        logger.info(`Kernel ready.`);
+      } catch (error) {
+        logger.error(`Boot failed:`, error);
+        throw error;
+      }
+    },
+
+    async shutdown() {
+      logger.info(`Kernel shutting down...`);
+      // Cleanup tasks (close db connections, etc) can go here
+      isBooted = false;
+    }
+  };
+}
+````
+
 ## File: src/kernel/git.ts
 ````typescript
 import * as git from 'isomorphic-git';
@@ -1725,7 +1855,7 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
         }
       } catch (error) {
         logger.error(`Git Hydration Failed:`, error);
-        // We might want to throw here to stop boot, but for now we log.
+        // Fail fast: The agent cannot operate without a consistent filesystem state.
         throw error;
       }
     },
@@ -1751,6 +1881,43 @@ export interface ExecutionResult {
   result: any;
   logs: string[];
   error?: string;
+}
+
+/**
+ * Resolves a module path within the VFS using standard Node.js resolution logic.
+ * Checks: path, path.ts, path.js, path/index.ts, path/index.js
+ */
+function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath: string): string | null {
+  const candidates: string[] = [];
+  
+  // Resolve absolute path based on import type
+  // If it starts with '/', it's absolute (from VFS root).
+  // Otherwise, it's relative to baseDir.
+  const target = importPath.startsWith('/') 
+    ? importPath 
+    : path.join(baseDir, importPath);
+
+  // 1. Exact match (e.g. require('./foo.ts'))
+  candidates.push(target);
+  
+  // 2. Extensions (e.g. require('./foo'))
+  candidates.push(`${target}.ts`);
+  candidates.push(`${target}.js`);
+  
+  // 3. Directory Indices
+  candidates.push(path.join(target, 'index.ts'));
+  candidates.push(path.join(target, 'index.js'));
+
+  for (const c of candidates) {
+    try {
+      // Synchronous check is required for the sync require shim
+      vfs.readSync(c);
+      return c;
+    } catch {
+      continue;
+    }
+  }
+  return null;
 }
 
 /**
@@ -1799,28 +1966,15 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
         }
       }
 
-      // Security: Ensure we don't traverse out of sandbox (handled by VFS)
-      // Resolution Logic:
-      // - Starts with '.': Relative to baseDir
-      // - Otherwise: Absolute from root (or relative to root)
-      
-      let targetPath: string;
-      if (importId.startsWith('.')) {
-        targetPath = path.join(baseDir, importId);
-      } else {
-        targetPath = importId;
-      }
+      // 2. Resolve Local Modules (VFS)
+      const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
 
-      // Normalize extension (assume .ts if missing)
-      if (!targetPath.endsWith('.ts') && !targetPath.endsWith('.js')) {
-          // Check if it exists with .ts
-          // We can't easily check existence sync in VFS without try/catch read
-          // Let's assume .ts for TGP tools
-          targetPath += '.ts';
+      if (!resolvedPath) {
+        throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
       }
 
       try {
-        const raw = kernel.vfs.readSync(targetPath);
+        const raw = kernel.vfs.readSync(resolvedPath);
         const transformed = transformSync(raw, {
           loader: 'ts',
           format: 'cjs',
@@ -1829,8 +1983,8 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
         
         return {
           code: transformed.code,
-          path: targetPath,
-          dirname: path.dirname(targetPath)
+          path: resolvedPath,
+          dirname: path.dirname(resolvedPath)
         };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -1900,95 +2054,6 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
   } finally {
     sandbox.dispose();
   }
-}
-````
-
-## File: src/kernel/core.ts
-````typescript
-/* eslint-disable no-console */
-import { TGPConfig, Logger } from '../types.js';
-import { VFSAdapter } from '../vfs/types.js';
-import { createGitBackend, GitBackend, GitDependencies } from './git.js';
-import { createRegistry, Registry } from './registry.js';
-
-// We inject the platform-specific environment dependencies here.
-// This allows the Kernel to run in Node, Edge, or Browser environments.
-export interface KernelEnvironment extends GitDependencies {
-  // We can extend this if Kernel needs more platform specific components later
-}
-
-export interface KernelOptions {
-  config: TGPConfig;
-  vfs: VFSAdapter; 
-  env: KernelEnvironment;
-  logger?: Logger;
-}
-
-export interface Kernel {
-  boot(): Promise<void>;
-  shutdown(): Promise<void>;
-  config: TGPConfig;
-  vfs: VFSAdapter;
-  git: GitBackend;
-  registry: Registry;
-  logger: Logger;
-}
-
-const defaultLogger: Logger = {
-  debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
-  info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
-  warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
-  error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
-};
-
-/**
- * Factory to create a TGP Kernel.
- * This wires up the configuration, the filesystem, and the git backend.
- */
-export function createKernel(opts: KernelOptions): Kernel {
-  const { config, vfs, env } = opts;
-  const logger = opts.logger ?? defaultLogger;
-  
-  const git = createGitBackend(env, config, logger);
-  const registry = createRegistry(vfs);
-
-  let isBooted = false;
-
-  return {
-    config,
-    vfs,
-    git,
-    registry,
-    logger,
-
-    async boot() {
-      if (isBooted) return;
-      logger.info(`Kernel booting...`);
-      
-      try {
-        // Hydrate the filesystem from Git
-        await git.hydrate().catch(err => {
-          logger.error(`Git hydration failed.`, err);
-          throw err;
-        });
-        
-        // Hydrate registry from meta.json
-        await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
-        
-        isBooted = true;
-        logger.info(`Kernel ready.`);
-      } catch (error) {
-        logger.error(`Boot failed:`, error);
-        throw error;
-      }
-    },
-
-    async shutdown() {
-      logger.info(`Kernel shutting down...`);
-      // Cleanup tasks (close db connections, etc) can go here
-      isBooted = false;
-    }
-  };
 }
 ````
 
