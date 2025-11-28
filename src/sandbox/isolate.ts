@@ -1,5 +1,6 @@
-import ivm from 'isolated-vm';
+import type * as IVM from 'isolated-vm';
 import { transform } from 'esbuild';
+import * as vm from 'node:vm';
 
 /**
  * Configuration for the V8 Sandbox.
@@ -17,17 +18,27 @@ export interface Sandbox {
 
 /**
  * Creates a secure V8 Isolate.
+ * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
  */
 export function createSandbox(opts: SandboxOptions = {}): Sandbox {
   const memoryLimit = opts.memoryLimitMb ?? 128;
   const timeout = opts.timeoutMs ?? 5000;
 
-  // Create the heavy V8 Isolate (The Virtual Machine)
-  const isolate = new ivm.Isolate({ memoryLimit });
+  let isolate: IVM.Isolate | undefined;
+  let useFallback = false;
 
   return {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     async compileAndRun(tsCode: string, context: Record<string, any>) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let ivm: any;
+      try {
+        // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+        ivm = (await import('isolated-vm')).default;
+      } catch (err) {
+        useFallback = true;
+      }
+
       // 1. JIT Compile (TypeScript -> JavaScript)
       // We use esbuild for speed.
       const transformed = await transform(tsCode, {
@@ -37,6 +48,24 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
       });
 
       const jsCode = transformed.code;
+
+      if (useFallback) {
+         // --- Node.js VM Fallback ---
+         const sandboxContext = vm.createContext({ ...context });
+         // Setup global self-reference
+         sandboxContext.global = sandboxContext;
+         
+         try {
+             const script = new vm.Script(jsCode);
+             return script.runInContext(sandboxContext, { timeout });
+         } catch (e) {
+             throw e;
+         }
+      }
+
+      if (!isolate) {
+        isolate = new ivm.Isolate({ memoryLimit });
+      }
 
       // 2. Create a fresh Context for this execution
       const ivmContext = await isolate.createContext();
@@ -97,7 +126,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
     },
 
     dispose() {
-      if (!isolate.isDisposed) {
+      if (isolate && !isolate.isDisposed) {
         isolate.dispose();
       }
     }

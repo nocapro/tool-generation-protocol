@@ -1,0 +1,269 @@
+uuid: c327341e-450f-488b-a45e-4b68e54734fc
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T06:07:45.816Z'
+gitCommitMsg: >-
+  fix: ensure TGP initialization succeeds with defaults and harden sandbox
+  loading
+
+  - Add default 'local' git configuration to TGPConfigSchema to prevent ZodError
+  on boot. - Improve error reporting when isolated-vm fails to load (e.g. in Bun
+  or non-Node envs).
+promptSummary: >-
+  Fixed ZodError during TGP initialization by adding default git config in
+  schema. Hardened sandbox isolate loading with better error messages for
+  incompatible environments.
+reasoning:
+  - >-
+    Part 1: Defining a default Git configuration is essential to fix the
+    initialization crash. The `TGP` class instantiates with defaults using
+    `TGPConfigSchema.parse({})`, but the schema currently requires the `git`
+    object without a default, causing a `ZodError`. I will add a default `local`
+    configuration to the `git` field in `src/types.ts`.
+  - >-
+    Part 2: The test runner is encountering errors loading `isolated-vm` in the
+    Bun environment. While `isolated-vm` relies on Node.js native bindings,
+    improving the error handling in `src/sandbox/isolate.ts` will ensure that
+    these failures are reported clearly with context about the environment,
+    rather than resulting in confusing unhandled errors.
+operations:
+  - type: write
+    path: src/types.ts
+    content: |
+      --- src/types.ts
+      +++ src/types.ts
+      @@ -23,7 +23,11 @@
+       export const TGPConfigSchema = z.object({
+         rootDir: z.string().default('./.tgp'),
+      -  git: GitConfigSchema,
+      -  fs: FSConfigSchema.default({}),
+      +  git: GitConfigSchema.default({
+      +    provider: 'local',
+      +    repo: 'local',
+      +    auth: { token: 'local' },
+      +  }),
+      +  fs: FSConfigSchema.default({}),
+         allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+         allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
+       });
+    patchStrategy: standard-diff
+  - type: write
+    path: src/sandbox/isolate.ts
+    content: >
+      --- src/sandbox/isolate.ts
+
+      +++ src/sandbox/isolate.ts
+
+      @@ -32,7 +32,9 @@
+               ivm = (await import('isolated-vm')).default;
+             } catch (err) {
+      -        throw new Error(`Failed to load 'isolated-vm'. The TGP Sandbox
+      requires a Node.js environment with native module support. Details:
+      ${err}`);
+
+      +        const isNode = typeof process !== 'undefined' && process.versions
+      && process.versions.node;
+
+      +        const envInfo = isNode ? `Node.js ${process.versions.node}` :
+      'Non-Node environment';
+
+      +        throw new Error(`Failed to load 'isolated-vm' in ${envInfo}. The
+      TGP Sandbox requires a standard Node.js environment with native module
+      support. Details: ${err}`);
+             }
+       
+             if (!isolate) {
+    patchStrategy: standard-diff
+snapshot:
+  src/sandbox/isolate.ts: |-
+    import type * as IVM from 'isolated-vm';
+    import { transform } from 'esbuild';
+
+    /**
+     * Configuration for the V8 Sandbox.
+     */
+    export interface SandboxOptions {
+      memoryLimitMb?: number; // Default 128MB
+      timeoutMs?: number;     // Default 5000ms
+    }
+
+    export interface Sandbox {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+      dispose: () => void;
+    }
+
+    /**
+     * Creates a secure V8 Isolate.
+     */
+    export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+      const memoryLimit = opts.memoryLimitMb ?? 128;
+      const timeout = opts.timeoutMs ?? 5000;
+
+      let isolate: IVM.Isolate | undefined;
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async compileAndRun(tsCode: string, context: Record<string, any>) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let ivm: any;
+          try {
+            // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+            ivm = (await import('isolated-vm')).default;
+          } catch (err) {
+            throw new Error(`Failed to load 'isolated-vm'. The TGP Sandbox requires a Node.js environment with native module support. Details: ${err}`);
+          }
+
+          if (!isolate) {
+            isolate = new ivm.Isolate({ memoryLimit });
+          }
+
+          // 1. JIT Compile (TypeScript -> JavaScript)
+          // We use esbuild for speed.
+          const transformed = await transform(tsCode, {
+            loader: 'ts',
+            format: 'cjs', // CommonJS ensures simple execution in V8
+            target: 'es2020',
+          });
+
+          const jsCode = transformed.code;
+
+          // 2. Create a fresh Context for this execution
+          const ivmContext = await isolate.createContext();
+
+          try {
+            // 3. Bridge the Global Scope (Host -> Guest)
+            const jail = ivmContext.global;
+            
+            // Inject the 'tgp' global object which holds our bridge
+            await jail.set('global', jail.derefInto()); // standard polyfill
+
+            // Inject Context
+            for (const [key, value] of Object.entries(context)) {
+                // Special handling for the 'tgp' namespace object
+                if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                    // Initialize the namespace in the guest
+                    await isolate.compileScript('global.tgp = {}').then(s => s.run(ivmContext));
+                    const tgpHandle = await jail.get('tgp');
+                    
+                    // Populate the namespace
+                    for (const [subKey, subValue] of Object.entries(value)) {
+                        if (typeof subValue === 'function') {
+                           // Functions must be passed by Reference
+                           await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                        } else {
+                           // Values are copied
+                           await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                        }
+                    }
+                } 
+                // Handle top-level functions (like __tgp_load_module)
+                else if (typeof value === 'function') {
+                  await jail.set(key, new ivm.Reference(value));
+                } 
+                // Handle standard values
+                else {
+                  await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                }
+            }
+
+            // 4. Compile the Script inside the Isolate
+            const script = await isolate.compileScript(jsCode);
+
+            // 5. Execute
+            const result = await script.run(ivmContext, { timeout });
+            
+            // 6. Return result (Unwrap from IVM)
+            if (typeof result === 'object' && result !== null && 'copy' in result) {
+                // If it's a reference, try to copy it out, otherwise return as is
+                return result.copy();
+            }
+            return result;
+
+          } finally {
+            // Cleanup the context to free memory immediately
+            ivmContext.release();
+          }
+        },
+
+        dispose() {
+          if (isolate && !isolate.isDisposed) {
+            isolate.dispose();
+          }
+        }
+      };
+    }
+  src/types.ts: |-
+    import { z } from 'zod';
+
+    // --- Git Configuration Schema ---
+    export const GitConfigSchema = z.object({
+      provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
+      repo: z.string().min(1, "Repository name is required"),
+      branch: z.string().default('main'),
+      apiBaseUrl: z.string().url().default('https://api.github.com'),
+      auth: z.object({
+        token: z.string().min(1, "Git auth token is required"),
+        user: z.string().default('tgp-bot[bot]'),
+        email: z.string().email().default('tgp-bot@users.noreply.github.com'),
+      }),
+      writeStrategy: z.enum(['direct', 'pr']).default('direct'),
+    });
+
+    // --- Filesystem Jail Schema ---
+    export const FSConfigSchema = z.object({
+      allowedDirs: z.array(z.string()).default(['./tmp']),
+      blockUpwardTraversal: z.boolean().default(true),
+    });
+
+    // --- Main TGP Configuration Schema ---
+    export const TGPConfigSchema = z.object({
+      rootDir: z.string().default('./.tgp'),
+      git: GitConfigSchema,
+      fs: FSConfigSchema.default({}),
+      allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+      allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
+    });
+
+    // --- Inferred Static Types ---
+    // We export these so the rest of the app relies on the Zod inference, 
+    // ensuring types and validation never drift apart.
+    export type GitConfig = z.infer<typeof GitConfigSchema>;
+    export type FSConfig = z.infer<typeof FSConfigSchema>;
+    export type TGPConfig = z.infer<typeof TGPConfigSchema>;
+
+    /**
+     * Defines the structure for a tool file persisted in the VFS.
+     * This is what resides in ./.tgp/tools/
+     */
+    export const ToolSchema = z.object({
+      name: z.string(),
+      description: z.string(),
+      parameters: z.record(z.unknown()), // JsonSchema
+      code: z.string(), // The raw TypeScript source
+    });
+
+    export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+    export interface ToolMetadata {
+      name: string;
+      description: string;
+      path: string;
+    }
+
+    export interface RegistryState {
+      tools: Record<string, ToolMetadata>;
+    }
+
+    export interface Logger {
+      debug(message: string, ...args: any[]): void;
+      info(message: string, ...args: any[]): void;
+      warn(message: string, ...args: any[]): void;
+      error(message: string, ...args: any[]): void;
+    }
+approved: true
+linesAdded: 8
+linesRemoved: 2
+linesDifference: 10
+gitCommittedAt: null
+status: committed
+id: 48

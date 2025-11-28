@@ -211,7 +211,11 @@ describe('E2E Scenarios', () => {
     expect(res.error).toContain('Database Error');
   });
 
+  // Note: Scenario 7 (SIGTERM) is skipped as the CLI currently does not have a long-running 'serve' mode to test against.
+
   it('Scenario 8: CLI Bootstrap', async () => {
+    // We assume the project has been built via 'npm run build' for bin/tgp.js to work
+    // If not, this test might fail if dist/ doesn't exist.
     const { code } = await runTgpCli(['init'], tempDir);
     expect(code).toBe(0);
     
