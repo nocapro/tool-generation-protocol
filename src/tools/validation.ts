@@ -13,6 +13,7 @@ export function createValidationTools(kernel: Kernel) {
       description: 'Run JIT compilation and AST-based static analysis on a tool.',
       parameters: CheckToolParams,
       execute: async ({ path }) => {
+        const { allowedImports } = kernel.config;
         try {
           const code = await kernel.vfs.readFile(path);
           
@@ -32,6 +33,16 @@ export function createValidationTools(kernel: Kernel) {
             // [Standard 3] Strict Typing: No 'any'
             if (node.kind === ts.SyntaxKind.AnyKeyword) {
                errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+            }
+
+            // [Safety] Restricted Imports
+            if (ts.isImportDeclaration(node)) {
+                if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+                    const pkg = node.moduleSpecifier.text;
+                    if (!allowedImports.includes(pkg)) {
+                         errors.push(`Violation [Safety]: Import of '${pkg}' is not allowed.`);
+                    }
+                }
             }
 
             // [Safety] No 'eval'
@@ -78,9 +89,10 @@ export function createValidationTools(kernel: Kernel) {
 
             // [Standard 1] No Magic Numbers
             if (ts.isNumericLiteral(node)) {
-                const val = parseFloat(node.text);
-                const allowed = [0, 1, 2, -1, 100, 1000]; 
-                if (!allowed.includes(val)) {
+                const text = node.text;
+                const val = Number(text); // Handle hex, etc.
+                const allowed = [0, 1, 2, -1, 100, 1000];
+                if (!isNaN(val) && !allowed.includes(val)) {
                     // Filter out array indices? Hard to detect without type checker.
                     // We enforce strictness: abstract data to args.
                     errors.push(`Violation [Standard 1]: Found potential magic number '${node.text}'. Abstract logic from data.`);
