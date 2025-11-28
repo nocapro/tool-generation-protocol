@@ -305,7 +305,7 @@ describe('E2E Scenarios', () => {
 
     let check = await tools.check_tool.execute({ path: magicTool });
     expect(check.valid).toBe(false);
-    expect(check.errors.some(e => e.includes('Magic Number'))).toBe(true);
+    expect(check.errors.some((e: string) => e.includes('Magic Number'))).toBe(true);
 
     // Test 2: Hardcoded Secret
     const secretTool = 'tools/bad/secret.ts';
@@ -321,7 +321,7 @@ describe('E2E Scenarios', () => {
 
     check = await tools.check_tool.execute({ path: secretTool });
     expect(check.valid).toBe(false);
-    expect(check.errors.some(e => e.includes('Secret'))).toBe(true);
+    expect(check.errors.some((e: string) => e.includes('Secret'))).toBe(true);
 
     // Test 3: Valid Tool (Control)
     const validTool = 'tools/good/clean.ts';

@@ -95,7 +95,7 @@ export function createValidationTools(kernel: Kernel) {
                 if (!isNaN(val) && !allowed.includes(val)) {
                     // Filter out array indices? Hard to detect without type checker.
                     // We enforce strictness: abstract data to args.
-                    errors.push(`Violation [Standard 1]: Found potential Magic Number '${node.text}'. Abstract logic from data.`);
+                    errors.push(`Violation [Standard 1]: Found potential Magic Number '${(node as ts.NumericLiteral).text}'. Abstract logic from data.`);
                 }
             }
 

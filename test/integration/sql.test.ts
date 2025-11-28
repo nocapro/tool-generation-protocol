@@ -126,7 +126,10 @@ describe('Integration: SQL Adapter (Real SQLite)', () => {
       return db.prepare(sql).run(...params);
     };
 
-    const kernel = new TGP({ configFile: configPath });
+    const kernel = new TGP({
+      configFile: configPath,
+      sandboxAPI: { exec_sql: executor }
+    });
     await kernel.boot();
     const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
 
