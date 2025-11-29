@@ -121,6 +121,21 @@ export * from './config.js';
 export * from './tools/index.js';
 export * from './tgp.js';
 export * from './adapter.js';
+
+// VFS Adapters
+export * from './vfs/types.js';
+export * from './vfs/node.js';
+export * from './vfs/memory.js';
+
+// Kernel Components
+export * from './kernel/core.js';
+export * from './kernel/git.js';
+export * from './kernel/registry.js';
+
+// Sandbox Components
+export * from './sandbox/isolate.js';
+export * from './sandbox/bridge.js';
+export * from './sandbox/execute.js';
 ````
 
 ## File: test/docker/utils.ts
@@ -520,6 +535,9 @@ import { ToolSet } from './types.js';
 
 export * from './types.js';
 export * from './sql.js';
+export * from './fs.js';
+export * from './validation.js';
+export * from './exec.js';
 
 /**
  * Generates the complete set of TGP tools (Capabilities) for a given Kernel.
@@ -1414,251 +1432,6 @@ export function createSqlTools(executor: DBExecutor): ToolSet {
 }
 ````
 
-## File: test/docker/npm-compat.test.ts
-````typescript
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
-import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import { createTarball, Container } from './utils.js';
-
-// Define the root of the project
-const projectRoot = path.resolve(__dirname, '../../');
-
-// Modified utils.ts to be injected into the container
-// This ensures tests use the installed package 'tool-generation-protocol' 
-// instead of trying to resolve local paths or dist/ folders.
-const CONTAINER_UTILS_TS = `
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import { spawn, execSync } from 'node:child_process';
-
-const tempDirs: string[] = [];
-
-// Create workspaces inside /app/test_workspaces to ensure they are within the project tree
-// where node_modules are installed (/app/node_modules). This fixes module resolution.
-const WORKSPACE_ROOT = '/app/test_workspaces';
-
-export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
-  await fs.mkdir(WORKSPACE_ROOT, { recursive: true });
-  const dir = await fs.mkdtemp(path.join(WORKSPACE_ROOT, prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-export async function cleanupDir(dir: string): Promise<void> {
-  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-}
-
-export async function initBareRepo(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
-  execSync(\`git init --bare\`, { cwd: dir, stdio: 'ignore' });
-  const initDir = await createTempDir('tgp-init-');
-  execSync(\`git init\`, { cwd: initDir, stdio: 'ignore' });
-  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
-  execSync(\`git add .\`, { cwd: initDir, stdio: 'ignore' });
-  execSync(\`git commit -m "Initial commit"\`, { cwd: initDir, stdio: 'ignore' });
-  execSync(\`git remote add origin \${dir}\`, { cwd: initDir, stdio: 'ignore' });
-  execSync(\`git push origin master:main\`, { cwd: initDir, stdio: 'ignore' });
-  await cleanupDir(initDir);
-  execSync(\`git symbolic-ref HEAD refs/heads/main\`, { cwd: dir, stdio: 'ignore' });
-}
-
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
-    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
-    const remotePath = remoteRepo.split(path.sep).join('/');
-    const allowedDir = workDir.split(path.sep).join('/');
-
-    // OVERRIDE: Use the package name directly for imports
-    const configContent = \`
-import { defineTGPConfig } from 'tool-generation-protocol';
-
-export default defineTGPConfig({
-  rootDir: '\${rootDir}',
-  git: {
-    provider: 'local',
-    repo: '\${remotePath}',
-    branch: 'main',
-    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
-  },
-  fs: {
-    allowedDirs: ['\${allowedDir}', '\${os.tmpdir().split(path.sep).join('/')}'],
-    blockUpwardTraversal: false
-  },
-  allowedImports: ['zod', 'date-fns']
-});
-\`;
-    const configPath = path.join(workDir, fileName);
-    await fs.writeFile(configPath, configContent);
-    return configPath;
-}
-
-export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
-    return new Promise(async (resolve) => {
-        // OVERRIDE: Use bunx tgp to execute the installed binary
-        // Since we are running inside /app/test_workspaces, this should find local node_modules
-        const proc = spawn('bunx', ['tgp', ...args], {
-            cwd,
-            env: { ...process.env, NODE_ENV: 'test' }
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        proc.stdout.on('data', d => stdout += d.toString());
-        proc.stderr.on('data', d => stderr += d.toString());
-
-        proc.on('close', (code) => {
-            resolve({ stdout, stderr, code: code ?? -1 });
-        });
-    });
-}
-
-process.on('exit', () => {
-    tempDirs.forEach(d => {
-        try { execSync(\`rm -rf \${d}\`); } catch {}
-    });
-});
-`;
-
-describe('Docker: NPM Compatibility', () => {
-  let tarballPath: string;
-  let container: Container;
-  
-  // High timeout for Docker operations
-  const TIMEOUT = 120000; 
-
-  beforeAll(async () => {
-    // 1. Build the Tarball from source
-    console.log('[Docker] Building NPM Tarball...');
-    tarballPath = await createTarball(projectRoot);
-    console.log(`[Docker] Tarball created at: ${tarballPath}`);
-  });
-
-  beforeEach(async () => {
-    // 2. Start a fresh container
-    // Use Node to verify true NPM compatibility and allow native modules (isolated-vm) to build/install correctly
-    container = new Container('node:22');
-    await container.start();
-    console.log(`[Docker] Container started: ${container.id}`);
-  });
-
-  afterEach(async () => {
-    if (container) await container.stop();
-  });
-
-  afterAll(async () => {
-    // Cleanup the local tarball
-    if (tarballPath) await fs.rm(tarballPath, { force: true });
-  });
-
-  it('installs and runs E2E scenarios correctly', async () => {
-    // Helper for verbose execution to debug installation issues
-    const exec = async (cmd: string[], opts: { cwd?: string } = {}) => {
-        console.log(`[Docker] Executing: ${cmd.join(' ')}`);
-        const res = await container.exec(cmd, opts);
-        if (res.stdout) console.log(res.stdout);
-        if (res.stderr) console.error(res.stderr);
-        if (res.exitCode !== 0) throw new Error(`Command failed with code ${res.exitCode}: ${cmd.join(' ')}`);
-        return res;
-    };
-
-    // 3. Prepare Environment inside Container
-    console.log('[Docker] Installing dependencies...');
-    await exec(['apt-get', 'update']);
-    // Install git (for tests), curl/unzip (for bun), and build tools (for native modules like isolated-vm)
-    await exec(['apt-get', 'install', '-y', 'git', 'curl', 'unzip', 'python3', 'make', 'g++']);
-    
-    // Install Bun (needed for test runner)
-    await exec(['bash', '-c', 'curl -fsSL https://bun.sh/install | bash']);
-    // Symlink bun/bunx to global path
-    await exec(['ln', '-s', '/root/.bun/bin/bun', '/usr/local/bin/bun']);
-    await exec(['ln', '-s', '/root/.bun/bin/bun', '/usr/local/bin/bunx']);
-    
-    // Configure Git (required for TGP tests)
-    await exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
-    await exec(['git', 'config', '--global', 'user.name', 'Test User']);
-
-    // 4. Setup Test Project
-    await exec(['mkdir', '-p', '/app']);
-    
-    // Copy tarball
-    console.log('[Docker] Copying artifacts...');
-    await container.cp(tarballPath, '/app/tgp.tgz');
-    
-    // Copy tests (We only copy e2e as those are the consumer-facing tests)
-    await exec(['mkdir', '-p', '/app/test']);
-    await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
-
-    // Initialize Project & Install Package
-    console.log('[Docker] Installing package...');
-    await exec(['npm', 'init', '-y'], { cwd: '/app' });
-    await exec(['npm', 'install', './tgp.tgz'], { cwd: '/app' });
-    // Install dev dependencies needed for the tests themselves
-    await exec(['npm', 'install', '-D', 'bun-types'], { cwd: '/app' });
-
-    // DEBUG: Verify installation state
-    console.log('[Docker] Verifying installation...');
-    await exec(['cat', 'package.json'], { cwd: '/app' });
-    await exec(['ls', '-F', 'node_modules'], { cwd: '/app' });
-
-    // 5. Patch Test Files
-    console.log('[Docker] Patching tests to use installed package...');
-    
-    // Inject the Utils Override
-    const utilsOverridePath = path.join(os.tmpdir(), 'utils_override.ts');
-    await fs.writeFile(utilsOverridePath, CONTAINER_UTILS_TS);
-    await container.cp(utilsOverridePath, '/app/test/e2e/utils.ts');
-    
-    // Patch scenarios.test.ts to import from 'tool-generation-protocol' instead of relative paths
-    // Regex matches ../../src/... paths
-    const sedCmd = `sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" /app/test/e2e/scenarios.test.ts`;
-    await exec(['bash', '-c', sedCmd]);
-
-    // 6. Run Tests
-    console.log('[Docker] Running Tests...');
-    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts'], { cwd: '/app' });
-    
-    const output = res.stdout + res.stderr;
-    
-    // Strict Verification: Parse the output for test counts
-    // We strip ANSI codes just in case bun outputs colors
-    // eslint-disable-next-line no-control-regex
-    const cleanOutput = output.replace(/\u001b\[.*?m/g, ''); 
-
-    const passMatch = cleanOutput.match(/(\d+)\s+pass/);
-    const failMatch = cleanOutput.match(/(\d+)\s+fail/);
-
-    if (!passMatch || !failMatch) {
-        console.error('--------------- CONTAINER OUTPUT ---------------');
-        console.error(output);
-        console.error('------------------------------------------------');
-        throw new Error('Could not parse test runner output. The test runner might have crashed or output format changed.');
-    }
-
-    const passCount = parseInt(passMatch[1], 10);
-    const failCount = parseInt(failMatch[1], 10);
-
-    // EXPLICIT LOGGING: Prove to the user that tests actually ran inside
-    console.log(`[Docker] Inner Test Verification: ${passCount} passed, ${failCount} failed.`);
-
-    if (res.exitCode !== 0 || failCount > 0 || passCount === 0) {
-        console.error('--------------- TEST FAILURE ---------------');
-        console.error(`Exit Code: ${res.exitCode}`);
-        console.error(`Pass: ${passCount}, Fail: ${failCount}`);
-        console.error('--------------- CONTAINER OUTPUT ---------------');
-        console.error(output);
-        console.error('------------------------------------------------');
-    }
-
-    expect(res.exitCode).toBe(0);
-    expect(failCount).toBe(0);
-    expect(passCount).toBeGreaterThan(0);
-  }, TIMEOUT);
-});
-````
-
 ## File: tsconfig.json
 ````json
 {
@@ -1822,6 +1595,255 @@ export function createFsTools(kernel: Kernel) {
     } as AgentTool<typeof ApplyDiffParams, { success: boolean; path: string }>,
   };
 }
+````
+
+## File: test/docker/npm-compat.test.ts
+````typescript
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import { createTarball, Container } from './utils.js';
+
+// Define the root of the project
+const projectRoot = path.resolve(__dirname, '../../');
+
+// Modified utils.ts to be injected into the container
+// This ensures tests use the installed package 'tool-generation-protocol' 
+// instead of trying to resolve local paths or dist/ folders.
+const CONTAINER_UTILS_TS = `
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { spawn, execSync } from 'node:child_process';
+
+const tempDirs: string[] = [];
+
+// Create workspaces inside /app/test_workspaces to ensure they are within the project tree
+// where node_modules are installed (/app/node_modules). This fixes module resolution.
+const WORKSPACE_ROOT = '/app/test_workspaces';
+
+export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
+  await fs.mkdir(WORKSPACE_ROOT, { recursive: true });
+  const dir = await fs.mkdtemp(path.join(WORKSPACE_ROOT, prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+export async function cleanupDir(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+export async function initBareRepo(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  execSync(\`git init --bare\`, { cwd: dir, stdio: 'ignore' });
+  const initDir = await createTempDir('tgp-init-');
+  execSync(\`git init\`, { cwd: initDir, stdio: 'ignore' });
+  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
+  execSync(\`git add .\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git commit -m "Initial commit"\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git remote add origin \${dir}\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git push origin master:main\`, { cwd: initDir, stdio: 'ignore' });
+  await cleanupDir(initDir);
+  execSync(\`git symbolic-ref HEAD refs/heads/main\`, { cwd: dir, stdio: 'ignore' });
+}
+
+export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
+    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
+    const remotePath = remoteRepo.split(path.sep).join('/');
+    const allowedDir = workDir.split(path.sep).join('/');
+
+    // OVERRIDE: Use the package name directly for imports
+    const configContent = \`
+import { defineTGPConfig } from 'tool-generation-protocol';
+
+export default defineTGPConfig({
+  rootDir: '\${rootDir}',
+  git: {
+    provider: 'local',
+    repo: '\${remotePath}',
+    branch: 'main',
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+  },
+  fs: {
+    allowedDirs: ['\${allowedDir}', '\${os.tmpdir().split(path.sep).join('/')}'],
+    blockUpwardTraversal: false
+  },
+  allowedImports: ['zod', 'date-fns']
+});
+\`;
+    const configPath = path.join(workDir, fileName);
+    await fs.writeFile(configPath, configContent);
+    return configPath;
+}
+
+export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
+    return new Promise(async (resolve) => {
+        // OVERRIDE: Use bunx tgp to execute the installed binary
+        // Since we are running inside /app/test_workspaces, this should find local node_modules
+        const proc = spawn('bunx', ['tgp', ...args], {
+            cwd,
+            env: { ...process.env, NODE_ENV: 'test' }
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.stderr.on('data', d => stderr += d.toString());
+
+        proc.on('close', (code) => {
+            resolve({ stdout, stderr, code: code ?? -1 });
+        });
+    });
+}
+
+process.on('exit', () => {
+    tempDirs.forEach(d => {
+        try { execSync(\`rm -rf \${d}\`); } catch {}
+    });
+});
+`;
+
+describe('Docker: NPM Compatibility', () => {
+  let tarballPath: string;
+  let container: Container;
+  
+  // High timeout for Docker operations
+  // Increased to 4 minutes to allow for slow npm installs (especially native modules) in CI
+  const TIMEOUT = 240000;
+
+  beforeAll(async () => {
+    // 1. Build the Tarball from source
+    console.log('[Docker] Building NPM Tarball...');
+    tarballPath = await createTarball(projectRoot);
+    console.log(`[Docker] Tarball created at: ${tarballPath}`);
+  });
+
+  beforeEach(async () => {
+    // 2. Start a fresh container
+    // Use Node to verify true NPM compatibility and allow native modules (isolated-vm) to build/install correctly
+    container = new Container('node:22');
+    await container.start();
+    console.log(`[Docker] Container started: ${container.id}`);
+  });
+
+  afterEach(async () => {
+    if (container) await container.stop();
+  });
+
+  afterAll(async () => {
+    // Cleanup the local tarball
+    if (tarballPath) await fs.rm(tarballPath, { force: true });
+  });
+
+  it('installs and runs E2E scenarios correctly', async () => {
+    // Helper for verbose execution to debug installation issues
+    const exec = async (cmd: string[], opts: { cwd?: string } = {}) => {
+        console.log(`[Docker] Executing: ${cmd.join(' ')}`);
+        const res = await container.exec(cmd, opts);
+        if (res.stdout) console.log(res.stdout);
+        if (res.stderr) console.error(res.stderr);
+        if (res.exitCode !== 0) throw new Error(`Command failed with code ${res.exitCode}: ${cmd.join(' ')}`);
+        return res;
+    };
+
+    // 3. Prepare Environment inside Container
+    console.log('[Docker] Installing dependencies...');
+    await exec(['apt-get', 'update']);
+    // Install git (for tests), curl/unzip (for bun), and build tools (for native modules like isolated-vm)
+    await exec(['apt-get', 'install', '-y', 'git', 'curl', 'unzip', 'python3', 'make', 'g++']);
+    
+    // Install Bun (needed for test runner)
+    await exec(['bash', '-c', 'curl -fsSL https://bun.sh/install | bash']);
+    // Symlink bun/bunx to global path
+    await exec(['ln', '-s', '/root/.bun/bin/bun', '/usr/local/bin/bun']);
+    await exec(['ln', '-s', '/root/.bun/bin/bun', '/usr/local/bin/bunx']);
+    
+    // Configure Git (required for TGP tests)
+    await exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
+    await exec(['git', 'config', '--global', 'user.name', 'Test User']);
+
+    // 4. Setup Test Project
+    await exec(['mkdir', '-p', '/app']);
+    
+    // Copy tarball
+    console.log('[Docker] Copying artifacts...');
+    await container.cp(tarballPath, '/app/tgp.tgz');
+    
+    // Copy tests (We only copy e2e as those are the consumer-facing tests)
+    await exec(['mkdir', '-p', '/app/test']);
+    await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
+    await container.cp(path.join(projectRoot, 'test/integration'), '/app/test/integration');
+    await container.cp(path.join(projectRoot, 'test/unit'), '/app/test/unit');
+    await container.cp(path.join(projectRoot, 'test/fixtures'), '/app/test/fixtures');
+
+    // Initialize Project & Install Package
+    console.log('[Docker] Installing package...');
+    await exec(['npm', 'init', '-y'], { cwd: '/app' });
+    await exec(['npm', 'install', './tgp.tgz'], { cwd: '/app' });
+    // Install dev dependencies needed for the tests themselves
+    await exec(['npm', 'install', '-D', 'bun-types', 'ai'], { cwd: '/app' });
+
+    // DEBUG: Verify installation state
+    console.log('[Docker] Verifying installation...');
+    await exec(['cat', 'package.json'], { cwd: '/app' });
+    await exec(['ls', '-F', 'node_modules'], { cwd: '/app' });
+
+    // 5. Patch Test Files
+    console.log('[Docker] Patching tests to use installed package...');
+    
+    // Inject the Utils Override
+    const utilsOverridePath = path.join(os.tmpdir(), 'utils_override.ts');
+    await fs.writeFile(utilsOverridePath, CONTAINER_UTILS_TS);
+    await container.cp(utilsOverridePath, '/app/test/e2e/utils.ts');
+    
+    // Patch all tests to import from 'tool-generation-protocol' instead of relative paths
+    // Regex matches ../../src/... paths
+    const sedCmd = `find /app/test -name "*.test.ts" -type f -exec sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" {} +`;
+    await exec(['bash', '-c', sedCmd]);
+
+    // 6. Run Tests
+    console.log('[Docker] Running Tests...');
+    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts', 'test/integration', 'test/unit'], { cwd: '/app' });
+    
+    const output = res.stdout + res.stderr;
+    
+    // Strict Verification: Parse the output for test counts
+    // We strip ANSI codes just in case bun outputs colors
+    // eslint-disable-next-line no-control-regex
+    const cleanOutput = output.replace(/\u001b\[.*?m/g, ''); 
+
+    const passMatch = cleanOutput.match(/(\d+)\s+pass/);
+    const failMatch = cleanOutput.match(/(\d+)\s+fail/);
+
+    if (!passMatch || !failMatch) {
+        console.error('--------------- CONTAINER OUTPUT ---------------');
+        console.error(output);
+        console.error('------------------------------------------------');
+        throw new Error('Could not parse test runner output. The test runner might have crashed or output format changed.');
+    }
+
+    const passCount = parseInt(passMatch[1], 10);
+    const failCount = parseInt(failMatch[1], 10);
+
+    // EXPLICIT LOGGING: Prove to the user that tests actually ran inside
+    console.log(`[Docker] Inner Test Verification: ${passCount} passed, ${failCount} failed.`);
+
+    if (res.exitCode !== 0 || failCount > 0 || passCount === 0) {
+        console.error('--------------- TEST FAILURE ---------------');
+        console.error(`Exit Code: ${res.exitCode}`);
+        console.error(`Pass: ${passCount}, Fail: ${failCount}`);
+        console.error('--------------- CONTAINER OUTPUT ---------------');
+        console.error(output);
+        console.error('------------------------------------------------');
+    }
+
+    expect(res.exitCode).toBe(0);
+    expect(failCount).toBe(0);
+    expect(passCount).toBeGreaterThan(0);
+  }, TIMEOUT);
+});
 ````
 
 ## File: test/e2e/utils.ts

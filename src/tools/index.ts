@@ -6,6 +6,9 @@ import { ToolSet } from './types.js';
 
 export * from './types.js';
 export * from './sql.js';
+export * from './fs.js';
+export * from './validation.js';
+export * from './exec.js';
 
 /**
  * Generates the complete set of TGP tools (Capabilities) for a given Kernel.
