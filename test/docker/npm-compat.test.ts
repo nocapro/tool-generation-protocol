@@ -120,7 +120,8 @@ describe('Docker: NPM Compatibility', () => {
 
   beforeEach(async () => {
     // 2. Start a fresh container
-    container = new Container('oven/bun:1');
+    // Use Node to verify true NPM compatibility and allow native modules (isolated-vm) to build/install correctly
+    container = new Container('node:22');
     await container.start();
     console.log(`[Docker] Container started: ${container.id}`);
   });
@@ -146,9 +147,16 @@ describe('Docker: NPM Compatibility', () => {
     };
 
     // 3. Prepare Environment inside Container
-    console.log('[Docker] Installing dependencies (git)...');
+    console.log('[Docker] Installing dependencies...');
     await exec(['apt-get', 'update']);
-    await exec(['apt-get', 'install', '-y', 'git']);
+    // Install git (for tests), curl/unzip (for bun), and build tools (for native modules like isolated-vm)
+    await exec(['apt-get', 'install', '-y', 'git', 'curl', 'unzip', 'python3', 'make', 'g++']);
+    
+    // Install Bun (needed for test runner)
+    await exec(['bash', '-c', 'curl -fsSL https://bun.sh/install | bash']);
+    // Symlink bun/bunx to global path
+    await exec(['ln', '-s', '/root/.bun/bin/bun', '/usr/local/bin/bun']);
+    await exec(['ln', '-s', '/root/.bun/bin/bun', '/usr/local/bin/bunx']);
     
     // Configure Git (required for TGP tests)
     await exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
@@ -164,13 +172,15 @@ describe('Docker: NPM Compatibility', () => {
     // Copy tests (We only copy e2e as those are the consumer-facing tests)
     await exec(['mkdir', '-p', '/app/test']);
     await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
+    await container.cp(path.join(projectRoot, 'test/integration'), '/app/test/integration');
+    await container.cp(path.join(projectRoot, 'test/fixtures'), '/app/test/fixtures');
 
     // Initialize Project & Install Package
     console.log('[Docker] Installing package...');
-    await exec(['bun', 'init', '-y'], { cwd: '/app' });
-    await exec(['bun', 'add', './tgp.tgz'], { cwd: '/app' });
+    await exec(['npm', 'init', '-y'], { cwd: '/app' });
+    await exec(['npm', 'install', './tgp.tgz'], { cwd: '/app' });
     // Install dev dependencies needed for the tests themselves
-    await exec(['bun', 'add', '-d', 'bun-types'], { cwd: '/app' });
+    await exec(['npm', 'install', '-D', 'bun-types'], { cwd: '/app' });
 
     // DEBUG: Verify installation state
     console.log('[Docker] Verifying installation...');
@@ -185,14 +195,14 @@ describe('Docker: NPM Compatibility', () => {
     await fs.writeFile(utilsOverridePath, CONTAINER_UTILS_TS);
     await container.cp(utilsOverridePath, '/app/test/e2e/utils.ts');
     
-    // Patch scenarios.test.ts to import from 'tool-generation-protocol' instead of relative paths
+    // Patch all tests to import from 'tool-generation-protocol' instead of relative paths
     // Regex matches ../../src/... paths
-    const sedCmd = `sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" /app/test/e2e/scenarios.test.ts`;
+    const sedCmd = `find /app/test -name "*.test.ts" -type f -exec sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" {} +`;
     await exec(['bash', '-c', sedCmd]);
 
     // 6. Run Tests
     console.log('[Docker] Running Tests...');
-    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts'], { cwd: '/app' });
+    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts', 'test/integration'], { cwd: '/app' });
     
     const output = res.stdout + res.stderr;
     
