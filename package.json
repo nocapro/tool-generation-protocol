@@ -33,7 +33,7 @@
     "protocol",
     "backend"
   ],
-  "author": "",
+  "author": "arman@noca.pro",
   "license": "MIT",
   "bin": {
     "tgp": "./bin/tgp.js"
