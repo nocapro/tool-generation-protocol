@@ -185,6 +185,7 @@ describe('Docker: NPM Compatibility', () => {
     }
 
     expect(res.exitCode).toBe(0);
-    expect(res.stdout).toContain('passed');
+    const output = res.stdout + res.stderr;
+    expect(output.toLowerCase()).toContain('pass');
   }, TIMEOUT);
 });

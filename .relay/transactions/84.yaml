@@ -1,0 +1,197 @@
+uuid: d8635f4e-252c-45a8-90f2-0cfe3d6936a6
+projectId: tool-generation-protocol
+createdAt: '2025-11-28T22:05:35.693Z'
+gitCommitMsg: >-
+  fix: switch esbuild to transformSync in sandbox
+
+  Replaces the asynchronous `transform` with synchronous `transformSync` in
+  `src/sandbox/isolate.ts`. This resolves an issue in Docker/CI environments
+  where the long-lived esbuild service daemon would crash or be terminated after
+  high-stress tests (like timeouts), causing subsequent tests to fail with "The
+  service is no longer running".
+promptSummary: >-
+  Replace async `transform` with `transformSync` in `src/sandbox/isolate.ts` to
+  prevent esbuild service crashes in Docker.
+reasoning:
+  - >-
+    Step 1: Replace `transform` (async) with `transformSync` (sync) in
+    `src/sandbox/isolate.ts`. This removes the dependency on the long-lived
+    `esbuild` service daemon which appears to be crashing or getting killed
+    during the stress of E2E tests (specifically after the infinite loop/timeout
+    test case), causing subsequent tests to fail. Using the synchronous variant
+    matches the stability pattern used in `src/sandbox/execute.ts`.
+operations:
+  - type: write
+    path: src/sandbox/isolate.ts
+    content: |
+      --- src/sandbox/isolate.ts
+      +++ src/sandbox/isolate.ts
+      @@ -1,5 +1,5 @@
+       import type * as IVM from 'isolated-vm';
+      -import { transform } from 'esbuild';
+      +import { transformSync } from 'esbuild';
+       import * as vm from 'node:vm';
+       
+       /**
+      @@ -40,7 +40,7 @@
+             // 1. JIT Compile (TypeScript -> JavaScript)
+             // We use esbuild for speed.
+      -      const transformed = await transform(tsCode, {
+      +      const transformed = transformSync(tsCode, {
+               loader: 'ts',
+               format: 'cjs', // CommonJS ensures simple execution in V8
+               target: 'es2020',
+    patchStrategy: standard-diff
+snapshot:
+  src/sandbox/isolate.ts: |-
+    import type * as IVM from 'isolated-vm';
+    import { transform } from 'esbuild';
+    import * as vm from 'node:vm';
+
+    /**
+     * Configuration for the V8 Sandbox.
+     */
+    export interface SandboxOptions {
+      memoryLimitMb?: number; // Default 128MB
+      timeoutMs?: number;     // Default 5000ms
+    }
+
+    export interface Sandbox {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+      dispose: () => void;
+    }
+
+    /**
+     * Creates a secure V8 Isolate.
+     * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
+     */
+    export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+      const memoryLimit = opts.memoryLimitMb ?? 128;
+      const timeout = opts.timeoutMs ?? 5000;
+
+      let isolate: IVM.Isolate | undefined;
+      let useFallback = false;
+
+      return {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        async compileAndRun(tsCode: string, context: Record<string, any>) {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          let ivm: any;
+          try {
+            // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+            ivm = (await import('isolated-vm')).default;
+          } catch {
+            useFallback = true;
+          }
+
+          // 1. JIT Compile (TypeScript -> JavaScript)
+          // We use esbuild for speed.
+          const transformed = await transform(tsCode, {
+            loader: 'ts',
+            format: 'cjs', // CommonJS ensures simple execution in V8
+            target: 'es2020',
+          });
+
+          const jsCode = transformed.code;
+
+          // Wrap code to ensure module/exports exist for basic CJS compatibility (e.g. unit tests)
+          const wrappedCode = `
+            if (typeof module === 'undefined') { var module = { exports: {} }; }
+            if (typeof exports === 'undefined') { var exports = module.exports; }
+            ${jsCode}
+          `;
+
+          if (useFallback) {
+             // --- Node.js VM Fallback ---
+             const sandboxContext = vm.createContext({ ...context });
+             // Setup global self-reference
+             sandboxContext.global = sandboxContext;
+             
+             try {
+                 const script = new vm.Script(wrappedCode);
+                 return script.runInContext(sandboxContext, { timeout });
+             } catch (e) {
+                 throw e;
+             }
+          }
+
+          // Initialize isolate if not already created (reuse across executions)
+          const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
+          // Update state
+          isolate = currentIsolate;
+
+          // 2. Create a fresh Context for this execution
+          // We use currentIsolate which is guaranteed to be defined
+          const ivmContext = await currentIsolate.createContext();
+
+          try {
+            // 3. Bridge the Global Scope (Host -> Guest)
+            const jail = ivmContext.global;
+            
+            // Inject the 'tgp' global object which holds our bridge
+            await jail.set('global', jail.derefInto()); // standard polyfill
+
+            // Inject Context
+            for (const [key, value] of Object.entries(context)) {
+                // Special handling for the 'tgp' namespace object
+                if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                    // Initialize the namespace in the guest
+                    const initScript = await currentIsolate.compileScript('global.tgp = {}');
+                    await initScript.run(ivmContext);
+                    const tgpHandle = await jail.get('tgp');
+                    
+                    // Populate the namespace
+                    for (const [subKey, subValue] of Object.entries(value)) {
+                        if (typeof subValue === 'function') {
+                           // Functions must be passed by Reference
+                           await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                        } else {
+                           // Values are copied
+                           await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                        }
+                    }
+                } 
+                // Handle top-level functions (like __tgp_load_module)
+                else if (typeof value === 'function') {
+                  await jail.set(key, new ivm.Reference(value));
+                } 
+                // Handle standard values
+                else {
+                  await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+                }
+            }
+
+            // 4. Compile the Script inside the Isolate
+            const script = await currentIsolate.compileScript(wrappedCode);
+
+            // 5. Execute
+            const result = await script.run(ivmContext, { timeout });
+            
+            // 6. Return result (Unwrap from IVM)
+            if (typeof result === 'object' && result !== null && 'copy' in result) {
+                // If it's a reference, try to copy it out, otherwise return as is
+                return result.copy();
+            }
+            return result;
+
+          } finally {
+            // Cleanup the context to free memory immediately
+            ivmContext.release();
+          }
+        },
+
+        dispose() {
+          if (isolate && !isolate.isDisposed) {
+            isolate.dispose();
+          }
+        }
+      };
+    }
+approved: true
+linesAdded: 2
+linesRemoved: 2
+linesDifference: 4
+gitCommittedAt: null
+status: committed
+id: 84
