@@ -707,201 +707,6 @@ export function toOpenAITools(tools: ToolSet) {
 }
 ````
 
-## File: test/docker/npm-compat.test.ts
-````typescript
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
-import * as path from 'node:path';
-import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
-import { createTarball, Container } from './utils.js';
-
-// Define the root of the project
-const projectRoot = path.resolve(__dirname, '../../');
-
-// Modified utils.ts to be injected into the container
-// This ensures tests use the installed package 'tool-generation-protocol' 
-// instead of trying to resolve local paths or dist/ folders.
-const CONTAINER_UTILS_TS = `
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import { spawn, execSync } from 'node:child_process';
-
-const tempDirs: string[] = [];
-
-// Create workspaces inside /app/test_workspaces to ensure they are within the project tree
-// where node_modules are installed (/app/node_modules). This fixes module resolution.
-const WORKSPACE_ROOT = '/app/test_workspaces';
-
-export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
-  await fs.mkdir(WORKSPACE_ROOT, { recursive: true });
-  const dir = await fs.mkdtemp(path.join(WORKSPACE_ROOT, prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-export async function cleanupDir(dir: string): Promise<void> {
-  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-}
-
-export async function initBareRepo(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
-  execSync(\`git init --bare\`, { cwd: dir, stdio: 'ignore' });
-  const initDir = await createTempDir('tgp-init-');
-  execSync(\`git init\`, { cwd: initDir, stdio: 'ignore' });
-  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
-  execSync(\`git add .\`, { cwd: initDir, stdio: 'ignore' });
-  execSync(\`git commit -m "Initial commit"\`, { cwd: initDir, stdio: 'ignore' });
-  execSync(\`git remote add origin \${dir}\`, { cwd: initDir, stdio: 'ignore' });
-  execSync(\`git push origin master:main\`, { cwd: initDir, stdio: 'ignore' });
-  await cleanupDir(initDir);
-  execSync(\`git symbolic-ref HEAD refs/heads/main\`, { cwd: dir, stdio: 'ignore' });
-}
-
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
-    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
-    const remotePath = remoteRepo.split(path.sep).join('/');
-    const allowedDir = workDir.split(path.sep).join('/');
-
-    // OVERRIDE: Use the package name directly for imports
-    const configContent = \`
-import { defineTGPConfig } from 'tool-generation-protocol';
-
-export default defineTGPConfig({
-  rootDir: '\${rootDir}',
-  git: {
-    provider: 'local',
-    repo: '\${remotePath}',
-    branch: 'main',
-    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
-  },
-  fs: {
-    allowedDirs: ['\${allowedDir}', '\${os.tmpdir().split(path.sep).join('/')}'],
-    blockUpwardTraversal: false
-  },
-  allowedImports: ['zod', 'date-fns']
-});
-\`;
-    const configPath = path.join(workDir, fileName);
-    await fs.writeFile(configPath, configContent);
-    return configPath;
-}
-
-export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
-    return new Promise(async (resolve) => {
-        // OVERRIDE: Use bunx tgp to execute the installed binary
-        // Since we are running inside /app/test_workspaces, this should find local node_modules
-        const proc = spawn('bunx', ['tgp', ...args], {
-            cwd,
-            env: { ...process.env, NODE_ENV: 'test' }
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        proc.stdout.on('data', d => stdout += d.toString());
-        proc.stderr.on('data', d => stderr += d.toString());
-
-        proc.on('close', (code) => {
-            resolve({ stdout, stderr, code: code ?? -1 });
-        });
-    });
-}
-
-process.on('exit', () => {
-    tempDirs.forEach(d => {
-        try { execSync(\`rm -rf \${d}\`); } catch {}
-    });
-});
-`;
-
-describe('Docker: NPM Compatibility', () => {
-  let tarballPath: string;
-  let container: Container;
-  
-  // High timeout for Docker operations
-  const TIMEOUT = 120000; 
-
-  beforeAll(async () => {
-    // 1. Build the Tarball from source
-    console.log('[Docker] Building NPM Tarball...');
-    tarballPath = await createTarball(projectRoot);
-    console.log(`[Docker] Tarball created at: ${tarballPath}`);
-  });
-
-  beforeEach(async () => {
-    // 2. Start a fresh container
-    container = new Container('oven/bun:1');
-    await container.start();
-    console.log(`[Docker] Container started: ${container.id}`);
-  });
-
-  afterEach(async () => {
-    if (container) await container.stop();
-  });
-
-  afterAll(async () => {
-    // Cleanup the local tarball
-    if (tarballPath) await fs.rm(tarballPath, { force: true });
-  });
-
-  it('installs and runs E2E scenarios correctly', async () => {
-    // 3. Prepare Environment inside Container
-    console.log('[Docker] Installing dependencies (git)...');
-    await container.exec(['apt-get', 'update']);
-    await container.exec(['apt-get', 'install', '-y', 'git']);
-    
-    // Configure Git (required for TGP tests)
-    await container.exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
-    await container.exec(['git', 'config', '--global', 'user.name', 'Test User']);
-
-    // 4. Setup Test Project
-    await container.exec(['mkdir', '-p', '/app']);
-    
-    // Copy tarball
-    console.log('[Docker] Copying artifacts...');
-    await container.cp(tarballPath, '/app/tgp.tgz');
-    
-    // Copy tests (We only copy e2e as those are the consumer-facing tests)
-    await container.exec(['mkdir', '-p', '/app/test']);
-    await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
-
-    // Initialize Project & Install Package
-    console.log('[Docker] Installing package...');
-    await container.exec(['bun', 'init', '-y'], { cwd: '/app' });
-    await container.exec(['bun', 'add', './tgp.tgz'], { cwd: '/app' });
-    // Install dev dependencies needed for the tests themselves
-    await container.exec(['bun', 'add', '-d', 'bun-types'], { cwd: '/app' });
-
-    // 5. Patch Test Files
-    console.log('[Docker] Patching tests to use installed package...');
-    
-    // Inject the Utils Override
-    const utilsOverridePath = path.join(os.tmpdir(), 'utils_override.ts');
-    await fs.writeFile(utilsOverridePath, CONTAINER_UTILS_TS);
-    await container.cp(utilsOverridePath, '/app/test/e2e/utils.ts');
-    
-    // Patch scenarios.test.ts to import from 'tool-generation-protocol' instead of relative paths
-    // Regex matches ../../src/... paths
-    const sedCmd = `sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" /app/test/e2e/scenarios.test.ts`;
-    await container.exec(['bash', '-c', sedCmd]);
-
-    // 6. Run Tests
-    console.log('[Docker] Running Tests...');
-    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts'], { cwd: '/app' });
-    
-    if (res.exitCode !== 0) {
-        console.error('STDOUT:', res.stdout);
-        console.error('STDERR:', res.stderr);
-    }
-
-    expect(res.exitCode).toBe(0);
-    const output = res.stdout + res.stderr;
-    expect(output.toLowerCase()).toContain('pass');
-  }, TIMEOUT);
-});
-````
-
 ## File: test/fixtures/fake-model.ts
 ````typescript
 /**
@@ -1420,6 +1225,201 @@ export function createNodeVFS(rootDir: string): VFSAdapter {
     }
   };
 }
+````
+
+## File: test/docker/npm-compat.test.ts
+````typescript
+import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
+import * as path from 'node:path';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import { createTarball, Container } from './utils.js';
+
+// Define the root of the project
+const projectRoot = path.resolve(__dirname, '../../');
+
+// Modified utils.ts to be injected into the container
+// This ensures tests use the installed package 'tool-generation-protocol' 
+// instead of trying to resolve local paths or dist/ folders.
+const CONTAINER_UTILS_TS = `
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { spawn, execSync } from 'node:child_process';
+
+const tempDirs: string[] = [];
+
+// Create workspaces inside /app/test_workspaces to ensure they are within the project tree
+// where node_modules are installed (/app/node_modules). This fixes module resolution.
+const WORKSPACE_ROOT = '/app/test_workspaces';
+
+export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
+  await fs.mkdir(WORKSPACE_ROOT, { recursive: true });
+  const dir = await fs.mkdtemp(path.join(WORKSPACE_ROOT, prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+export async function cleanupDir(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+export async function initBareRepo(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  execSync(\`git init --bare\`, { cwd: dir, stdio: 'ignore' });
+  const initDir = await createTempDir('tgp-init-');
+  execSync(\`git init\`, { cwd: initDir, stdio: 'ignore' });
+  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
+  execSync(\`git add .\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git commit -m "Initial commit"\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git remote add origin \${dir}\`, { cwd: initDir, stdio: 'ignore' });
+  execSync(\`git push origin master:main\`, { cwd: initDir, stdio: 'ignore' });
+  await cleanupDir(initDir);
+  execSync(\`git symbolic-ref HEAD refs/heads/main\`, { cwd: dir, stdio: 'ignore' });
+}
+
+export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
+    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
+    const remotePath = remoteRepo.split(path.sep).join('/');
+    const allowedDir = workDir.split(path.sep).join('/');
+
+    // OVERRIDE: Use the package name directly for imports
+    const configContent = \`
+import { defineTGPConfig } from 'tool-generation-protocol';
+
+export default defineTGPConfig({
+  rootDir: '\${rootDir}',
+  git: {
+    provider: 'local',
+    repo: '\${remotePath}',
+    branch: 'main',
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+  },
+  fs: {
+    allowedDirs: ['\${allowedDir}', '\${os.tmpdir().split(path.sep).join('/')}'],
+    blockUpwardTraversal: false
+  },
+  allowedImports: ['zod', 'date-fns']
+});
+\`;
+    const configPath = path.join(workDir, fileName);
+    await fs.writeFile(configPath, configContent);
+    return configPath;
+}
+
+export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
+    return new Promise(async (resolve) => {
+        // OVERRIDE: Use bunx tgp to execute the installed binary
+        // Since we are running inside /app/test_workspaces, this should find local node_modules
+        const proc = spawn('bunx', ['tgp', ...args], {
+            cwd,
+            env: { ...process.env, NODE_ENV: 'test' }
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.stderr.on('data', d => stderr += d.toString());
+
+        proc.on('close', (code) => {
+            resolve({ stdout, stderr, code: code ?? -1 });
+        });
+    });
+}
+
+process.on('exit', () => {
+    tempDirs.forEach(d => {
+        try { execSync(\`rm -rf \${d}\`); } catch {}
+    });
+});
+`;
+
+describe('Docker: NPM Compatibility', () => {
+  let tarballPath: string;
+  let container: Container;
+  
+  // High timeout for Docker operations
+  const TIMEOUT = 120000; 
+
+  beforeAll(async () => {
+    // 1. Build the Tarball from source
+    console.log('[Docker] Building NPM Tarball...');
+    tarballPath = await createTarball(projectRoot);
+    console.log(`[Docker] Tarball created at: ${tarballPath}`);
+  });
+
+  beforeEach(async () => {
+    // 2. Start a fresh container
+    container = new Container('oven/bun:1');
+    await container.start();
+    console.log(`[Docker] Container started: ${container.id}`);
+  });
+
+  afterEach(async () => {
+    if (container) await container.stop();
+  });
+
+  afterAll(async () => {
+    // Cleanup the local tarball
+    if (tarballPath) await fs.rm(tarballPath, { force: true });
+  });
+
+  it('installs and runs E2E scenarios correctly', async () => {
+    // 3. Prepare Environment inside Container
+    console.log('[Docker] Installing dependencies (git)...');
+    await container.exec(['apt-get', 'update']);
+    await container.exec(['apt-get', 'install', '-y', 'git']);
+    
+    // Configure Git (required for TGP tests)
+    await container.exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
+    await container.exec(['git', 'config', '--global', 'user.name', 'Test User']);
+
+    // 4. Setup Test Project
+    await container.exec(['mkdir', '-p', '/app']);
+    
+    // Copy tarball
+    console.log('[Docker] Copying artifacts...');
+    await container.cp(tarballPath, '/app/tgp.tgz');
+    
+    // Copy tests (We only copy e2e as those are the consumer-facing tests)
+    await container.exec(['mkdir', '-p', '/app/test']);
+    await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
+
+    // Initialize Project & Install Package
+    console.log('[Docker] Installing package...');
+    await container.exec(['bun', 'init', '-y'], { cwd: '/app' });
+    await container.exec(['bun', 'add', './tgp.tgz'], { cwd: '/app' });
+    // Install dev dependencies needed for the tests themselves
+    await container.exec(['bun', 'add', '-d', 'bun-types'], { cwd: '/app' });
+
+    // 5. Patch Test Files
+    console.log('[Docker] Patching tests to use installed package...');
+    
+    // Inject the Utils Override
+    const utilsOverridePath = path.join(os.tmpdir(), 'utils_override.ts');
+    await fs.writeFile(utilsOverridePath, CONTAINER_UTILS_TS);
+    await container.cp(utilsOverridePath, '/app/test/e2e/utils.ts');
+    
+    // Patch scenarios.test.ts to import from 'tool-generation-protocol' instead of relative paths
+    // Regex matches ../../src/... paths
+    const sedCmd = `sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" /app/test/e2e/scenarios.test.ts`;
+    await container.exec(['bash', '-c', sedCmd]);
+
+    // 6. Run Tests
+    console.log('[Docker] Running Tests...');
+    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts'], { cwd: '/app' });
+    
+    if (res.exitCode !== 0) {
+        console.error('STDOUT:', res.stdout);
+        console.error('STDERR:', res.stderr);
+    }
+
+    expect(res.exitCode).toBe(0);
+    const output = res.stdout + res.stderr;
+    expect(output.toLowerCase()).toContain('pass');
+  }, TIMEOUT);
+});
 ````
 
 ## File: test/integration/vercel.test.ts
@@ -2242,154 +2242,6 @@ export function createRegistry(vfs: VFSAdapter): Registry {
 }
 ````
 
-## File: src/sandbox/isolate.ts
-````typescript
-import type * as IVM from 'isolated-vm';
-import { transformSync } from 'esbuild';
-import * as vm from 'node:vm';
-
-/**
- * Configuration for the V8 Sandbox.
- */
-export interface SandboxOptions {
-  memoryLimitMb?: number; // Default 128MB
-  timeoutMs?: number;     // Default 5000ms
-}
-
-export interface Sandbox {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
-  dispose: () => void;
-}
-
-/**
- * Creates a secure V8 Isolate.
- * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
- */
-export function createSandbox(opts: SandboxOptions = {}): Sandbox {
-  const memoryLimit = opts.memoryLimitMb ?? 128;
-  const timeout = opts.timeoutMs ?? 5000;
-
-  let isolate: IVM.Isolate | undefined;
-  let useFallback = false;
-
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async compileAndRun(tsCode: string, context: Record<string, any>) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      let ivm: any;
-      try {
-        // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
-        ivm = (await import('isolated-vm')).default;
-      } catch {
-        useFallback = true;
-      }
-
-      // 1. JIT Compile (TypeScript -> JavaScript)
-      // We use esbuild for speed.
-      const transformed = transformSync(tsCode, {
-        loader: 'ts',
-        format: 'cjs', // CommonJS ensures simple execution in V8
-        target: 'es2020',
-      });
-
-      const jsCode = transformed.code;
-
-      // Wrap code to ensure module/exports exist for basic CJS compatibility (e.g. unit tests)
-      const wrappedCode = `
-        if (typeof module === 'undefined') { var module = { exports: {} }; }
-        if (typeof exports === 'undefined') { var exports = module.exports; }
-        ${jsCode}
-      `;
-
-      if (useFallback) {
-         // --- Node.js VM Fallback ---
-         const sandboxContext = vm.createContext({ ...context });
-         // Setup global self-reference
-         sandboxContext.global = sandboxContext;
-         
-         try {
-             const script = new vm.Script(wrappedCode);
-             return script.runInContext(sandboxContext, { timeout });
-         } catch (e) {
-             throw e;
-         }
-      }
-
-      // Initialize isolate if not already created (reuse across executions)
-      const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
-      // Update state
-      isolate = currentIsolate;
-
-      // 2. Create a fresh Context for this execution
-      // We use currentIsolate which is guaranteed to be defined
-      const ivmContext = await currentIsolate.createContext();
-
-      try {
-        // 3. Bridge the Global Scope (Host -> Guest)
-        const jail = ivmContext.global;
-        
-        // Inject the 'tgp' global object which holds our bridge
-        await jail.set('global', jail.derefInto()); // standard polyfill
-
-        // Inject Context
-        for (const [key, value] of Object.entries(context)) {
-            // Special handling for the 'tgp' namespace object
-            if (key === 'tgp' && typeof value === 'object' && value !== null) {
-                // Initialize the namespace in the guest
-                const initScript = await currentIsolate.compileScript('global.tgp = {}');
-                await initScript.run(ivmContext);
-                const tgpHandle = await jail.get('tgp');
-                
-                // Populate the namespace
-                for (const [subKey, subValue] of Object.entries(value)) {
-                    if (typeof subValue === 'function') {
-                       // Functions must be passed by Reference
-                       await tgpHandle.set(subKey, new ivm.Reference(subValue));
-                    } else {
-                       // Values are copied
-                       await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
-                    }
-                }
-            } 
-            // Handle top-level functions (like __tgp_load_module)
-            else if (typeof value === 'function') {
-              await jail.set(key, new ivm.Reference(value));
-            } 
-            // Handle standard values
-            else {
-              await jail.set(key, new ivm.ExternalCopy(value).copyInto());
-            }
-        }
-
-        // 4. Compile the Script inside the Isolate
-        const script = await currentIsolate.compileScript(wrappedCode);
-
-        // 5. Execute
-        const result = await script.run(ivmContext, { timeout });
-        
-        // 6. Return result (Unwrap from IVM)
-        if (typeof result === 'object' && result !== null && 'copy' in result) {
-            // If it's a reference, try to copy it out, otherwise return as is
-            return result.copy();
-        }
-        return result;
-
-      } finally {
-        // Cleanup the context to free memory immediately
-        ivmContext.release();
-      }
-    },
-
-    dispose() {
-      if (isolate && !isolate.isDisposed) {
-        isolate.dispose();
-      }
-    }
-  };
-}
-````
-
 ## File: src/types.ts
 ````typescript
 import { z } from 'zod';
@@ -2567,6 +2419,154 @@ export default defineTGPConfig({
   allowedFetchUrls: []
 });
 `;
+````
+
+## File: src/sandbox/isolate.ts
+````typescript
+import type * as IVM from 'isolated-vm';
+import { transformSync } from 'esbuild';
+import * as vm from 'node:vm';
+
+/**
+ * Configuration for the V8 Sandbox.
+ */
+export interface SandboxOptions {
+  memoryLimitMb?: number; // Default 128MB
+  timeoutMs?: number;     // Default 5000ms
+}
+
+export interface Sandbox {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  compileAndRun: (code: string, context: Record<string, any>) => Promise<any>;
+  dispose: () => void;
+}
+
+/**
+ * Creates a secure V8 Isolate.
+ * Falls back to Node.js 'vm' module if 'isolated-vm' is unavailable.
+ */
+export function createSandbox(opts: SandboxOptions = {}): Sandbox {
+  const memoryLimit = opts.memoryLimitMb ?? 128;
+  const timeout = opts.timeoutMs ?? 5000;
+
+  let isolate: IVM.Isolate | undefined;
+  let useFallback = false;
+
+  return {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    async compileAndRun(tsCode: string, context: Record<string, any>) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let ivm: any;
+      try {
+        // Dynamic import to prevent crash on module load if native bindings are missing or incompatible
+        ivm = (await import('isolated-vm')).default;
+      } catch {
+        useFallback = true;
+      }
+
+      // 1. JIT Compile (TypeScript -> JavaScript)
+      // We use esbuild for speed.
+      const transformed = transformSync(tsCode, {
+        loader: 'ts',
+        format: 'cjs', // CommonJS ensures simple execution in V8
+        target: 'es2020',
+      });
+
+      const jsCode = transformed.code;
+
+      // Wrap code to ensure module/exports exist for basic CJS compatibility (e.g. unit tests)
+      const wrappedCode = `
+        if (typeof module === 'undefined') { var module = { exports: {} }; }
+        if (typeof exports === 'undefined') { var exports = module.exports; }
+        ${jsCode}
+      `;
+
+      if (useFallback) {
+         // --- Node.js VM Fallback ---
+         const sandboxContext = vm.createContext({ ...context });
+         // Setup global self-reference
+         sandboxContext.global = sandboxContext;
+         
+         try {
+             const script = new vm.Script(wrappedCode);
+             return script.runInContext(sandboxContext, { timeout });
+         } catch (e) {
+             throw e;
+         }
+      }
+
+      // Initialize isolate if not already created (reuse across executions)
+      const currentIsolate = isolate ?? new ivm.Isolate({ memoryLimit });
+      // Update state
+      isolate = currentIsolate;
+
+      // 2. Create a fresh Context for this execution
+      // We use currentIsolate which is guaranteed to be defined
+      const ivmContext = await currentIsolate.createContext();
+
+      try {
+        // 3. Bridge the Global Scope (Host -> Guest)
+        const jail = ivmContext.global;
+        
+        // Inject the 'tgp' global object which holds our bridge
+        await jail.set('global', jail.derefInto()); // standard polyfill
+
+        // Inject Context
+        for (const [key, value] of Object.entries(context)) {
+            // Special handling for the 'tgp' namespace object
+            if (key === 'tgp' && typeof value === 'object' && value !== null) {
+                // Initialize the namespace in the guest
+                const initScript = await currentIsolate.compileScript('global.tgp = {}');
+                await initScript.run(ivmContext);
+                const tgpHandle = await jail.get('tgp');
+                
+                // Populate the namespace
+                for (const [subKey, subValue] of Object.entries(value)) {
+                    if (typeof subValue === 'function') {
+                       // Functions must be passed by Reference
+                       await tgpHandle.set(subKey, new ivm.Reference(subValue));
+                    } else {
+                       // Values are copied
+                       await tgpHandle.set(subKey, new ivm.ExternalCopy(subValue).copyInto());
+                    }
+                }
+            } 
+            // Handle top-level functions (like __tgp_load_module)
+            else if (typeof value === 'function') {
+              await jail.set(key, new ivm.Reference(value));
+            } 
+            // Handle standard values
+            else {
+              await jail.set(key, new ivm.ExternalCopy(value).copyInto());
+            }
+        }
+
+        // 4. Compile the Script inside the Isolate
+        const script = await currentIsolate.compileScript(wrappedCode);
+
+        // 5. Execute
+        const result = await script.run(ivmContext, { timeout });
+        
+        // 6. Return result (Unwrap from IVM)
+        if (typeof result === 'object' && result !== null && 'copy' in result) {
+            // If it's a reference, try to copy it out, otherwise return as is
+            return result.copy();
+        }
+        return result;
+
+      } finally {
+        // Cleanup the context to free memory immediately
+        ivmContext.release();
+      }
+    },
+
+    dispose() {
+      if (isolate && !isolate.isDisposed) {
+        isolate.dispose();
+      }
+    }
+  };
+}
 ````
 
 ## File: src/tgp.ts
@@ -4333,7 +4333,7 @@ export async function executeTool(kernel: Kernel, code: string, args: Record<str
     "protocol",
     "backend"
   ],
-  "author": "",
+  "author": "arman@noca.pro",
   "license": "MIT",
   "bin": {
     "tgp": "./bin/tgp.js"

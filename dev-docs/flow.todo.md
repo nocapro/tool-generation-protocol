@@ -112,7 +112,7 @@ plan:
       - src/types.ts
       - src/tgp.ts
 ```
-===
+=== DONE
 
 how do I know all test pass within docker? I just hate if the host test says pass when within docker there is single fail test 
 
