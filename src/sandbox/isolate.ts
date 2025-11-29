@@ -1,5 +1,5 @@
 import type * as IVM from 'isolated-vm';
-import { transform } from 'esbuild';
+import { transformSync } from 'esbuild';
 import * as vm from 'node:vm';
 
 /**
@@ -41,7 +41,7 @@ export function createSandbox(opts: SandboxOptions = {}): Sandbox {
 
       // 1. JIT Compile (TypeScript -> JavaScript)
       // We use esbuild for speed.
-      const transformed = await transform(tsCode, {
+      const transformed = transformSync(tsCode, {
         loader: 'ts',
         format: 'cjs', // CommonJS ensures simple execution in V8
         target: 'es2020',

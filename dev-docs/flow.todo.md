@@ -1,7 +1,126 @@
-
-implement relaycode-core
-
 ===
+
+You are the master architect. We are dropping the network security verification as requested and pivoting to **Self-Healing** and **Governance**.
+
+The README writes checks that the current codebase relies on "trust me" to cash. Specifically, the **Gatekeeper Mode** (PR workflows) and the **Self-Healing Loop** (patching broken tools) are documented but not rigorously verified in the E2E suite.
+
+Here is the battle plan to align the E2E suite with the Manifesto.
+
+```yaml
+plan:
+  uuid: 'verify-readme-promises-v2'
+  status: 'todo'
+  title: 'Protocol Verification: Governance & Self-Healing'
+  introduction: |
+    We are hardening the E2E suite to back up the "Manifesto" claims in `README.md`.
+    
+    Current gaps:
+    1. **Gatekeeper Mode**: The README promises a "Pull Request" strategy for production. The current `local` git provider in `src/kernel/git.ts` ignores `writeStrategy`, meaning this critical workflow is untested in our CI/CD pipeline.
+    2. **Self-Healing**: The README touts a "Diagnose -> Patch -> Verify" loop. We currently test `apply_diff` on valid code, but we don't verify the actual recovery from a broken state (syntax/logic errors) which is the core value prop of an Agentic runtime.
+  parts:
+    - uuid: 'verify-governance-mode'
+      status: 'todo'
+      name: 'Part 1: The Gatekeeper (PR Strategy Simulation)'
+      reason: |
+        The "Local" git provider is too dumb. It ignores `writeStrategy: 'pr'`, making it impossible to test the "Gatekeeper Mode" without mocking GitHub. We will upgrade the Local backend to support feature branching, enabling us to verify the PR workflow locally.
+      steps:
+        - uuid: 'upgrade-local-git-backend'
+          status: 'todo'
+          name: 'Upgrade Local Git Backend'
+          reason: |
+            Make `src/kernel/git.ts` respect `writeStrategy: 'pr'` even for the `local` provider. It should checkout a new branch (e.g., `tgp/feat-...`) before committing, simulating the production flow.
+          files:
+            - src/kernel/git.ts
+          operations:
+            - 'Modify `createLocalGitBackend` in `src/kernel/git.ts`.'
+            - 'Inject `writeStrategy` into the local backend scope.'
+            - 'Implement logic: If `writeStrategy === "pr"`, generate a branch name (timestamped) and `git checkout -b` before adding/committing.'
+            - 'Ensure push logic pushes the *feature branch*, not main.'
+        - uuid: 'e2e-governance-test'
+          status: 'todo'
+          name: 'Scenario: Governance (Gatekeeper Mode)'
+          reason: |
+            Verify that the Agent respects the `pr` strategy and isolates changes.
+          files:
+            - test/e2e/scenarios.test.ts
+          operations:
+            - 'Add "Scenario 12: Governance (Gatekeeper Mode)" to `test/e2e/scenarios.test.ts`.'
+            - 'Config: Set `git: { writeStrategy: "pr" }`.'
+            - 'Action: Write a new tool `tools/feature.ts`.'
+            - 'Assert: The local repo is NO LONGER on `main`.'
+            - 'Assert: The local repo IS on a branch matching `tgp/feat-*`.'
+            - 'Assert: The `main` branch does NOT contain `tools/feature.ts` (yet).'
+      context_files:
+        compact:
+          - src/kernel/git.ts
+          - test/e2e/scenarios.test.ts
+        medium:
+          - src/kernel/git.ts
+          - test/e2e/scenarios.test.ts
+          - src/types.ts
+        extended:
+          - src/kernel/git.ts
+          - test/e2e/scenarios.test.ts
+          - src/types.ts
+          - test/e2e/utils.ts
+
+    - uuid: 'verify-self-healing'
+      status: 'todo'
+      name: 'Part 2: The Self-Healing Loop'
+      reason: |
+        The README claims the Agent can "Patch" and "Verify". We need to prove that the Protocol handles the "Red -> Green" transition.
+      steps:
+        - uuid: 'e2e-self-healing-test'
+          status: 'todo'
+          name: 'Scenario: Self-Healing (Red-Green-Refactor)'
+          reason: |
+            Prove that a broken tool can be detected by `check_tool` and fixed by `apply_diff`.
+          files:
+            - test/e2e/scenarios.test.ts
+          operations:
+            - 'Add "Scenario 13: Self-Healing (The Fix Loop)" to `test/e2e/scenarios.test.ts`.'
+            - 'Step A (Red): Write `tools/broken.ts` with a Syntax Error (e.g., `const x = ;`).'
+            - 'Step B (Diagnose): Run `check_tool`. Assert `valid: false`.'
+            - 'Step C (Patch): Run `apply_diff` to replace the broken code with valid code.'
+            - 'Step D (Verify): Run `check_tool`. Assert `valid: true`.'
+            - 'Step E (Execute): Run `exec_tool`. Assert `success: true`.'
+      context_files:
+        compact:
+          - test/e2e/scenarios.test.ts
+        medium:
+          - test/e2e/scenarios.test.ts
+          - src/tools/validation.ts
+        extended:
+          - test/e2e/scenarios.test.ts
+          - src/tools/validation.ts
+          - src/tools/fs.ts
+
+  conclusion: |
+    By implementing these scenarios, we move "Governance" and "Self-Healing" from marketing claims to tested features. The upgrade to the Local Git Backend also makes the development environment a truer simulation of production.
+  context_files:
+    compact:
+      - src/kernel/git.ts
+      - test/e2e/scenarios.test.ts
+    medium:
+      - src/kernel/git.ts
+      - test/e2e/scenarios.test.ts
+      - src/tools/validation.ts
+    extended:
+      - src/kernel/git.ts
+      - test/e2e/scenarios.test.ts
+      - src/tools/validation.ts
+      - src/types.ts
+      - src/tgp.ts
+```
+===
+
+how do I know all test pass within docker? I just hate if the host test says pass when within docker there is single fail test 
+
+=== DONE
+
+implement apply-multi-diff
+
+=== DONE
 
 we need test cases that runs docker containers to see wether the npm published tgp version has all passed tests. because I dont want to say "it works on my machine" when npm devs user submit issues.
 
