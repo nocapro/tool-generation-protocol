@@ -358,4 +358,63 @@ export default function(args: { name: string }) {
     const metaExists = await fs.access(path.join(tempDir, '.tgp/meta.json')).then(() => true).catch(() => false);
     expect(metaExists).toBe(true);
   });
+
+  it('Scenario 12: Governance (Gatekeeper Mode)', async () => {
+    // Verify that PR strategy creates a separate branch
+    const configPath = await createTgpConfig(tempDir, remoteRepo, { writeStrategy: 'pr' });
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    const featTool = 'tools/feature.ts';
+    await tools.write_file.execute({
+      path: featTool,
+      content: 'export default "feature"'
+    });
+
+    // Assert: Local repo should be on a feature branch
+    const { execSync } = await import('node:child_process');
+    const tgpRoot = path.join(tempDir, '.tgp');
+    const currentBranch = execSync('git branch --show-current', { cwd: tgpRoot }).toString().trim();
+    
+    expect(currentBranch).toMatch(/^tgp\/feat-/);
+    
+    // Assert: Remote 'main' should NOT have the file yet
+    const verifyDir = await createTempDir('tgp-verify-gov-');
+    execSync(`git clone ${remoteRepo} .`, { cwd: verifyDir, stdio: 'ignore' });
+    
+    const existsInMain = await fs.access(path.join(verifyDir, featTool)).then(() => true).catch(() => false);
+    expect(existsInMain).toBe(false);
+    
+    await cleanupDir(verifyDir);
+  });
+
+  it('Scenario 13: Self-Healing (The Fix Loop)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    const brokenTool = 'tools/broken.ts';
+    // 1. Write Broken Code
+    await tools.write_file.execute({ path: brokenTool, content: 'const x = ;' });
+    
+    // 2. Diagnose
+    const diag = await tools.check_tool.execute({ path: brokenTool });
+    expect(diag.valid).toBe(false);
+    
+    // 3. Patch
+    await tools.apply_diff.execute({
+      path: brokenTool,
+      diff: `<<<<<<< SEARCH\nconst x = ;\n=======\nconst x = 100;\nexport default x;\n>>>>>>> REPLACE`
+    });
+
+    // 4. Verify & Execute
+    const check = await tools.check_tool.execute({ path: brokenTool });
+    expect(check.valid).toBe(true);
+
+    const res = await tools.exec_tool.execute({ path: brokenTool, args: {} });
+    expect(res.success).toBe(true);
+    expect(res.result).toBe(100);
+  });
 });

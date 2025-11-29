@@ -64,7 +64,13 @@ export async function initBareRepo(dir: string): Promise<void> {
  * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
  * We use an absolute path for rootDir to ensure tests don't pollute the project root.
  */
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.js'): Promise<string> {
+export async function createTgpConfig(
+  workDir: string, 
+  remoteRepo: string, 
+  options: { fileName?: string, writeStrategy?: 'direct' | 'pr' } = {}
+): Promise<string> {
+    const fileName = options.fileName ?? 'tgp.config.js';
+    const writeStrategy = options.writeStrategy ?? 'direct';
     const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
     const remotePath = remoteRepo.split(path.sep).join('/');
     const allowedDir = workDir.split(path.sep).join('/');
@@ -92,7 +98,8 @@ export default defineTGPConfig({
     provider: 'local',
     repo: '${remotePath}',
     branch: 'main',
-    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' },
+    writeStrategy: '${writeStrategy}'
   },
   fs: {
     allowedDirs: ['${allowedDir}', '${os.tmpdir().split(path.sep).join('/')}'],

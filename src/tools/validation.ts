@@ -29,6 +29,16 @@ export function createValidationTools(kernel: Kernel) {
 
           const errors: string[] = [];
 
+          // 0. Syntax Validation (Parse Diagnostics)
+          // ts.createSourceFile attaches parse diagnostics for syntax errors (e.g. missing tokens)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const diagnostics = (sourceFile as any).parseDiagnostics;
+          if (diagnostics && Array.isArray(diagnostics)) {
+            for (const diag of diagnostics) {
+              errors.push(`Syntax Error: ${ts.flattenDiagnosticMessageText(diag.messageText, '\n')}`);
+            }
+          }
+
           // 2. Recursive AST Visitor
           const visit = (node: ts.Node) => {
             // [Standard 3] Strict Typing: No 'any'

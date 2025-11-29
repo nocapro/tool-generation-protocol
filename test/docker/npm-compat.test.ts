@@ -47,7 +47,14 @@ export async function initBareRepo(dir: string): Promise<void> {
   execSync(\`git symbolic-ref HEAD refs/heads/main\`, { cwd: dir, stdio: 'ignore' });
 }
 
-export async function createTgpConfig(workDir: string, remoteRepo: string, fileName: string = 'tgp.config.ts'): Promise<string> {
+export async function createTgpConfig(
+    workDir: string, 
+    remoteRepo: string, 
+    options: { fileName?: string, writeStrategy?: 'direct' | 'pr' } = {}
+): Promise<string> {
+    const fileName = options.fileName ?? 'tgp.config.ts';
+    const writeStrategy = options.writeStrategy ?? 'direct';
+
     const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
     const remotePath = remoteRepo.split(path.sep).join('/');
     const allowedDir = workDir.split(path.sep).join('/');
@@ -62,7 +69,8 @@ export default defineTGPConfig({
     provider: 'local',
     repo: '\${remotePath}',
     branch: 'main',
-    auth: { token: 'mock', user: 'test', email: 'test@example.com' }
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' },
+    writeStrategy: '\${writeStrategy}'
   },
   fs: {
     allowedDirs: ['\${allowedDir}', '\${os.tmpdir().split(path.sep).join('/')}'],
