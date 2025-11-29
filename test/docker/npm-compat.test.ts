@@ -135,32 +135,47 @@ describe('Docker: NPM Compatibility', () => {
   });
 
   it('installs and runs E2E scenarios correctly', async () => {
+    // Helper for verbose execution to debug installation issues
+    const exec = async (cmd: string[], opts: { cwd?: string } = {}) => {
+        console.log(`[Docker] Executing: ${cmd.join(' ')}`);
+        const res = await container.exec(cmd, opts);
+        if (res.stdout) console.log(res.stdout);
+        if (res.stderr) console.error(res.stderr);
+        if (res.exitCode !== 0) throw new Error(`Command failed with code ${res.exitCode}: ${cmd.join(' ')}`);
+        return res;
+    };
+
     // 3. Prepare Environment inside Container
     console.log('[Docker] Installing dependencies (git)...');
-    await container.exec(['apt-get', 'update']);
-    await container.exec(['apt-get', 'install', '-y', 'git']);
+    await exec(['apt-get', 'update']);
+    await exec(['apt-get', 'install', '-y', 'git']);
     
     // Configure Git (required for TGP tests)
-    await container.exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
-    await container.exec(['git', 'config', '--global', 'user.name', 'Test User']);
+    await exec(['git', 'config', '--global', 'user.email', 'test@example.com']);
+    await exec(['git', 'config', '--global', 'user.name', 'Test User']);
 
     // 4. Setup Test Project
-    await container.exec(['mkdir', '-p', '/app']);
+    await exec(['mkdir', '-p', '/app']);
     
     // Copy tarball
     console.log('[Docker] Copying artifacts...');
     await container.cp(tarballPath, '/app/tgp.tgz');
     
     // Copy tests (We only copy e2e as those are the consumer-facing tests)
-    await container.exec(['mkdir', '-p', '/app/test']);
+    await exec(['mkdir', '-p', '/app/test']);
     await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
 
     // Initialize Project & Install Package
     console.log('[Docker] Installing package...');
-    await container.exec(['bun', 'init', '-y'], { cwd: '/app' });
-    await container.exec(['bun', 'add', './tgp.tgz'], { cwd: '/app' });
+    await exec(['bun', 'init', '-y'], { cwd: '/app' });
+    await exec(['bun', 'add', './tgp.tgz'], { cwd: '/app' });
     // Install dev dependencies needed for the tests themselves
-    await container.exec(['bun', 'add', '-d', 'bun-types'], { cwd: '/app' });
+    await exec(['bun', 'add', '-d', 'bun-types'], { cwd: '/app' });
+
+    // DEBUG: Verify installation state
+    console.log('[Docker] Verifying installation...');
+    await exec(['cat', 'package.json'], { cwd: '/app' });
+    await exec(['ls', '-F', 'node_modules'], { cwd: '/app' });
 
     // 5. Patch Test Files
     console.log('[Docker] Patching tests to use installed package...');
@@ -173,19 +188,46 @@ describe('Docker: NPM Compatibility', () => {
     // Patch scenarios.test.ts to import from 'tool-generation-protocol' instead of relative paths
     // Regex matches ../../src/... paths
     const sedCmd = `sed -i "s|\\.\\./\\.\\./src/[a-zA-Z0-9/._-]*|tool-generation-protocol|g" /app/test/e2e/scenarios.test.ts`;
-    await container.exec(['bash', '-c', sedCmd]);
+    await exec(['bash', '-c', sedCmd]);
 
     // 6. Run Tests
     console.log('[Docker] Running Tests...');
     const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts'], { cwd: '/app' });
     
-    if (res.exitCode !== 0) {
-        console.error('STDOUT:', res.stdout);
-        console.error('STDERR:', res.stderr);
+    const output = res.stdout + res.stderr;
+    
+    // Strict Verification: Parse the output for test counts
+    // We strip ANSI codes just in case bun outputs colors
+    // eslint-disable-next-line no-control-regex
+    const cleanOutput = output.replace(/\u001b\[.*?m/g, ''); 
+
+    const passMatch = cleanOutput.match(/(\d+)\s+pass/);
+    const failMatch = cleanOutput.match(/(\d+)\s+fail/);
+
+    if (!passMatch || !failMatch) {
+        console.error('--------------- CONTAINER OUTPUT ---------------');
+        console.error(output);
+        console.error('------------------------------------------------');
+        throw new Error('Could not parse test runner output. The test runner might have crashed or output format changed.');
+    }
+
+    const passCount = parseInt(passMatch[1], 10);
+    const failCount = parseInt(failMatch[1], 10);
+
+    // EXPLICIT LOGGING: Prove to the user that tests actually ran inside
+    console.log(`[Docker] Inner Test Verification: ${passCount} passed, ${failCount} failed.`);
+
+    if (res.exitCode !== 0 || failCount > 0 || passCount === 0) {
+        console.error('--------------- TEST FAILURE ---------------');
+        console.error(`Exit Code: ${res.exitCode}`);
+        console.error(`Pass: ${passCount}, Fail: ${failCount}`);
+        console.error('--------------- CONTAINER OUTPUT ---------------');
+        console.error(output);
+        console.error('------------------------------------------------');
     }
 
     expect(res.exitCode).toBe(0);
-    const output = res.stdout + res.stderr;
-    expect(output.toLowerCase()).toContain('pass');
+    expect(failCount).toBe(0);
+    expect(passCount).toBeGreaterThan(0);
   }, TIMEOUT);
 });
