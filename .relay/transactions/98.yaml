@@ -1,52 +1,330 @@
-uuid: c2d3e4f5-a6b7-48c9-9d0e-1f2a3b4c5d6e
+uuid: ca4524c5-e5f8-4dc5-b8a7-33a54b732525
 projectId: tool-generation-protocol
-createdAt: '2025-11-29T11:47:21.979Z'
-gitCommitMsg: 'test: fix e2e self-healing scenario to use compliant constants'
+createdAt: '2025-11-29T11:56:34.965Z'
+gitCommitMsg: >-
+  test: verify README standards and capabilities
+
+  - Added unit tests for static analysis (any, eval, secrets). - Added E2E test
+  for Unified Diff in Scenario 3. - Added E2E tests for Strict Typing and
+  Statelessness in Scenario 11. - Added E2E Scenario 14 for VFS Write
+  Protection.
 promptSummary: >-
-  Update Scenario 13 to use a compliant number (100) instead of a magic number
-  (10) to pass the strict validation check.
+  Verified alignment between README claims and test coverage. Expanded unit
+  tests to cover 'any', 'eval', and 'Function' validation. Updated E2E scenarios
+  to verify Unified Diff support, strict typing enforcement, and VFS write
+  protection.
 reasoning:
   - >-
-    To fix `Scenario 13` failing at the validation step after patching, I will
-    update the patched code to use a number that complies with the "No Magic
-    Numbers" standard. The validator currently allows `[0, 1, 2, -1, 100,
-    1000]`. The previous test used `10`, which triggered a violation. I will
-    switch to `100`.
+    Based on the plan, I will now update the unit and E2E tests to rigorously
+    verify the "8 Standards" and architectural capabilities (Unified Diff, VFS
+    Jail) as promised in the README.
+  - '### Step 1: Expand Unit Tests for Validation'
+  - >-
+    I will add checks for `any`, `eval`, `Function`, and hardcoded secrets to
+    `test/unit/validation.test.ts`.
+  - '### Step 2: Expand E2E Scenarios'
+  - 'I will modify `test/e2e/scenarios.test.ts` to:'
+  - 1.  Verify **Unified Diff** support in Scenario 3.
+  - 2.  Expand Scenario 11 to check **Strict Typing** and **Statelessness**.
+  - 3.  Add Scenario 14 to verify **Write Protection**.
 operations:
   - type: write
+    path: test/unit/validation.test.ts
+    content: >
+      --- test/unit/validation.test.ts
+
+      +++ test/unit/validation.test.ts
+
+      @@ -47,8 +47,36 @@
+           expect(res.errors.some((e: string) => e.includes('Magic Number'))).toBe(true);
+         });
+      +
+
+      +  it('Static Analysis: Any Keyword Forbidden', async () => {
+
+      +    const code = `export default (x: any) => x;`;
+
+      +    const res = await check(code);
+
+      +    
+
+      +    expect(res.valid).toBe(false);
+
+      +    expect(res.errors.some((e: string) => e.includes("any' is
+      prohibited"))).toBe(true);
+
+      +  });
+
+      +
+
+      +  it('Static Analysis: Eval Forbidden', async () => {
+
+      +    const code = `export default () => eval("1+1");`;
+
+      +    const res = await check(code);
+
+      +    
+
+      +    expect(res.valid).toBe(false);
+
+      +    expect(res.errors.some((e: string) => e.includes("'eval') is
+      prohibited"))).toBe(true);
+
+      +  });
+
+      +
+
+      +  it('Static Analysis: Function Constructor Forbidden', async () => {
+
+      +    const code = `export default () => new Function("return 1");`;
+
+      +    const res = await check(code);
+
+      +    
+
+      +    expect(res.valid).toBe(false);
+
+      +    expect(res.errors.some((e: string) => e.includes("'Function'
+      constructor) is prohibited"))).toBe(true);
+
+      +  });
+         
+      -  it('Static Analysis: Valid Code', async () => {
+
+      +  it('Static Analysis: Hardcoded Secrets', async () => {
+
+      +    const code = `export default () =>
+      "sk-live-1234567890abcdef12345678";`; // >24 chars, alphanumeric
+
+      +    const res = await check(code);
+
+      +    
+
+      +    expect(res.valid).toBe(false);
+
+      +    expect(res.errors.some((e: string) => e.includes("Secret
+      detected"))).toBe(true);
+
+      +  });
+
+      +
+
+      +  it('Static Analysis: Valid Code', async () => {
+           const code = `export default (args: { n: number }) => args.n * 2;`;
+           const res = await check(code);
+    patchStrategy: standard-diff
+  - type: write
     path: test/e2e/scenarios.test.ts
-    content: |
-      <<<<<<< SEARCH
-          // 3. Patch
-          await tools.apply_diff.execute({
-            path: brokenTool,
-            diff: `<<<<<<< SEARCH\nconst x = ;\n=======\nconst x = 10;\nexport default x;\n>>>>>>> REPLACE`
-          });
-          
-          // 4. Verify & Execute
-          const check = await tools.check_tool.execute({ path: brokenTool });
-          expect(check.valid).toBe(true);
-          
-          const res = await tools.exec_tool.execute({ path: brokenTool, args: {} });
-          expect(res.success).toBe(true);
-          expect(res.result).toBe(10);
-      =======
-          // 3. Patch
-          await tools.apply_diff.execute({
-            path: brokenTool,
-            diff: `<<<<<<< SEARCH\nconst x = ;\n=======\nconst x = 100;\nexport default x;\n>>>>>>> REPLACE`
-          });
-          
-          // 4. Verify & Execute
-          const check = await tools.check_tool.execute({ path: brokenTool });
-          expect(check.valid).toBe(true);
-          
-          const res = await tools.exec_tool.execute({ path: brokenTool, args: {} });
-          expect(res.success).toBe(true);
-          expect(res.result).toBe(100);
-      >>>>>>> REPLACE
-    patchStrategy: search-replace
+    content: >
+      --- test/e2e/scenarios.test.ts
+
+      +++ test/e2e/scenarios.test.ts
+
+      @@ -128,6 +128,19 @@
+       
+           res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+           expect(res.result).toBe('greetings world');
+      +
+
+      +    // Test Standard Unified Diff capability
+
+      +    // We change "greetings" to "salutations"
+
+      +    await tools.apply_diff.execute({
+
+      +      path: toolName,
+
+      +      diff: `--- tools/greet.ts
+
+      ++++ tools/greet.ts
+
+      +@@ -1,3 +1,3 @@
+
+      + export default function(args: { name: string }) {
+
+      +-  return "greetings " + args.name;
+
+      ++  return "salutations " + args.name;
+
+      + }`
+
+      +    });
+
+      +
+
+      +    res = await tools.exec_tool.execute({ path: toolName, args: { name:
+      'world' } });
+
+      +    expect(res.result).toBe('salutations world');
+         });
+       
+         it('Scenario 4: Resilience (Infinite Loop)', async () => {
+      @@ -282,7 +295,43 @@
+           check = await tools.check_tool.execute({ path: secretTool });
+           expect(check.valid).toBe(false);
+           expect(check.errors.some((e: string) => e.includes('Secret'))).toBe(true);
+      -
+
+      -    // Test 3: Valid Tool (Control)
+
+      +    
+
+      +    // Test 3: Any Keyword (Strict Typing)
+
+      +    const anyTool = 'tools/bad/lazy.ts';
+
+      +    await tools.write_file.execute({
+
+      +      path: anyTool,
+
+      +      content: `export default function(x: any) { return x; }`
+
+      +    });
+
+      +    
+
+      +    check = await tools.check_tool.execute({ path: anyTool });
+
+      +    expect(check.valid).toBe(false);
+
+      +    expect(check.errors.some((e: string) => e.includes("any' is
+      prohibited"))).toBe(true);
+
+      +
+
+      +    // Test 4: Statelessness (Process Access)
+
+      +    const stateTool = 'tools/bad/state.ts';
+
+      +    await tools.write_file.execute({
+
+      +      path: stateTool,
+
+      +      content: `export default function() { return process.cwd(); }`
+
+      +    });
+
+      +    
+
+      +    check = await tools.check_tool.execute({ path: stateTool });
+
+      +    expect(check.valid).toBe(false);
+
+      +    expect(check.errors.some((e: string) =>
+      e.includes('process'))).toBe(true);
+
+      +
+
+      +    // Test 5: Valid Tool (Control)
+           const validTool = 'tools/good/clean.ts';
+           await tools.write_file.execute({
+             path: validTool,
+      @@ -348,4 +397,18 @@
+           expect(res.success).toBe(true);
+           expect(res.result).toBe(100);
+         });
+      +
+
+      +  it('Scenario 14: Sandbox Security (Write Protection)', async () => {
+
+      +    const configPath = await createTgpConfig(tempDir, remoteRepo);
+
+      +    const kernel = new TGP({ configFile: configPath });
+
+      +    await kernel.boot();
+
+      +    const tools = tgpTools(kernel);
+
+      +
+
+      +    // Attempt to write outside the sandbox root
+
+      +    // Note: The VFS root is .tgp/. writing to ../escape.ts attempts to
+      write to tempDir/escape.ts
+
+      +    // This should be blocked by the VFS Adapter's path resolution check.
+
+      +    try {
+
+      +      await tools.write_file.execute({ path: '../escape.ts', content:
+      'hacked' });
+
+      +      expect(true).toBe(false); // Should have thrown
+
+      +    } catch (e: any) {
+
+      +      expect(e.message).toMatch(/Security Violation|outside/i);
+
+      +    }
+
+      +  });
+       });
+    patchStrategy: standard-diff
 snapshot:
+  test/unit/validation.test.ts: |-
+    import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
+    import { createValidationTools } from '../../src/tools/validation.js';
+    import { createNodeVFS } from '../../src/vfs/node.js';
+    import { createTempDir, cleanupDir } from './utils.js';
+    import { Kernel } from '../../src/kernel/core.js';
+
+    describe('Unit: Tool Validation Logic', () => {
+      let tempDir: string;
+      let kernel: Kernel;
+
+      beforeEach(async () => {
+        tempDir = await createTempDir('tgp-unit-validation-');
+        const vfs = createNodeVFS(tempDir);
+        // Stub Kernel with Real VFS
+        kernel = {
+            vfs,
+            config: { allowedImports: ['zod'] }
+        } as unknown as Kernel;
+      });
+
+      afterEach(async () => {
+        await cleanupDir(tempDir);
+      });
+
+      // Helper to run validation
+      async function check(code: string) {
+          const path = 'test_tool.ts';
+          await kernel.vfs.writeFile(path, code);
+          const tools = createValidationTools(kernel);
+          return await tools.check_tool.execute({ path });
+      }
+
+      it('Static Analysis: Global Process Forbidden', async () => {
+        const code = `export default function() { process.exit(0); }`;
+        const res = await check(code);
+        
+        expect(res.valid).toBe(false);
+        expect(res.errors.some((e: string) => e.includes('process'))).toBe(true);
+      });
+
+      it('Static Analysis: Restricted Imports', async () => {
+        const code = `import fs from 'fs'; export default () => {};`;
+        const res = await check(code);
+        
+        expect(res.valid).toBe(false);
+        expect(res.errors.some((e: string) => e.includes('import'))).toBe(true);
+      });
+
+      it('Static Analysis: Magic Numbers', async () => {
+        const code = `export default (n: number) => n * 99;`;
+        const res = await check(code);
+        
+        expect(res.valid).toBe(false);
+        expect(res.errors.some((e: string) => e.includes('Magic Number'))).toBe(true);
+      });
+      
+      it('Static Analysis: Valid Code', async () => {
+        const code = `export default (args: { n: number }) => args.n * 2;`;
+        const res = await check(code);
+        
+        expect(res.valid).toBe(true);
+      });
+    });
   test/e2e/scenarios.test.ts: >-
     import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
 
@@ -465,22 +743,22 @@ snapshot:
         // 3. Patch
         await tools.apply_diff.execute({
           path: brokenTool,
-          diff: `<<<<<<< SEARCH\nconst x = ;\n=======\nconst x = 10;\nexport default x;\n>>>>>>> REPLACE`
+          diff: `<<<<<<< SEARCH\nconst x = ;\n=======\nconst x = 100;\nexport default x;\n>>>>>>> REPLACE`
         });
-        
+
         // 4. Verify & Execute
         const check = await tools.check_tool.execute({ path: brokenTool });
         expect(check.valid).toBe(true);
-        
+
         const res = await tools.exec_tool.execute({ path: brokenTool, args: {} });
         expect(res.success).toBe(true);
-        expect(res.result).toBe(10);
+        expect(res.result).toBe(100);
       });
     });
 approved: true
-linesAdded: 4
-linesRemoved: 4
-linesDifference: 8
-gitCommittedAt: '2025-11-29T11:47:56.821Z'
+linesAdded: 87
+linesRemoved: 1
+linesDifference: 88
+gitCommittedAt: null
 status: committed
-id: 97
+id: 98

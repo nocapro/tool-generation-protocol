@@ -53,7 +53,39 @@ describe('Unit: Tool Validation Logic', () => {
     expect(res.valid).toBe(false);
     expect(res.errors.some((e: string) => e.includes('Magic Number'))).toBe(true);
   });
+
+  it('Static Analysis: Any Keyword Forbidden', async () => {
+    const code = `export default (x: any) => x;`;
+    const res = await check(code);
+    
+    expect(res.valid).toBe(false);
+    expect(res.errors.some((e: string) => e.includes("any' is prohibited"))).toBe(true);
+  });
+
+  it('Static Analysis: Eval Forbidden', async () => {
+    const code = `export default () => eval("1+1");`;
+    const res = await check(code);
+    
+    expect(res.valid).toBe(false);
+    expect(res.errors.some((e: string) => e.includes("'eval') is prohibited"))).toBe(true);
+  });
+
+  it('Static Analysis: Function Constructor Forbidden', async () => {
+    const code = `export default () => new Function("return 1");`;
+    const res = await check(code);
+    
+    expect(res.valid).toBe(false);
+    expect(res.errors.some((e: string) => e.includes("'Function' constructor) is prohibited"))).toBe(true);
+  });
   
+  it('Static Analysis: Hardcoded Secrets', async () => {
+    const code = `export default () => "sk-live-1234567890abcdef12345678";`; // >24 chars, alphanumeric
+    const res = await check(code);
+    
+    expect(res.valid).toBe(false);
+    expect(res.errors.some((e: string) => e.includes("Secret detected"))).toBe(true);
+  });
+
   it('Static Analysis: Valid Code', async () => {
     const code = `export default (args: { n: number }) => args.n * 2;`;
     const res = await check(code);

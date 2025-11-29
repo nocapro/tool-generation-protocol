@@ -1597,165 +1597,6 @@ export function createFsTools(kernel: Kernel) {
 }
 ````
 
-## File: test/e2e/utils.ts
-````typescript
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import { spawn, execSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-
-// ESM Polyfills
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Robust Project Root Detection
-// If running from dist/test/e2e, we are 3 levels deep from root (dist/test/e2e -> dist/test -> dist -> root)
-// If running from test/e2e, we are 2 levels deep (test/e2e -> test -> root)
-const isRunningInDist = __dirname.includes(path.join('dist', 'test', 'e2e'));
-
-const projectRoot = isRunningInDist 
-  ? path.resolve(__dirname, '../../../') 
-  : path.resolve(__dirname, '../../');
-
-// Track temp dirs for cleanup
-const tempDirs: string[] = [];
-
-/**
- * Creates a unique temporary directory for a test case.
- * Registers it for auto-cleanup on process exit.
- */
-export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
-  const tmpDir = os.tmpdir();
-  const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
-  tempDirs.push(dir);
-  return dir;
-}
-
-/**
- * Recursively deletes a directory.
- */
-export async function cleanupDir(dir: string): Promise<void> {
-  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
-}
-
-/**
- * Initializes a bare Git repository at the specified path.
- * This serves as the 'Remote' for the E2E tests.
- */
-export async function initBareRepo(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
-  execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
-  
-  // Setup: Create an initial commit so all clones share a history.
-  // This prevents "fatal: refusing to merge unrelated histories" during concurrent pushes.
-  const initDir = await createTempDir('tgp-init-');
-  execSync(`git init`, { cwd: initDir, stdio: 'ignore' });
-  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
-  execSync(`git add .`, { cwd: initDir, stdio: 'ignore' });
-  execSync(`git commit -m "Initial commit"`, { cwd: initDir, stdio: 'ignore' });
-  execSync(`git remote add origin ${dir}`, { cwd: initDir, stdio: 'ignore' });
-  execSync(`git push origin master:main`, { cwd: initDir, stdio: 'ignore' }); // push master to main
-  await cleanupDir(initDir);
-
-  execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
-}
-
-/**
- * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
- * We use an absolute path for rootDir to ensure tests don't pollute the project root.
- */
-export async function createTgpConfig(
-  workDir: string, 
-  remoteRepo: string, 
-  options: { fileName?: string, writeStrategy?: 'direct' | 'pr' } = {}
-): Promise<string> {
-    const fileName = options.fileName ?? 'tgp.config.js';
-    const writeStrategy = options.writeStrategy ?? 'direct';
-    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
-    const remotePath = remoteRepo.split(path.sep).join('/');
-    const allowedDir = workDir.split(path.sep).join('/');
-
-    // Resolve import source: prefer dist (prod behavior), fallback to source (test/dev behavior)
-    const distConfigPath = path.join(projectRoot, 'dist/src/config.js');
-    let importSource = distConfigPath;
-
-    try {
-      await fs.access(distConfigPath);
-    } catch {
-      // Dist missing, fallback to source
-      importSource = path.join(projectRoot, 'src/config.ts');
-    }
-    
-    // Normalize path for string interpolation
-    importSource = importSource.split(path.sep).join('/');
-
-    const configContent = `
-import { defineTGPConfig } from '${importSource}';
-
-export default defineTGPConfig({
-  rootDir: '${rootDir}',
-  git: {
-    provider: 'local',
-    repo: '${remotePath}',
-    branch: 'main',
-    auth: { token: 'mock', user: 'test', email: 'test@example.com' },
-    writeStrategy: '${writeStrategy}'
-  },
-  fs: {
-    allowedDirs: ['${allowedDir}', '${os.tmpdir().split(path.sep).join('/')}'],
-    blockUpwardTraversal: false
-  },
-  allowedImports: ['zod', 'date-fns']
-});
-`;
-    const configPath = path.join(workDir, fileName);
-    await fs.writeFile(configPath, configContent);
-    return configPath;
-}
-
-/**
- * Executes the TGP CLI binary in the given directory.
- */
-export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
-    return new Promise(async (resolve) => {
-        const distCli = path.join(projectRoot, 'dist/cli.js');
-        let cmd = 'node';
-        let script = path.join(projectRoot, 'bin/tgp.js');
-
-        try {
-           await fs.access(distCli);
-        } catch {
-           // Fallback to running source via Bun if build is missing
-           cmd = 'bun';
-           script = path.join(projectRoot, 'src/cli/index.ts');
-        }
-
-        const proc = spawn(cmd, [script, ...args], {
-            cwd,
-            env: { ...process.env, NODE_ENV: 'test' }
-        });
-
-        let stdout = '';
-        let stderr = '';
-
-        proc.stdout.on('data', d => stdout += d.toString());
-        proc.stderr.on('data', d => stderr += d.toString());
-
-        proc.on('close', (code) => {
-            resolve({ stdout, stderr, code: code ?? -1 });
-        });
-    });
-}
-
-// Cleanup hook
-process.on('exit', () => {
-    tempDirs.forEach(d => {
-        try { execSync(`rm -rf ${d}`); } catch {}
-    });
-});
-````
-
 ## File: test/integration/sql.test.ts
 ````typescript
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
@@ -2072,6 +1913,240 @@ export function createRegistry(vfs: VFSAdapter): Registry {
 }
 ````
 
+## File: test/e2e/utils.ts
+````typescript
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { spawn, execSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+// ESM Polyfills
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+// Robust Project Root Detection
+// If running from dist/test/e2e, we are 3 levels deep from root (dist/test/e2e -> dist/test -> dist -> root)
+// If running from test/e2e, we are 2 levels deep (test/e2e -> test -> root)
+const isRunningInDist = __dirname.includes(path.join('dist', 'test', 'e2e'));
+
+const projectRoot = isRunningInDist 
+  ? path.resolve(__dirname, '../../../') 
+  : path.resolve(__dirname, '../../');
+
+// Track temp dirs for cleanup
+const tempDirs: string[] = [];
+
+/**
+ * Creates a unique temporary directory for a test case.
+ * Registers it for auto-cleanup on process exit.
+ */
+export async function createTempDir(prefix: string = 'tgp-e2e-'): Promise<string> {
+  const tmpDir = os.tmpdir();
+  const dir = await fs.mkdtemp(path.join(tmpDir, prefix));
+  tempDirs.push(dir);
+  return dir;
+}
+
+/**
+ * Recursively deletes a directory.
+ */
+export async function cleanupDir(dir: string): Promise<void> {
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+/**
+ * Initializes a bare Git repository at the specified path.
+ * This serves as the 'Remote' for the E2E tests.
+ */
+export async function initBareRepo(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+  execSync(`git init --bare`, { cwd: dir, stdio: 'ignore' });
+  
+  // Setup: Create an initial commit so all clones share a history.
+  // This prevents "fatal: refusing to merge unrelated histories" during concurrent pushes.
+  const initDir = await createTempDir('tgp-init-');
+  execSync(`git init`, { cwd: initDir, stdio: 'ignore' });
+  await fs.writeFile(path.join(initDir, 'README.md'), '# Remote Root');
+  execSync(`git add .`, { cwd: initDir, stdio: 'ignore' });
+  execSync(`git commit -m "Initial commit"`, { cwd: initDir, stdio: 'ignore' });
+  execSync(`git remote add origin ${dir}`, { cwd: initDir, stdio: 'ignore' });
+  execSync(`git push origin master:main`, { cwd: initDir, stdio: 'ignore' }); // push master to main
+  await cleanupDir(initDir);
+
+  execSync(`git symbolic-ref HEAD refs/heads/main`, { cwd: dir, stdio: 'ignore' });
+}
+
+/**
+ * Generates a tgp.config.ts file in the test directory pointing to the local bare repo.
+ * We use an absolute path for rootDir to ensure tests don't pollute the project root.
+ */
+export async function createTgpConfig(
+  workDir: string, 
+  remoteRepo: string, 
+  options: { fileName?: string, writeStrategy?: 'direct' | 'pr' } = {}
+): Promise<string> {
+    const fileName = options.fileName ?? 'tgp.config.js';
+    const writeStrategy = options.writeStrategy ?? 'direct';
+    const rootDir = path.join(workDir, '.tgp').split(path.sep).join('/');
+    const remotePath = remoteRepo.split(path.sep).join('/');
+    const allowedDir = workDir.split(path.sep).join('/');
+
+    // Resolve import source: prefer dist (prod behavior), fallback to source (test/dev behavior)
+    const distConfigPath = path.join(projectRoot, 'dist/src/config.js');
+    let importSource = distConfigPath;
+
+    try {
+      await fs.access(distConfigPath);
+    } catch {
+      // Dist missing, fallback to source
+      importSource = path.join(projectRoot, 'src/config.ts');
+    }
+    
+    // Normalize path for string interpolation
+    importSource = importSource.split(path.sep).join('/');
+
+    const configContent = `
+import { defineTGPConfig } from '${importSource}';
+
+export default defineTGPConfig({
+  rootDir: '${rootDir}',
+  git: {
+    provider: 'local',
+    repo: '${remotePath}',
+    branch: 'main',
+    auth: { token: 'mock', user: 'test', email: 'test@example.com' },
+    writeStrategy: '${writeStrategy}'
+  },
+  fs: {
+    allowedDirs: ['${allowedDir}', '${os.tmpdir().split(path.sep).join('/')}'],
+    blockUpwardTraversal: false
+  },
+  allowedImports: ['zod', 'date-fns']
+});
+`;
+    const configPath = path.join(workDir, fileName);
+    await fs.writeFile(configPath, configContent);
+    return configPath;
+}
+
+/**
+ * Executes the TGP CLI binary in the given directory.
+ */
+export function runTgpCli(args: string[], cwd: string): Promise<{ stdout: string, stderr: string, code: number }> {
+    return new Promise(async (resolve) => {
+        const distCli = path.join(projectRoot, 'dist/cli.js');
+        let cmd = 'node';
+        let script = path.join(projectRoot, 'bin/tgp.js');
+
+        try {
+           await fs.access(distCli);
+        } catch {
+           // Fallback to running source via Bun if build is missing
+           cmd = 'bun';
+           script = path.join(projectRoot, 'src/cli/index.ts');
+        }
+
+        const proc = spawn(cmd, [script, ...args], {
+            cwd,
+            env: { ...process.env, NODE_ENV: 'test' }
+        });
+
+        let stdout = '';
+        let stderr = '';
+
+        proc.stdout.on('data', d => stdout += d.toString());
+        proc.stderr.on('data', d => stderr += d.toString());
+
+        proc.on('close', (code) => {
+            resolve({ stdout, stderr, code: code ?? -1 });
+        });
+    });
+}
+
+// Cleanup hook
+process.on('exit', () => {
+    tempDirs.forEach(d => {
+        try { execSync(`rm -rf ${d}`); } catch {}
+    });
+});
+````
+
+## File: src/types.ts
+````typescript
+import { z } from 'zod';
+
+// --- Git Configuration Schema ---
+export const GitConfigSchema = z.object({
+  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
+  repo: z.string().min(1, "Repository name is required"),
+  branch: z.string().default('main'),
+  apiBaseUrl: z.string().url().default('https://api.github.com'),
+  auth: z.object({
+    token: z.string().min(1, "Git auth token is required"),
+    user: z.string().default('tgp-bot[bot]'),
+    email: z.string().email().default('tgp-bot@users.noreply.github.com'),
+  }),
+  writeStrategy: z.enum(['direct', 'pr']).default('direct'),
+});
+
+// --- Filesystem Jail Schema ---
+export const FSConfigSchema = z.object({
+  allowedDirs: z.array(z.string()).default(['./tmp']),
+  blockUpwardTraversal: z.boolean().default(true),
+});
+
+// --- Main TGP Configuration Schema ---
+export const TGPConfigSchema = z.object({
+  rootDir: z.string().default('./.tgp'),
+  git: GitConfigSchema.default({
+    provider: 'local',
+    repo: 'local',
+    auth: { token: 'local' },
+  }),
+  fs: FSConfigSchema.default({}),
+  allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
+  allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
+});
+
+// --- Inferred Static Types ---
+// We export these so the rest of the app relies on the Zod inference, 
+// ensuring types and validation never drift apart.
+export type GitConfig = z.infer<typeof GitConfigSchema>;
+export type FSConfig = z.infer<typeof FSConfigSchema>;
+export type TGPConfig = z.infer<typeof TGPConfigSchema>;
+
+/**
+ * Defines the structure for a tool file persisted in the VFS.
+ * This is what resides in ./.tgp/tools/
+ */
+export const ToolSchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  parameters: z.record(z.unknown()), // JsonSchema
+  code: z.string(), // The raw TypeScript source
+});
+
+export type ToolDefinition = z.infer<typeof ToolSchema>;
+
+export interface ToolMetadata {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface RegistryState {
+  tools: Record<string, ToolMetadata>;
+}
+
+export interface Logger {
+  debug(message: string, ...args: any[]): void;
+  info(message: string, ...args: any[]): void;
+  warn(message: string, ...args: any[]): void;
+  error(message: string, ...args: any[]): void;
+}
+````
+
 ## File: test/docker/npm-compat.test.ts
 ````typescript
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from 'bun:test';
@@ -2327,81 +2402,6 @@ describe('Docker: NPM Compatibility', () => {
     expect(passCount).toBeGreaterThan(0);
   }, TIMEOUT);
 });
-````
-
-## File: src/types.ts
-````typescript
-import { z } from 'zod';
-
-// --- Git Configuration Schema ---
-export const GitConfigSchema = z.object({
-  provider: z.enum(['github', 'gitlab', 'bitbucket', 'local']),
-  repo: z.string().min(1, "Repository name is required"),
-  branch: z.string().default('main'),
-  apiBaseUrl: z.string().url().default('https://api.github.com'),
-  auth: z.object({
-    token: z.string().min(1, "Git auth token is required"),
-    user: z.string().default('tgp-bot[bot]'),
-    email: z.string().email().default('tgp-bot@users.noreply.github.com'),
-  }),
-  writeStrategy: z.enum(['direct', 'pr']).default('direct'),
-});
-
-// --- Filesystem Jail Schema ---
-export const FSConfigSchema = z.object({
-  allowedDirs: z.array(z.string()).default(['./tmp']),
-  blockUpwardTraversal: z.boolean().default(true),
-});
-
-// --- Main TGP Configuration Schema ---
-export const TGPConfigSchema = z.object({
-  rootDir: z.string().default('./.tgp'),
-  git: GitConfigSchema.default({
-    provider: 'local',
-    repo: 'local',
-    auth: { token: 'local' },
-  }),
-  fs: FSConfigSchema.default({}),
-  allowedImports: z.array(z.string()).default(['@tgp/std', 'zod', 'date-fns']),
-  allowedFetchUrls: z.array(z.string()).optional().describe('Whitelist of URL prefixes the sandbox fetch can access.'),
-});
-
-// --- Inferred Static Types ---
-// We export these so the rest of the app relies on the Zod inference, 
-// ensuring types and validation never drift apart.
-export type GitConfig = z.infer<typeof GitConfigSchema>;
-export type FSConfig = z.infer<typeof FSConfigSchema>;
-export type TGPConfig = z.infer<typeof TGPConfigSchema>;
-
-/**
- * Defines the structure for a tool file persisted in the VFS.
- * This is what resides in ./.tgp/tools/
- */
-export const ToolSchema = z.object({
-  name: z.string(),
-  description: z.string(),
-  parameters: z.record(z.unknown()), // JsonSchema
-  code: z.string(), // The raw TypeScript source
-});
-
-export type ToolDefinition = z.infer<typeof ToolSchema>;
-
-export interface ToolMetadata {
-  name: string;
-  description: string;
-  path: string;
-}
-
-export interface RegistryState {
-  tools: Record<string, ToolMetadata>;
-}
-
-export interface Logger {
-  debug(message: string, ...args: any[]): void;
-  info(message: string, ...args: any[]): void;
-  warn(message: string, ...args: any[]): void;
-  error(message: string, ...args: any[]): void;
-}
 ````
 
 ## File: src/cli/init.ts
@@ -2849,6 +2849,204 @@ Your goal is to build, validate, and execute tools to solve the user's request.
 }
 ````
 
+## File: src/kernel/core.ts
+````typescript
+/* eslint-disable no-console */
+import { TGPConfig, Logger } from '../types.js';
+import { VFSAdapter } from '../vfs/types.js';
+import { createGitBackend, GitBackend, GitDependencies } from './git.js';
+import { createRegistry, Registry } from './registry.js';
+
+// We inject the platform-specific environment dependencies here.
+// This allows the Kernel to run in Node, Edge, or Browser environments.
+export interface KernelEnvironment extends GitDependencies {
+  // We can extend this if Kernel needs more platform specific components later
+}
+
+export interface KernelOptions {
+  config: TGPConfig;
+  vfs: VFSAdapter; 
+  env: KernelEnvironment;
+  logger?: Logger;
+  sandboxAPI?: Record<string, unknown>;
+}
+
+export interface Kernel {
+  boot(): Promise<void>;
+  shutdown(): Promise<void>;
+  config: TGPConfig;
+  vfs: VFSAdapter;
+  git: GitBackend;
+  registry: Registry;
+  logger: Logger;
+  sandboxAPI: Record<string, unknown>;
+}
+
+const defaultLogger: Logger = {
+  debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
+  info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
+  warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
+  error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
+};
+
+/**
+ * Factory to create a TGP Kernel.
+ * This wires up the configuration, the filesystem, and the git backend.
+ */
+export function createKernel(opts: KernelOptions): Kernel {
+  const { config, vfs, env, sandboxAPI } = opts;
+  const logger = opts.logger ?? defaultLogger;
+  
+  const git = createGitBackend(env, config, logger);
+  const registry = createRegistry(vfs);
+  const api = sandboxAPI ?? {};
+
+  let isBooted = false;
+
+  return {
+    config,
+    vfs,
+    git,
+    registry,
+    logger,
+    sandboxAPI: api,
+
+    async boot() {
+      if (isBooted) return;
+      logger.info(`Kernel booting...`);
+      
+      try {
+        // Hydrate the filesystem from Git
+        await git.hydrate().catch(err => {
+          logger.error(`Git hydration failed.`, err);
+          throw err;
+        });
+        
+        // Hydrate registry from meta.json
+        await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
+        
+        isBooted = true;
+        logger.info(`Kernel ready.`);
+      } catch (error) {
+        logger.error(`Boot failed:`, error);
+        throw error;
+      }
+    },
+
+    async shutdown() {
+      logger.info(`Kernel shutting down...`);
+      // Cleanup tasks (close db connections, etc) can go here
+      isBooted = false;
+    }
+  };
+}
+````
+
+## File: src/sandbox/bridge.ts
+````typescript
+/* eslint-disable no-console */
+import { Kernel } from '../kernel/core.js';
+import * as path from 'path';
+import { TGPConfig } from '../types.js';
+
+export interface SandboxBridgeOptions {
+  kernel: {
+    vfs: Kernel['vfs'];
+    config: TGPConfig;
+    sandboxAPI: Kernel['sandboxAPI'];
+  };
+  onLog?: (message: string) => void;
+}
+
+/**
+ * Creates the Bridge Object exposed to the Sandbox.
+ * This maps secure Kernel methods to the Guest environment.
+ * 
+ * We expose a structured 'tgp' object to the guest.
+ */
+export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
+  const { vfs, config } = kernel;
+  const { allowedDirs } = config.fs;
+  const { allowedFetchUrls } = config;
+
+  const isAllowedWrite = (target: string): boolean => {
+    // Normalize target to ensure clean comparison (remove leading ./, etc)
+    const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
+
+    return allowedDirs.some(dir => {
+      const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
+      // Check if target is inside the allowed dir
+      return normalizedTarget.startsWith(normalizedDir);
+    });
+  };
+
+  // Build the tgp bridge object with explicit handling of sandboxAPI functions
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const tgpBridge: Record<string, any> = {
+    // --- Filesystem Bridge (Jailed) ---
+    read_file: async (path: string) => {
+      return vfs.readFile(path);
+    },
+
+    write_file: async (path: string, content: string) => {
+      if (!isAllowedWrite(path)) {
+        throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
+      }
+      return vfs.writeFile(path, content);
+    },
+
+    list_files: async (dir: string) => {
+      return vfs.listFiles(dir, false);
+    },
+
+    // --- Network Bridge (Allowed Only) ---
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    fetch: async (url: string, init?: any) => {
+      // Security: Enforce URL allow-list
+      if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
+        throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
+      }
+      const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
+      if (!isAllowed) {
+        throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
+      }
+
+      const response = await fetch(url, init);
+
+      // Return a serializable, safe subset of the Response object.
+      // The methods must be wrapped to be transferred correctly.
+      return {
+        status: response.status,
+        statusText: response.statusText,
+        headers: Object.fromEntries(response.headers.entries()),
+        text: () => response.text(),
+        json: () => response.json(),
+      };
+    },
+
+    // --- Logger ---
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    log: (...args: any[]) => {
+      const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+      if (onLog) {
+          onLog(msg);
+      } else {
+          console.log('[TGP-TOOL]', msg);
+      }
+    },
+  };
+
+  // Explicitly add sandboxAPI functions to preserve their function nature
+  for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
+    tgpBridge[key] = value;
+  }
+
+  return {
+    tgp: tgpBridge
+  };
+}
+````
+
 ## File: test/e2e/scenarios.test.ts
 ````typescript
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
@@ -3259,216 +3457,18 @@ export default function(args: { name: string }) {
     // 3. Patch
     await tools.apply_diff.execute({
       path: brokenTool,
-      diff: `<<<<<<< SEARCH\nconst x = ;\n=======\nconst x = 10;\nexport default x;\n>>>>>>> REPLACE`
+      diff: `<<<<<<< SEARCH\nconst x = ;\n=======\nconst x = 100;\nexport default x;\n>>>>>>> REPLACE`
     });
-    
+
     // 4. Verify & Execute
     const check = await tools.check_tool.execute({ path: brokenTool });
     expect(check.valid).toBe(true);
-    
+
     const res = await tools.exec_tool.execute({ path: brokenTool, args: {} });
     expect(res.success).toBe(true);
-    expect(res.result).toBe(10);
+    expect(res.result).toBe(100);
   });
 });
-````
-
-## File: src/kernel/core.ts
-````typescript
-/* eslint-disable no-console */
-import { TGPConfig, Logger } from '../types.js';
-import { VFSAdapter } from '../vfs/types.js';
-import { createGitBackend, GitBackend, GitDependencies } from './git.js';
-import { createRegistry, Registry } from './registry.js';
-
-// We inject the platform-specific environment dependencies here.
-// This allows the Kernel to run in Node, Edge, or Browser environments.
-export interface KernelEnvironment extends GitDependencies {
-  // We can extend this if Kernel needs more platform specific components later
-}
-
-export interface KernelOptions {
-  config: TGPConfig;
-  vfs: VFSAdapter; 
-  env: KernelEnvironment;
-  logger?: Logger;
-  sandboxAPI?: Record<string, unknown>;
-}
-
-export interface Kernel {
-  boot(): Promise<void>;
-  shutdown(): Promise<void>;
-  config: TGPConfig;
-  vfs: VFSAdapter;
-  git: GitBackend;
-  registry: Registry;
-  logger: Logger;
-  sandboxAPI: Record<string, unknown>;
-}
-
-const defaultLogger: Logger = {
-  debug: (msg, ...args) => console.debug(`[TGP] ${msg}`, ...args),
-  info: (msg, ...args) => console.log(`[TGP] ${msg}`, ...args),
-  warn: (msg, ...args) => console.warn(`[TGP] ${msg}`, ...args),
-  error: (msg, ...args) => console.error(`[TGP] ${msg}`, ...args),
-};
-
-/**
- * Factory to create a TGP Kernel.
- * This wires up the configuration, the filesystem, and the git backend.
- */
-export function createKernel(opts: KernelOptions): Kernel {
-  const { config, vfs, env, sandboxAPI } = opts;
-  const logger = opts.logger ?? defaultLogger;
-  
-  const git = createGitBackend(env, config, logger);
-  const registry = createRegistry(vfs);
-  const api = sandboxAPI ?? {};
-
-  let isBooted = false;
-
-  return {
-    config,
-    vfs,
-    git,
-    registry,
-    logger,
-    sandboxAPI: api,
-
-    async boot() {
-      if (isBooted) return;
-      logger.info(`Kernel booting...`);
-      
-      try {
-        // Hydrate the filesystem from Git
-        await git.hydrate().catch(err => {
-          logger.error(`Git hydration failed.`, err);
-          throw err;
-        });
-        
-        // Hydrate registry from meta.json
-        await registry.hydrate().catch(err => logger.warn(`Registry hydration warning:`, err));
-        
-        isBooted = true;
-        logger.info(`Kernel ready.`);
-      } catch (error) {
-        logger.error(`Boot failed:`, error);
-        throw error;
-      }
-    },
-
-    async shutdown() {
-      logger.info(`Kernel shutting down...`);
-      // Cleanup tasks (close db connections, etc) can go here
-      isBooted = false;
-    }
-  };
-}
-````
-
-## File: src/sandbox/bridge.ts
-````typescript
-/* eslint-disable no-console */
-import { Kernel } from '../kernel/core.js';
-import * as path from 'path';
-import { TGPConfig } from '../types.js';
-
-export interface SandboxBridgeOptions {
-  kernel: {
-    vfs: Kernel['vfs'];
-    config: TGPConfig;
-    sandboxAPI: Kernel['sandboxAPI'];
-  };
-  onLog?: (message: string) => void;
-}
-
-/**
- * Creates the Bridge Object exposed to the Sandbox.
- * This maps secure Kernel methods to the Guest environment.
- * 
- * We expose a structured 'tgp' object to the guest.
- */
-export function createSandboxBridge({ kernel, onLog }: SandboxBridgeOptions) {
-  const { vfs, config } = kernel;
-  const { allowedDirs } = config.fs;
-  const { allowedFetchUrls } = config;
-
-  const isAllowedWrite = (target: string): boolean => {
-    // Normalize target to ensure clean comparison (remove leading ./, etc)
-    const normalizedTarget = path.normalize(target).replace(/^(\.\/)/, '');
-
-    return allowedDirs.some(dir => {
-      const normalizedDir = path.normalize(dir).replace(/^(\.\/)/, '');
-      // Check if target is inside the allowed dir
-      return normalizedTarget.startsWith(normalizedDir);
-    });
-  };
-
-  // Build the tgp bridge object with explicit handling of sandboxAPI functions
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const tgpBridge: Record<string, any> = {
-    // --- Filesystem Bridge (Jailed) ---
-    read_file: async (path: string) => {
-      return vfs.readFile(path);
-    },
-
-    write_file: async (path: string, content: string) => {
-      if (!isAllowedWrite(path)) {
-        throw new Error(`Security Violation: Write access denied for '${path}'. Allowed directories: ${allowedDirs.join(', ')}`);
-      }
-      return vfs.writeFile(path, content);
-    },
-
-    list_files: async (dir: string) => {
-      return vfs.listFiles(dir, false);
-    },
-
-    // --- Network Bridge (Allowed Only) ---
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    fetch: async (url: string, init?: any) => {
-      // Security: Enforce URL allow-list
-      if (!allowedFetchUrls || allowedFetchUrls.length === 0) {
-        throw new Error(`Security Violation: Network access is disabled. No URLs are whitelisted in tgp.config.ts.`);
-      }
-      const isAllowed = allowedFetchUrls.some(prefix => url.startsWith(prefix));
-      if (!isAllowed) {
-        throw new Error(`Security Violation: URL "${url}" is not in the allowed list.`);
-      }
-
-      const response = await fetch(url, init);
-
-      // Return a serializable, safe subset of the Response object.
-      // The methods must be wrapped to be transferred correctly.
-      return {
-        status: response.status,
-        statusText: response.statusText,
-        headers: Object.fromEntries(response.headers.entries()),
-        text: () => response.text(),
-        json: () => response.json(),
-      };
-    },
-
-    // --- Logger ---
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    log: (...args: any[]) => {
-      const msg = args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
-      if (onLog) {
-          onLog(msg);
-      } else {
-          console.log('[TGP-TOOL]', msg);
-      }
-    },
-  };
-
-  // Explicitly add sandboxAPI functions to preserve their function nature
-  for (const [key, value] of Object.entries(kernel.sandboxAPI)) {
-    tgpBridge[key] = value;
-  }
-
-  return {
-    tgp: tgpBridge
-  };
-}
 ````
 
 ## File: README.md
@@ -3736,6 +3736,231 @@ We are hacking on the future of backend development.
 ```
 ````
 
+## File: src/sandbox/execute.ts
+````typescript
+import { Kernel } from '../kernel/core.js';
+import { createSandbox } from './isolate.js';
+import { createSandboxBridge } from './bridge.js';
+import { bundleDependencySync } from './bundler.js';
+import { transformSync } from 'esbuild';
+import * as path from 'path';
+
+export interface ExecutionResult {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  result: any;
+  logs: string[];
+  error?: string;
+}
+
+/**
+ * Resolves a module path within the VFS using standard Node.js resolution logic.
+ * Checks: path, path.ts, path.js, path/index.ts, path/index.js
+ */
+function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath: string): string | null {
+  const candidates: string[] = [];
+  
+  // Resolve absolute path based on import type
+  // If it starts with '/', it's absolute (from VFS root).
+  // Otherwise, it's relative to baseDir.
+  const target = importPath.startsWith('/') 
+    ? importPath 
+    : path.join(baseDir, importPath);
+
+  // 1. Exact match (e.g. require('./foo.ts'))
+  candidates.push(target);
+  
+  // 2. Extensions (e.g. require('./foo'))
+  candidates.push(`${target}.ts`);
+  candidates.push(`${target}.js`);
+  
+  // 3. Directory Indices
+  candidates.push(path.join(target, 'index.ts'));
+  candidates.push(path.join(target, 'index.js'));
+
+  for (const c of candidates) {
+    try {
+      // Synchronous check is required for the sync require shim
+      vfs.readSync(c);
+      return c;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Executes a tool script within a secure sandbox.
+ * 
+ * @param kernel The TGP Kernel instance
+ * @param code The TypeScript source code of the tool
+ * @param args The arguments object to pass to the tool (as 'args' global)
+ * @param filePath Optional path of the tool being executed (used for relative imports)
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<ExecutionResult> {
+  const sandbox = createSandbox({
+    memoryLimitMb: 128,
+    timeoutMs: 5000 // 5s hard limit
+  });
+  
+  const logs: string[] = [];
+
+  try {
+    // 1. Setup Bridge
+    // We pass the kernel directly.
+    const bridge = createSandboxBridge({
+      kernel,
+      onLog: (msg) => logs.push(msg)
+    });
+
+    // 2. Module Orchestration (The 'require' Bridge)
+    // This host function is called synchronously from the Guest.
+    const __tgp_load_module = (baseDir: string, importId: string) => {
+      // 1. Handle whitelisted node modules (bare specifiers)
+      if (!importId.startsWith('.') && !importId.startsWith('/')) {
+        if (!kernel.config.allowedImports.includes(importId)) {
+          throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
+        }
+        try {
+          const bundledCode = bundleDependencySync(importId);
+          return {
+            code: bundledCode,
+            path: `/__node_modules__/${importId}`, // Virtual path for caching
+            dirname: `/__node_modules__`,
+          };
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
+        }
+      }
+
+      // 2. Resolve Local Modules (VFS)
+      const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
+
+      if (resolvedPath === null) {
+        throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
+      }
+
+      try {
+        const raw = kernel.vfs.readSync(resolvedPath);
+        const transformed = transformSync(raw, {
+          loader: 'ts',
+          format: 'cjs',
+          target: 'es2020',
+        });
+        
+        return {
+          code: transformed.code,
+          path: resolvedPath,
+          dirname: path.dirname(resolvedPath)
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
+      }
+    };
+
+    // 3. Shim Injection
+    // We prepend a CommonJS loader shim to the user code.
+    // This allows 'require' to work by calling back to the host via __tgp_load_module.
+    // It includes a cache to prevent reloading the same module within a single execution.
+    const shim = `
+      const __moduleCache = {};
+
+      function __makeRequire(baseDir) {
+        return function(id) {
+          // HOST INTERACTION: Resolve module path and get its source code from the host.
+          // This is a synchronous call to the Node.js environment.
+          
+          let mod;
+          if (typeof __tgp_load_module.applySync === 'function') {
+             mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
+          } else {
+             mod = __tgp_load_module(baseDir, id);
+          }
+
+          // CACHE CHECK: If the module has already been loaded, return it from the cache.
+          if (__moduleCache[mod.path]) {
+            return __moduleCache[mod.path].exports;
+          }
+
+          // MODULE EXECUTION: If it's a new module, execute its code.
+          const newModule = { exports: {} };
+
+          // Before executing, store the module object in the cache to handle circular dependencies.
+          __moduleCache[mod.path] = newModule;
+
+          // We provide the module with its own 'exports' object, a 'require' function
+          // scoped to its own directory, and other CommonJS globals.
+          const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
+
+          // Execute the module's code.
+          fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
+
+          // The 'newModule.exports' object is now populated.
+          return newModule.exports;
+        };
+      }
+    `;
+
+    const context = {
+      ...bridge, // { tgp: { ... } }
+      args,
+      __tgp_load_module // Injected as Reference
+    };
+
+    // 1. Transform user code to CJS explicitly
+    // We do this to ensure we can wrap it safely without worrying about top-level imports in the final string
+    const { code: cjsCode } = transformSync(code, {
+      loader: 'ts',
+      format: 'cjs',
+      target: 'es2020',
+    });
+
+    // 2. Construct the Execution Harness
+    const script = `
+      ${shim}
+
+      // Setup CJS Environment for the entry point
+      const __module = { exports: {} };
+      const __exports = __module.exports;
+      const __require = __makeRequire('${path.dirname(filePath)}');
+      const __filename = '${filePath}';
+      const __dirname = '${path.dirname(filePath)}';
+
+      // Assign to global for unexpected access patterns
+      global.module = __module;
+      global.exports = __exports;
+      global.require = __require;
+
+      // Execute User Code
+      (function(exports, require, module, __filename, __dirname) {
+        ${cjsCode}
+      })(__exports, __require, __module, __filename, __dirname);
+
+      // Run Default Export
+      const __main = __module.exports.default || __module.exports;
+      if (typeof __main === 'function') {
+         __main(args);
+      } else {
+         __main;
+      }
+    `;
+
+    const result = await sandbox.compileAndRun(script, context);
+    return { result, logs };
+
+  } catch (error) {
+    const errMsg = error instanceof Error ? error.message : String(error);
+    kernel.logger.error(`Tool Execution Failed:`, error);
+    return { result: null, logs, error: errMsg };
+  } finally {
+    sandbox.dispose();
+  }
+}
+````
+
 ## File: src/tools/validation.ts
 ````typescript
 import { z } from 'zod';
@@ -3768,6 +3993,16 @@ export function createValidationTools(kernel: Kernel) {
           );
 
           const errors: string[] = [];
+
+          // 0. Syntax Validation (Parse Diagnostics)
+          // ts.createSourceFile attaches parse diagnostics for syntax errors (e.g. missing tokens)
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const diagnostics = (sourceFile as any).parseDiagnostics;
+          if (diagnostics && Array.isArray(diagnostics)) {
+            for (const diag of diagnostics) {
+              errors.push(`Syntax Error: ${ts.flattenDiagnosticMessageText(diag.messageText, '\n')}`);
+            }
+          }
 
           // 2. Recursive AST Visitor
           const visit = (node: ts.Node) => {
@@ -4241,231 +4476,6 @@ export function createGitBackend(deps: GitDependencies, config: TGPConfig, logge
       return strategy.persist(message, filesToAdd);
     }
   };
-}
-````
-
-## File: src/sandbox/execute.ts
-````typescript
-import { Kernel } from '../kernel/core.js';
-import { createSandbox } from './isolate.js';
-import { createSandboxBridge } from './bridge.js';
-import { bundleDependencySync } from './bundler.js';
-import { transformSync } from 'esbuild';
-import * as path from 'path';
-
-export interface ExecutionResult {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  result: any;
-  logs: string[];
-  error?: string;
-}
-
-/**
- * Resolves a module path within the VFS using standard Node.js resolution logic.
- * Checks: path, path.ts, path.js, path/index.ts, path/index.js
- */
-function resolveVfsPath(vfs: Kernel['vfs'], baseDir: string, importPath: string): string | null {
-  const candidates: string[] = [];
-  
-  // Resolve absolute path based on import type
-  // If it starts with '/', it's absolute (from VFS root).
-  // Otherwise, it's relative to baseDir.
-  const target = importPath.startsWith('/') 
-    ? importPath 
-    : path.join(baseDir, importPath);
-
-  // 1. Exact match (e.g. require('./foo.ts'))
-  candidates.push(target);
-  
-  // 2. Extensions (e.g. require('./foo'))
-  candidates.push(`${target}.ts`);
-  candidates.push(`${target}.js`);
-  
-  // 3. Directory Indices
-  candidates.push(path.join(target, 'index.ts'));
-  candidates.push(path.join(target, 'index.js'));
-
-  for (const c of candidates) {
-    try {
-      // Synchronous check is required for the sync require shim
-      vfs.readSync(c);
-      return c;
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-
-/**
- * Executes a tool script within a secure sandbox.
- * 
- * @param kernel The TGP Kernel instance
- * @param code The TypeScript source code of the tool
- * @param args The arguments object to pass to the tool (as 'args' global)
- * @param filePath Optional path of the tool being executed (used for relative imports)
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-export async function executeTool(kernel: Kernel, code: string, args: Record<string, any> = {}, filePath: string = 'root.ts'): Promise<ExecutionResult> {
-  const sandbox = createSandbox({
-    memoryLimitMb: 128,
-    timeoutMs: 5000 // 5s hard limit
-  });
-  
-  const logs: string[] = [];
-
-  try {
-    // 1. Setup Bridge
-    // We pass the kernel directly.
-    const bridge = createSandboxBridge({
-      kernel,
-      onLog: (msg) => logs.push(msg)
-    });
-
-    // 2. Module Orchestration (The 'require' Bridge)
-    // This host function is called synchronously from the Guest.
-    const __tgp_load_module = (baseDir: string, importId: string) => {
-      // 1. Handle whitelisted node modules (bare specifiers)
-      if (!importId.startsWith('.') && !importId.startsWith('/')) {
-        if (!kernel.config.allowedImports.includes(importId)) {
-          throw new Error(`Security Violation: Import of module '${importId}' is not allowed. Allowed modules are: ${kernel.config.allowedImports.join(', ')}`);
-        }
-        try {
-          const bundledCode = bundleDependencySync(importId);
-          return {
-            code: bundledCode,
-            path: `/__node_modules__/${importId}`, // Virtual path for caching
-            dirname: `/__node_modules__`,
-          };
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          throw new Error(`Failed to bundle allowed module '${importId}': ${msg}`);
-        }
-      }
-
-      // 2. Resolve Local Modules (VFS)
-      const resolvedPath = resolveVfsPath(kernel.vfs, baseDir, importId);
-
-      if (resolvedPath === null) {
-        throw new Error(`Cannot find module '${importId}' from '${baseDir}'`);
-      }
-
-      try {
-        const raw = kernel.vfs.readSync(resolvedPath);
-        const transformed = transformSync(raw, {
-          loader: 'ts',
-          format: 'cjs',
-          target: 'es2020',
-        });
-        
-        return {
-          code: transformed.code,
-          path: resolvedPath,
-          dirname: path.dirname(resolvedPath)
-        };
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`Failed to load module '${importId}' from '${baseDir}': ${msg}`);
-      }
-    };
-
-    // 3. Shim Injection
-    // We prepend a CommonJS loader shim to the user code.
-    // This allows 'require' to work by calling back to the host via __tgp_load_module.
-    // It includes a cache to prevent reloading the same module within a single execution.
-    const shim = `
-      const __moduleCache = {};
-
-      function __makeRequire(baseDir) {
-        return function(id) {
-          // HOST INTERACTION: Resolve module path and get its source code from the host.
-          // This is a synchronous call to the Node.js environment.
-          
-          let mod;
-          if (typeof __tgp_load_module.applySync === 'function') {
-             mod = __tgp_load_module.applySync(undefined, [baseDir, id]);
-          } else {
-             mod = __tgp_load_module(baseDir, id);
-          }
-
-          // CACHE CHECK: If the module has already been loaded, return it from the cache.
-          if (__moduleCache[mod.path]) {
-            return __moduleCache[mod.path].exports;
-          }
-
-          // MODULE EXECUTION: If it's a new module, execute its code.
-          const newModule = { exports: {} };
-
-          // Before executing, store the module object in the cache to handle circular dependencies.
-          __moduleCache[mod.path] = newModule;
-
-          // We provide the module with its own 'exports' object, a 'require' function
-          // scoped to its own directory, and other CommonJS globals.
-          const fun = new Function('exports', 'require', 'module', '__filename', '__dirname', mod.code);
-
-          // Execute the module's code.
-          fun(newModule.exports, __makeRequire(mod.dirname), newModule, mod.path, mod.dirname);
-
-          // The 'newModule.exports' object is now populated.
-          return newModule.exports;
-        };
-      }
-    `;
-
-    const context = {
-      ...bridge, // { tgp: { ... } }
-      args,
-      __tgp_load_module // Injected as Reference
-    };
-
-    // 1. Transform user code to CJS explicitly
-    // We do this to ensure we can wrap it safely without worrying about top-level imports in the final string
-    const { code: cjsCode } = transformSync(code, {
-      loader: 'ts',
-      format: 'cjs',
-      target: 'es2020',
-    });
-
-    // 2. Construct the Execution Harness
-    const script = `
-      ${shim}
-
-      // Setup CJS Environment for the entry point
-      const __module = { exports: {} };
-      const __exports = __module.exports;
-      const __require = __makeRequire('${path.dirname(filePath)}');
-      const __filename = '${filePath}';
-      const __dirname = '${path.dirname(filePath)}';
-
-      // Assign to global for unexpected access patterns
-      global.module = __module;
-      global.exports = __exports;
-      global.require = __require;
-
-      // Execute User Code
-      (function(exports, require, module, __filename, __dirname) {
-        ${cjsCode}
-      })(__exports, __require, __module, __filename, __dirname);
-
-      // Run Default Export
-      const __main = __module.exports.default || __module.exports;
-      if (typeof __main === 'function') {
-         __main(args);
-      } else {
-         __main;
-      }
-    `;
-
-    const result = await sandbox.compileAndRun(script, context);
-    return { result, logs };
-
-  } catch (error) {
-    const errMsg = error instanceof Error ? error.message : String(error);
-    kernel.logger.error(`Tool Execution Failed:`, error);
-    return { result: null, logs, error: errMsg };
-  } finally {
-    sandbox.dispose();
-  }
 }
 ````
 

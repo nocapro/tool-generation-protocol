@@ -145,6 +145,21 @@ export default function(args: { name: string }) {
 
     res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
     expect(res.result).toBe('greetings world');
+
+    // Test Standard Unified Diff capability
+    // We change "greetings" to "salutations"
+    await tools.apply_diff.execute({
+      path: toolName,
+      diff: `--- tools/greet.ts
+@@ -1,3 +1,3 @@
+ export default function(args: { name: string }) {
+-  return "greetings " + args.name;
++  return "salutations " + args.name;
+ }`
+    });
+
+    res = await tools.exec_tool.execute({ path: toolName, args: { name: 'world' } });
+    expect(res.result).toBe('salutations world');
   });
 
   it('Scenario 4: Resilience (Infinite Loop)', async () => {
@@ -329,8 +344,30 @@ export default function(args: { name: string }) {
     check = await tools.check_tool.execute({ path: secretTool });
     expect(check.valid).toBe(false);
     expect(check.errors.some((e: string) => e.includes('Secret'))).toBe(true);
+    
+    // Test 3: Any Keyword (Strict Typing)
+    const anyTool = 'tools/bad/lazy.ts';
+    await tools.write_file.execute({
+      path: anyTool,
+      content: `export default function(x: any) { return x; }`
+    });
+    
+    check = await tools.check_tool.execute({ path: anyTool });
+    expect(check.valid).toBe(false);
+    expect(check.errors.some((e: string) => e.includes("any' is prohibited"))).toBe(true);
 
-    // Test 3: Valid Tool (Control)
+    // Test 4: Statelessness (Process Access)
+    const stateTool = 'tools/bad/state.ts';
+    await tools.write_file.execute({
+      path: stateTool,
+      content: `export default function() { return process.cwd(); }`
+    });
+    
+    check = await tools.check_tool.execute({ path: stateTool });
+    expect(check.valid).toBe(false);
+    expect(check.errors.some((e: string) => e.includes('process'))).toBe(true);
+
+    // Test 5: Valid Tool (Control)
     const validTool = 'tools/good/clean.ts';
     await tools.write_file.execute({
       path: validTool,
@@ -416,5 +453,22 @@ export default function(args: { name: string }) {
     const res = await tools.exec_tool.execute({ path: brokenTool, args: {} });
     expect(res.success).toBe(true);
     expect(res.result).toBe(100);
+  });
+
+  it('Scenario 14: Sandbox Security (Write Protection)', async () => {
+    const configPath = await createTgpConfig(tempDir, remoteRepo);
+    const kernel = new TGP({ configFile: configPath });
+    await kernel.boot();
+    const tools = tgpTools(kernel);
+
+    // Attempt to write outside the sandbox root
+    // Note: The VFS root is .tgp/. writing to ../escape.ts attempts to write to tempDir/escape.ts
+    // This should be blocked by the VFS Adapter's path resolution check.
+    try {
+      await tools.write_file.execute({ path: '../escape.ts', content: 'hacked' });
+      expect(true).toBe(false); // Should have thrown
+    } catch (e: any) {
+      expect(e.message).toMatch(/Security Violation|outside/i);
+    }
   });
 });
