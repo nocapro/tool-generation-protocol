@@ -1,0 +1,114 @@
+uuid: 4f1a6b2c-9d8e-4f3a-8b2c-1d8e4f3a8b2c
+projectId: tool-generation-protocol
+createdAt: '2025-11-29T11:37:12.140Z'
+gitCommitMsg: >-
+  fix: expose internal modules (VFS, Sandbox, Kernel) in main entry point
+
+
+  This resolves import errors in unit tests when running against the compiled
+  package in Docker, verifying proper NPM compatibility.
+promptSummary: >-
+  Fix Docker NPM compatibility tests by exporting internal components (VFS,
+  Sandbox, Kernel) from the package entry point.
+reasoning:
+  - >-
+    The failure in the Docker NPM compatibility test indicates that the unit
+    tests, when running against the built package (`tool-generation-protocol`),
+    cannot access internal modules like `src/vfs/node.js`,
+    `src/sandbox/isolate.js`, and `src/tools/validation.js`.
+  - >-
+    The test runner inside Docker uses `sed` to replace relative imports (e.g.,
+    `../../src/vfs/node.js`) with the package name (`tool-generation-protocol`).
+    Since the package's `index.ts` does not export these components, and
+    `package.json` restricts exports to only the entry point, the imports fail
+    with `SyntaxError: Export named '...' not found`.
+  - >-
+    To fix this and ensure the package is extensible and testable as a library,
+    I will expose the VFS adapters, Kernel components, and Sandbox primitives
+    from the main entry point.
+  - '### Step 1: Export Tool Factories'
+  - >-
+    I will update `src/tools/index.ts` to export the factories (`createFsTools`,
+    `createValidationTools`, `createExecTools`) so they can be imported from the
+    package root.
+  - '### Step 2: Export Internal Modules in Entry Point'
+  - >-
+    I will update `src/index.ts` to export the VFS, Kernel, and Sandbox modules.
+    This satisfies the unit tests' requirement to access `createNodeVFS`,
+    `createSandbox`, and `Kernel`.
+operations:
+  - type: write
+    path: src/tools/index.ts
+    content: |
+      --- src/tools/index.ts
+      +++ src/tools/index.ts
+      @@ -6,6 +6,9 @@
+       export * from './types.js';
+       export * from './sql.js';
+      +export * from './fs.js';
+      +export * from './validation.js';
+      +export * from './exec.js';
+       
+       /**
+        * Generates the complete set of TGP tools (Capabilities) for a given Kernel.
+    patchStrategy: standard-diff
+  - type: write
+    path: src/index.ts
+    content: |
+      --- src/index.ts
+      +++ src/index.ts
+      @@ -5,2 +5,16 @@
+       export * from './tgp.js';
+       export * from './adapter.js';
+      +
+      +// VFS Adapters
+      +export * from './vfs/types.js';
+      +export * from './vfs/node.js';
+      +export * from './vfs/memory.js';
+      +
+      +// Kernel Components
+      +export * from './kernel/core.js';
+      +export * from './kernel/git.js';
+      +export * from './kernel/registry.js';
+      +
+      +// Sandbox Components
+      +export * from './sandbox/isolate.js';
+      +export * from './sandbox/bridge.js';
+      +export * from './sandbox/execute.js';
+    patchStrategy: standard-diff
+snapshot:
+  src/tools/index.ts: |-
+    import { Kernel } from '../kernel/core.js';
+    import { createFsTools } from './fs.js';
+    import { createValidationTools } from './validation.js';
+    import { createExecTools } from './exec.js';
+    import { ToolSet } from './types.js';
+
+    export * from './types.js';
+    export * from './sql.js';
+
+    /**
+     * Generates the complete set of TGP tools (Capabilities) for a given Kernel.
+     * These are the tools the Agent will use to build, test, and run the user-land tools.
+     */
+    export function tgpTools(kernel: Kernel): ToolSet {
+      return {
+        ...createFsTools(kernel),
+        ...createValidationTools(kernel),
+        ...createExecTools(kernel),
+      };
+    }
+  src/index.ts: |-
+    // Exporting the Core DNA for consumers
+    export * from './types.js';
+    export * from './config.js';
+    export * from './tools/index.js';
+    export * from './tgp.js';
+    export * from './adapter.js';
+approved: true
+linesAdded: 18
+linesRemoved: 0
+linesDifference: 18
+gitCommittedAt: null
+status: committed
+id: 94

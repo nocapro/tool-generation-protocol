@@ -109,7 +109,8 @@ describe('Docker: NPM Compatibility', () => {
   let container: Container;
   
   // High timeout for Docker operations
-  const TIMEOUT = 120000; 
+  // Increased to 4 minutes to allow for slow npm installs (especially native modules) in CI
+  const TIMEOUT = 240000;
 
   beforeAll(async () => {
     // 1. Build the Tarball from source
@@ -173,6 +174,7 @@ describe('Docker: NPM Compatibility', () => {
     await exec(['mkdir', '-p', '/app/test']);
     await container.cp(path.join(projectRoot, 'test/e2e'), '/app/test/e2e');
     await container.cp(path.join(projectRoot, 'test/integration'), '/app/test/integration');
+    await container.cp(path.join(projectRoot, 'test/unit'), '/app/test/unit');
     await container.cp(path.join(projectRoot, 'test/fixtures'), '/app/test/fixtures');
 
     // Initialize Project & Install Package
@@ -180,7 +182,7 @@ describe('Docker: NPM Compatibility', () => {
     await exec(['npm', 'init', '-y'], { cwd: '/app' });
     await exec(['npm', 'install', './tgp.tgz'], { cwd: '/app' });
     // Install dev dependencies needed for the tests themselves
-    await exec(['npm', 'install', '-D', 'bun-types'], { cwd: '/app' });
+    await exec(['npm', 'install', '-D', 'bun-types', 'ai'], { cwd: '/app' });
 
     // DEBUG: Verify installation state
     console.log('[Docker] Verifying installation...');
@@ -202,7 +204,7 @@ describe('Docker: NPM Compatibility', () => {
 
     // 6. Run Tests
     console.log('[Docker] Running Tests...');
-    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts', 'test/integration'], { cwd: '/app' });
+    const res = await container.exec(['bun', 'test', 'test/e2e/scenarios.test.ts', 'test/integration', 'test/unit'], { cwd: '/app' });
     
     const output = res.stdout + res.stderr;
     
