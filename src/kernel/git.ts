@@ -111,7 +111,7 @@ async function execGit(args: string[], cwd: string, logger: Logger): Promise<voi
 
 function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
   const dir = config.rootDir;
-  const { repo, branch } = config.git;
+  const { repo, branch, writeStrategy } = config.git;
 
   return {
     async hydrate() {
@@ -140,6 +140,25 @@ function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
     async persist(message: string, files: string[]) {
       if (files.length === 0) return;
       logger.info(`[Local] Persisting ${files.length} files...`);
+
+      let pushTarget = branch;
+
+      // Handle PR Strategy: Branch switching
+      if (writeStrategy === 'pr') {
+          const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+          const safeMsg = message.replace(/[^a-zA-Z0-9-]/g, '-').slice(0, 30);
+          const featureBranch = `tgp/feat-${timestamp}-${safeMsg}`;
+          
+          logger.info(`[Local] Strategy 'pr': Switching to ${featureBranch}`);
+          
+          try {
+             await execGit(['checkout', '-b', featureBranch], dir, logger);
+             pushTarget = featureBranch;
+          } catch (e) {
+             logger.warn(`[Local] Failed to create branch ${featureBranch}`, e);
+             throw new Error(`Failed to create feature branch: ${e}`);
+          }
+      }
       
       for (const f of files) {
         await execGit(['add', f], dir, logger);
@@ -154,14 +173,22 @@ function createLocalGitBackend(config: TGPConfig, logger: Logger): GitBackend {
       }
 
       try {
-          await execGit(['push', 'origin', branch], dir, logger);
-      } catch {
-          // Handle non-fast-forward by pulling first (simple auto-merge)
-          logger.warn(`[Local] Push failed. Attempting merge...`);
-          // We use standard merge (no-rebase) as it handles 'meta.json' append conflicts slightly better 
-          // in automated scenarios than rebase, which can get stuck.
-          await execGit(['pull', '--no-rebase', 'origin', branch], dir, logger);
-          await execGit(['push', 'origin', branch], dir, logger);
+          await execGit(['push', 'origin', pushTarget], dir, logger);
+
+          if (writeStrategy === 'pr') {
+             logger.info(`[Local] Pushed feature branch ${pushTarget}. (Simulated PR)`);
+          }
+      } catch (e) {
+          if (writeStrategy === 'direct') {
+             // Handle non-fast-forward by pulling first (simple auto-merge)
+             logger.warn(`[Local] Push failed. Attempting merge...`);
+             // We use standard merge (no-rebase) as it handles 'meta.json' append conflicts slightly better 
+             // in automated scenarios than rebase, which can get stuck.
+             await execGit(['pull', '--no-rebase', 'origin', branch], dir, logger);
+             await execGit(['push', 'origin', branch], dir, logger);
+          } else {
+             throw e;
+          }
       }
     }
   };
