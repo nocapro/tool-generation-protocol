@@ -36,12 +36,12 @@
   "author": "arman@noca.pro",
   "repository": {
     "type": "git",
-    "url": "https://github.com/noca-pro/tool-generation-protocol.git"
+    "url": "https://github.com/nocapro/tool-generation-protocol.git"
   },
   "bugs": {
-    "url": "https://github.com/noca-pro/tool-generation-protocol/issues"
+    "url": "https://github.com/nocapro/tool-generation-protocol/issues"
   },
-  "homepage": "https://github.com/noca-pro/tool-generation-protocol#readme",
+  "homepage": "https://github.com/nocapro/tool-generation-protocol#readme",
   "license": "MIT",
   "bin": {
     "tgp": "./bin/tgp.js"
