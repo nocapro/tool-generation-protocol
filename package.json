@@ -1,6 +1,6 @@
 {
   "name": "tool-generation-protocol",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "The Tool Generation Protocol",
   "main": "dist/index.cjs",
   "module": "dist/index.js",
